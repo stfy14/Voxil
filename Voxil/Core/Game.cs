@@ -58,7 +58,10 @@ public class Game : GameWindow
         _camera = new Camera(VectorExtensions.ToOpenTK(startPosition), Size.X / (float)Size.Y);
         _playerController = new PlayerController(_physicsWorld, _camera, startPosition);
 
-        // 5. Создаем менеджер ввода.
+        // 5. Сообщаем физическому миру, кто такой игрок
+        _physicsWorld.SetPlayerHandle(_playerController.BodyHandle);
+
+        // 6. Создаем менеджер ввода.
         _input = new InputManager();
 
         CursorState = CursorState.Grabbed;
@@ -77,9 +80,9 @@ public class Game : GameWindow
             return;
         }
 
-        _playerController.Update(_input);
+        _playerController.Update(_input, deltaTime);
         _physicsWorld.Update(deltaTime);
-        _worldManager.Update();
+        _worldManager.Update(deltaTime); // ИСПРАВЛЕНО: передаем deltaTime
 
         if (_input.IsMouseButtonPressed(MouseButton.Left))
         {
@@ -96,15 +99,8 @@ public class Game : GameWindow
 
             if (hitHandler.Hit)
             {
-                Console.WriteLine($"[Raycast] Попадание в объект.");
-                // ИСПРАВЛЕНО: hitLocation и hitNormal уже являются System.Numerics.Vector3,
-                // поэтому их можно передавать напрямую в исправленный метод DestroyVoxelAt.
                 var hitLocation = cameraPosition + lookDirection * hitHandler.T;
                 _worldManager.DestroyVoxelAt(hitHandler.Collidable, hitLocation, hitHandler.Normal);
-            }
-            else
-            {
-                Console.WriteLine("[Raycast] Промах.");
             }
         }
     }

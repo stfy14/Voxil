@@ -13,22 +13,33 @@ public class PhysicsWorld : IDisposable
     private readonly BufferPool _bufferPool;
     private readonly ThreadDispatcher _threadDispatcher;
 
+    // НОВОЕ: Храним ссылки на коллбэки
+    private NarrowPhaseCallbacks _narrowPhaseCallbacks;
+    private PoseIntegratorCallbacks _poseIntegratorCallbacks;
+
     public PhysicsWorld()
     {
         _bufferPool = new BufferPool();
         int threadCount = Math.Max(1, Environment.ProcessorCount > 4 ? Environment.ProcessorCount - 2 : Environment.ProcessorCount - 1);
         _threadDispatcher = new ThreadDispatcher(threadCount);
 
-        var narrowPhaseCallbacks = new NarrowPhaseCallbacks();
-        var poseIntegratorCallbacks = new PoseIntegratorCallbacks();
-        narrowPhaseCallbacks.Initialize(null);
-        poseIntegratorCallbacks.Initialize(null);
+        _narrowPhaseCallbacks = new NarrowPhaseCallbacks();
+        _poseIntegratorCallbacks = new PoseIntegratorCallbacks();
+        _narrowPhaseCallbacks.Initialize(null);
+        _poseIntegratorCallbacks.Initialize(null);
 
-        // Увеличиваем velocity iterations для более точной физики
-        var solveDescription = new SolveDescription(12, 2); // Было (8, 1)
-        Simulation = Simulation.Create(_bufferPool, narrowPhaseCallbacks, poseIntegratorCallbacks, solveDescription);
+        var solveDescription = new SolveDescription(12, 2);
+        Simulation = Simulation.Create(_bufferPool, _narrowPhaseCallbacks, _poseIntegratorCallbacks, solveDescription);
 
         Console.WriteLine("[PhysicsWorld] Физический мир инициализирован.");
+    }
+
+    // НОВЫЙ МЕТОД: Устанавливаем игрока (вызывается один раз после создания PlayerController)
+    public void SetPlayerHandle(BodyHandle playerHandle)
+    {
+        _narrowPhaseCallbacks.PlayerHandle = playerHandle;
+        _poseIntegratorCallbacks.PlayerHandle = playerHandle;
+        Console.WriteLine($"[PhysicsWorld] PlayerHandle установлен: {playerHandle.Value}");
     }
 
     public void Update(float deltaTime) => Simulation.Timestep(deltaTime);
@@ -48,7 +59,6 @@ public class PhysicsWorld : IDisposable
                 compoundBuilder.Add(boxShape, pose, 1);
             }
 
-            // ИСПРАВЛЕНО: Используем BuildKinematicCompound для статических тел
             compoundBuilder.BuildKinematicCompound(out var children);
             var compound = new Compound(children);
             var shapeIndex = Simulation.Shapes.Add(compound);
@@ -152,7 +162,6 @@ public class PhysicsWorld : IDisposable
 
     public bool Raycast(Vector3 origin, Vector3 direction, float maxDistance, out BodyHandle hitBody, out Vector3 hitLocation, out Vector3 hitNormal, BodyHandle bodyToIgnore = default)
     {
-        // Убедимся, что direction нормализован
         direction = Vector3.Normalize(direction);
 
         var hitHandler = new RayHitHandler
