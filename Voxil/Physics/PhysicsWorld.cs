@@ -12,37 +12,43 @@ public class PhysicsWorld : IDisposable
     public Simulation Simulation { get; }
     private readonly BufferPool _bufferPool;
     private readonly ThreadDispatcher _threadDispatcher;
-
-    // НОВОЕ: Храним ссылки на коллбэки
-    private NarrowPhaseCallbacks _narrowPhaseCallbacks;
-    private PoseIntegratorCallbacks _poseIntegratorCallbacks;
+    private readonly PlayerState _playerState = new PlayerState();
 
     public PhysicsWorld()
     {
         _bufferPool = new BufferPool();
-        int threadCount = Math.Max(1, Environment.ProcessorCount > 4 ? Environment.ProcessorCount - 2 : Environment.ProcessorCount - 1);
-        _threadDispatcher = new ThreadDispatcher(threadCount);
+        _threadDispatcher = new ThreadDispatcher(System.Math.Max(1, System.Environment.ProcessorCount > 4 ? System.Environment.ProcessorCount - 2 : System.Environment.ProcessorCount - 1));
 
-        _narrowPhaseCallbacks = new NarrowPhaseCallbacks();
-        _poseIntegratorCallbacks = new PoseIntegratorCallbacks();
-        _narrowPhaseCallbacks.Initialize(null);
-        _poseIntegratorCallbacks.Initialize(null);
+        // Создаем коллбэки и сразу передаем им ссылку на наш общий объект состояния
+        var narrowPhaseCallbacks = new NarrowPhaseCallbacks { PlayerState = _playerState };
+        var poseIntegratorCallbacks = new PoseIntegratorCallbacks { PlayerState = _playerState };
+        poseIntegratorCallbacks.Initialize(null);
 
         var solveDescription = new SolveDescription(12, 2);
-        Simulation = Simulation.Create(_bufferPool, _narrowPhaseCallbacks, _poseIntegratorCallbacks, solveDescription);
 
+        // Создаем симуляцию СРАЗУ. Больше никаких NullReferenceException.
+        Simulation = Simulation.Create(_bufferPool, narrowPhaseCallbacks, poseIntegratorCallbacks, solveDescription);
         Console.WriteLine("[PhysicsWorld] Физический мир инициализирован.");
     }
 
-    // НОВЫЙ МЕТОД: Устанавливаем игрока (вызывается один раз после создания PlayerController)
+    // Этот метод теперь просто обновляет BodyHandle в общем состоянии
     public void SetPlayerHandle(BodyHandle playerHandle)
     {
-        _narrowPhaseCallbacks.PlayerHandle = playerHandle;
-        _poseIntegratorCallbacks.PlayerHandle = playerHandle;
-        Console.WriteLine($"[PhysicsWorld] PlayerHandle установлен: {playerHandle.Value}");
+        _playerState.BodyHandle = playerHandle;
+        Console.WriteLine($"[PhysicsWorld] PlayerHandle установлен в общем состоянии: {playerHandle.Value}");
+    }
+
+    // Этот метод обновляет скорость в общем состоянии
+    public void SetPlayerGoalVelocity(Vector2 goalVelocity)
+    {
+        _playerState.GoalVelocity = goalVelocity;
     }
 
     public void Update(float deltaTime) => Simulation.Timestep(deltaTime);
+
+    // ... (весь остальной код PhysicsWorld.cs остается без изменений) ...
+    // CreateStaticVoxelBody, CreateVoxelObjectBody, UpdateVoxelObjectBody,
+    // RemoveBody, GetPose, Raycast, Dispose...
 
     public StaticHandle CreateStaticVoxelBody(Vector3 position, IList<OpenTK.Mathematics.Vector3i> voxelCoordinates)
     {

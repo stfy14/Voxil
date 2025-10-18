@@ -8,22 +8,21 @@ using System.Runtime.CompilerServices;
 public struct NarrowPhaseCallbacks : INarrowPhaseCallbacks
 {
     public SpringSettings SpringSettings;
-    public BodyHandle PlayerHandle;
+    public PlayerState PlayerState;
 
     public void Initialize(Simulation simulation)
     {
-        // ОЧЕНЬ жесткие контакты
         SpringSettings = new SpringSettings(240, 20);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public bool AllowContactGeneration(int workerIndex, CollidableReference a, CollidableReference b, ref float speculativeMargin)
     {
-        // Запрещаем коллизии игрока с осколками
         if (a.Mobility == CollidableMobility.Dynamic && b.Mobility == CollidableMobility.Dynamic)
         {
-            if ((a.BodyHandle.Value == PlayerHandle.Value) ||
-                (b.BodyHandle.Value == PlayerHandle.Value))
+            // Читаем из общего состояния
+            if ((a.BodyHandle.Value == PlayerState.BodyHandle.Value) ||
+                (b.BodyHandle.Value == PlayerState.BodyHandle.Value))
             {
                 return false;
             }
@@ -47,9 +46,9 @@ public struct NarrowPhaseCallbacks : INarrowPhaseCallbacks
     public bool ConfigureContactManifold<TManifold>(int workerIndex, CollidablePair pair, ref TManifold manifold, out PairMaterialProperties pairMaterialProperties) where TManifold : unmanaged, IContactManifold<TManifold>
     {
         bool isPlayerInvolved = (pair.A.Mobility == CollidableMobility.Dynamic &&
-                                 pair.A.BodyHandle.Value == PlayerHandle.Value) ||
-                               (pair.B.Mobility == CollidableMobility.Dynamic &&
-                                 pair.B.BodyHandle.Value == PlayerHandle.Value);
+                                  pair.A.BodyHandle.Value == PlayerState.BodyHandle.Value) ||
+                                (pair.B.Mobility == CollidableMobility.Dynamic &&
+                                  pair.B.BodyHandle.Value == PlayerState.BodyHandle.Value);
 
         if (isPlayerInvolved)
         {
