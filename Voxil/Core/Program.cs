@@ -1,4 +1,4 @@
-﻿// Program.cs
+﻿// /Core/Program.cs
 using OpenTK.Windowing.Desktop;
 using OpenTK.Mathematics;
 using System;
@@ -13,7 +13,7 @@ public static class Program
         var nativeWindowSettings = new NativeWindowSettings()
         {
             ClientSize = new Vector2i(1280, 720),
-            Title = "Voxil",
+            Title = "Voxil [Refactored]",
             APIVersion = new Version(3, 3),
         };
 

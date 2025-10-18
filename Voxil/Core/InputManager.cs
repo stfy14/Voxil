@@ -1,7 +1,6 @@
-﻿// InputManager.cs
+﻿// /Core/InputManager.cs
 using OpenTK.Windowing.GraphicsLibraryFramework;
 using OpenTK.Mathematics;
-using System.Collections.Generic;
 
 public class InputManager
 {
@@ -10,7 +9,6 @@ public class InputManager
     private Vector2 _lastMousePosition;
     private bool _firstMouseMove = true;
 
-    // Маппинг действий на клавиши (можно легко переназначить)
     public Keys MoveForward { get; set; } = Keys.W;
     public Keys MoveBackward { get; set; } = Keys.S;
     public Keys MoveLeft { get; set; } = Keys.A;
@@ -28,24 +26,19 @@ public class InputManager
         _mouseState = mouseState;
     }
 
-    // Проверка нажатия клавиш
     public bool IsKeyDown(Keys key) => _keyboardState.IsKeyDown(key);
     public bool IsKeyPressed(Keys key) => _keyboardState.IsKeyPressed(key);
 
-    // Получение направления движения (нормализованный вектор)
     public Vector2 GetMovementInput()
     {
         Vector2 movement = Vector2.Zero;
-
         if (IsKeyDown(MoveForward)) movement.Y += 1;
         if (IsKeyDown(MoveBackward)) movement.Y -= 1;
         if (IsKeyDown(MoveLeft)) movement.X -= 1;
         if (IsKeyDown(MoveRight)) movement.X += 1;
 
-        // Нормализуем, чтобы диагональное движение не было быстрее
         if (movement.LengthSquared > 0)
             movement.Normalize();
-
         return movement;
     }
 
@@ -54,7 +47,6 @@ public class InputManager
     public bool IsSprintPressed() => IsKeyDown(Sprint);
     public bool IsExitPressed() => IsKeyDown(Exit);
 
-    // Получение дельты движения мыши
     public Vector2 GetMouseDelta()
     {
         if (_firstMouseMove)
@@ -67,28 +59,8 @@ public class InputManager
         Vector2 currentPosition = new Vector2(_mouseState.X, _mouseState.Y);
         Vector2 delta = currentPosition - _lastMousePosition;
         _lastMousePosition = currentPosition;
-
         return delta * MouseSensitivity;
     }
 
-    public void ResetMouseDelta()
-    {
-        _firstMouseMove = true;
-    }
-
-    // Для UI/меню в будущем
-    public bool IsMouseButtonPressed(MouseButton button)
-    {
-        return _mouseState.IsButtonPressed(button);
-    }
-
-    public bool IsMouseButtonDown(MouseButton button)
-    {
-        return _mouseState.IsButtonDown(button);
-    }
-
-    public Vector2 GetMousePosition()
-    {
-        return new Vector2(_mouseState.X, _mouseState.Y);
-    }
+    public bool IsMouseButtonPressed(MouseButton button) => _mouseState.IsButtonPressed(button);
 }

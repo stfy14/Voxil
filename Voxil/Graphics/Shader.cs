@@ -1,4 +1,4 @@
-﻿// Shader.cs
+﻿// /Graphics/Shader.cs
 using OpenTK.Graphics.OpenGL4;
 using OpenTK.Mathematics;
 using System;
@@ -27,7 +27,6 @@ public class Shader : IDisposable
 
         Handle = LinkProgram(vertexShader, fragmentShader);
 
-        // Очистка временных ресурсов
         GL.DetachShader(Handle, vertexShader);
         GL.DetachShader(Handle, fragmentShader);
         GL.DeleteShader(vertexShader);
@@ -50,7 +49,6 @@ public class Shader : IDisposable
             string shaderTypeName = type == ShaderType.VertexShader ? "вершинного" : "фрагментного";
             throw new Exception($"Ошибка компиляции {shaderTypeName} шейдера ({path}):\n{infoLog}");
         }
-
         return shader;
     }
 
@@ -67,21 +65,18 @@ public class Shader : IDisposable
             string infoLog = GL.GetProgramInfoLog(program);
             throw new Exception($"Ошибка линковки шейдерной программы:\n{infoLog}");
         }
-
         return program;
     }
 
     private void CacheUniformLocations()
     {
         GL.GetProgram(Handle, GetProgramParameterName.ActiveUniforms, out int uniformCount);
-
         for (int i = 0; i < uniformCount; i++)
         {
             string name = GL.GetActiveUniform(Handle, i, out _, out _);
             int location = GL.GetUniformLocation(Handle, name);
             _uniformLocations[name] = location;
         }
-
         Console.WriteLine($"[Shader] Кешировано {uniformCount} uniform-переменных");
     }
 
@@ -102,7 +97,6 @@ public class Shader : IDisposable
         {
             Console.WriteLine($"[Shader] Предупреждение: uniform '{name}' не найден");
         }
-
         _uniformLocations[name] = location;
         return location;
     }
@@ -110,43 +104,30 @@ public class Shader : IDisposable
     public void SetMatrix4(string name, Matrix4 matrix)
     {
         int location = GetUniformLocation(name);
-        if (location != -1)
-        {
-            GL.UniformMatrix4(location, false, ref matrix);
-        }
+        if (location != -1) GL.UniformMatrix4(location, false, ref matrix);
     }
 
     public void SetVector3(string name, Vector3 vector)
     {
         int location = GetUniformLocation(name);
-        if (location != -1)
-        {
-            GL.Uniform3(location, vector);
-        }
+        if (location != -1) GL.Uniform3(location, vector);
     }
 
     public void SetFloat(string name, float value)
     {
         int location = GetUniformLocation(name);
-        if (location != -1)
-        {
-            GL.Uniform1(location, value);
-        }
+        if (location != -1) GL.Uniform1(location, value);
     }
 
     public void SetInt(string name, int value)
     {
         int location = GetUniformLocation(name);
-        if (location != -1)
-        {
-            GL.Uniform1(location, value);
-        }
+        if (location != -1) GL.Uniform1(location, value);
     }
 
     public void Dispose()
     {
         if (_disposed) return;
-
         GL.DeleteProgram(Handle);
         _disposed = true;
         GC.SuppressFinalize(this);
