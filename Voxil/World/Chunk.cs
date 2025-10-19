@@ -8,11 +8,12 @@ using System.Linq;
 
 public class Chunk : IDisposable
 {
-    public const int ChunkSize = 16;
+    public const int ChunkSize = 4;
     public Vector3i Position { get; }
     public WorldManager WorldManager { get; }
+    public MaterialType Material { get; private set; } = MaterialType.Dirt;
 
-    private readonly HashSet<Vector3i> _voxels = new();
+    public HashSet<Vector3i> Voxels = new();
     private VoxelObjectRenderer _renderer;
     private StaticHandle _staticHandle;
     private bool _hasStaticBody = false;
@@ -32,7 +33,7 @@ public class Chunk : IDisposable
 
     public void Generate(IWorldGenerator generator)
     {
-        generator.GenerateChunk(this, _voxels);
+        generator.GenerateChunk(this, Voxels);
         Load();
     }
 
@@ -70,7 +71,7 @@ public class Chunk : IDisposable
 
     public bool RemoveVoxelAt(Vector3i localPosition)
     {
-        if (_voxels.Remove(localPosition))
+        if (Voxels.Remove(localPosition))
         {
             if (_isLoaded)
             {
@@ -88,7 +89,7 @@ public class Chunk : IDisposable
 
     private void BuildMesh()
     {
-        VoxelMeshBuilder.GenerateMesh(_voxels, MaterialType.Dirt, out var vertices, out var colors, out var aoValues);
+        VoxelMeshBuilder.GenerateMesh(Voxels, MaterialType.Dirt, out var vertices, out var colors, out var aoValues);
         if (_renderer == null)
             _renderer = new VoxelObjectRenderer(vertices, colors, aoValues);
         else
@@ -108,10 +109,10 @@ public class Chunk : IDisposable
             _hasStaticBody = false;
         }
 
-        if (_voxels.Count > 0)
+        if (Voxels.Count > 0)
         {
             var worldPosition = (Position * ChunkSize).ToSystemNumerics();
-            _staticHandle = WorldManager.PhysicsWorld.CreateStaticVoxelBody(worldPosition, _voxels.ToList());
+            _staticHandle = WorldManager.PhysicsWorld.CreateStaticVoxelBody(worldPosition, Voxels.ToList());
             _hasStaticBody = true;
             WorldManager.RegisterChunkStatic(_staticHandle, this);
         }
@@ -161,6 +162,6 @@ public class Chunk : IDisposable
         _voxelObjects.Clear();
 
         Unload();
-        _voxels.Clear();
+        Voxels.Clear();
     }
 }

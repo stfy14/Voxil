@@ -140,31 +140,6 @@ public class WorldManager : IDisposable
         }
     }
 
-    public void Render(Shader shader, Matrix4 view, Matrix4 projection)
-    {
-        foreach (var chunk in _chunks.Values)
-        {
-            chunk.Render(shader, view, projection);
-        }
-    }
-
-    public void Dispose()
-    {
-        foreach (var vo in _bodyToVoxelObjectMap.Values)
-        {
-            QueueForRemoval(vo);
-        }
-        ProcessRemovals();
-
-        foreach (var chunk in _chunks.Values)
-        {
-            chunk.Dispose();
-        }
-        _chunks.Clear();
-        _bodyToVoxelObjectMap.Clear();
-        _staticToChunkMap.Clear();
-    }
-
     public void RegisterChunkStatic(StaticHandle handle, Chunk chunk)
     {
         _staticToChunkMap[handle] = chunk;
@@ -230,9 +205,14 @@ public class WorldManager : IDisposable
 
         if (chunk.RemoveVoxelAt(voxelToRemove))
         {
-            var voxelList = new List<Vector3i> { new(0, 0, 0) };
-            var voxelWorldPosition = chunkWorldPos + new BepuVector3(voxelToRemove.X, voxelToRemove.Y, voxelToRemove.Z);
-            _createAndAddVoxelObject(voxelList, MaterialType.Stone, voxelWorldPosition);
+            // --- СТАРЫЙ КОД (можно закомментировать или удалить) ---
+            // var voxelList = new List<Vector3i> { new(0, 0, 0) };
+            // var voxelWorldPosition = chunkWorldPos + new BepuVector3(voxelToRemove.X, voxelToRemove.Y, voxelToRemove.Z);
+            // _createAndAddVoxelObject(voxelList, MaterialType.Stone, voxelWorldPosition);
+
+            // --- НОВЫЙ ВЫЗОВ ---
+            // После успешного удаления вокселя, проверяем, не отвалилось ли что-нибудь
+            CheckForDetachedVoxelGroups(chunk, voxelToRemove);
         }
     }
 
@@ -347,5 +327,133 @@ public class WorldManager : IDisposable
             islands.Add(newIsland);
         }
         return islands;
+    }
+
+    private void CheckForDetachedVoxelGroups(Chunk sourceChunk, Vector3i removedVoxelLocalPos)
+{
+    var directions = new[]
+    {
+        new Vector3i(1, 0, 0), new Vector3i(-1, 0, 0),
+        new Vector3i(0, 1, 0), new Vector3i(0, -1, 0),
+        new Vector3i(0, 0, 1), new Vector3i(0, 0, -1)
+    };
+
+    // Проверяем каждого соседа удаленного вокселя
+    foreach (var direction in directions)
+    {
+        var neighborPos = removedVoxelLocalPos + direction;
+
+        // Получаем доступ к вокселям чанка. Для этого нужно сделать поле _voxels в Chunk "internal" или добавить public get-тер
+        // В файле Chunk.cs измените: private readonly HashSet<Vector3i> _voxels -> public readonly HashSet<Vector3i> Voxels { get; }
+        if (!sourceChunk.Voxels.Contains(neighborPos)) continue;
+
+        var visited = new HashSet<Vector3i>();
+        var queue = new Queue<Vector3i>();
+        bool isGrounded = false;
+        
+        // Лимит поиска, чтобы избежать лагов при разрушении огромных структур
+        const int searchLimit = 2000; 
+
+        queue.Enqueue(neighborPos);
+        visited.Add(neighborPos);
+
+        while (queue.Count > 0)
+        {
+            if (visited.Count > searchLimit)
+            {
+                // Если мы проверили слишком много блоков, скорее всего, это часть большой структуры.
+                // Прерываем поиск для производительности.
+                isGrounded = true; 
+                break;
+            }
+
+            var currentPos = queue.Dequeue();
+
+            // Проверка "заземления": если воксель на границе чанка, считаем его устойчивым.
+            if (currentPos.X == 0 || currentPos.X == Chunk.ChunkSize - 1 ||
+                currentPos.Y == 0 || // Y=0 - это всегда земля
+                currentPos.Z == 0 || currentPos.Z == Chunk.ChunkSize - 1)
+            {
+                isGrounded = true;
+                break; // Нашли связь с миром, эта группа не отвалится
+            }
+
+            // Добавляем соседей в очередь
+            foreach (var dir in directions)
+            {
+                var nextPos = currentPos + dir;
+                if (sourceChunk.Voxels.Contains(nextPos) && !visited.Contains(nextPos))
+                {
+                    visited.Add(nextPos);
+                    queue.Enqueue(nextPos);
+                }
+            }
+        }
+
+        // Если поиск завершился, и мы не нашли "землю", значит это плавающий остров
+        if (!isGrounded)
+        {
+            Console.WriteLine($"[WorldManager] Найдена отсоединенная группа из {visited.Count} вокселей.");
+            
+            // Создаем список вокселей для нового объекта.
+            // Координаты должны быть относительными, поэтому найдем "минимальный угол" острова.
+            var minCorner = new Vector3i(int.MaxValue);
+            foreach (var pos in visited)
+            {
+                minCorner.X = Math.Min(minCorner.X, pos.X);
+                minCorner.Y = Math.Min(minCorner.Y, pos.Y);
+                minCorner.Z = Math.Min(minCorner.Z, pos.Z);
+            }
+
+            var newObjectVoxels = new List<Vector3i>();
+            foreach (var pos in visited)
+            {
+                newObjectVoxels.Add(pos - minCorner);
+            }
+            
+            // Удаляем эти воксели из статического чанка
+            foreach (var pos in visited)
+            {
+                sourceChunk.RemoveVoxelAt(pos);
+            }
+            
+            // Определяем мировую позицию для нового физического объекта
+            var chunkWorldPos = (sourceChunk.Position * Chunk.ChunkSize).ToSystemNumerics();
+            var newObjectWorldPos = chunkWorldPos + new BepuVector3(minCorner.X, minCorner.Y, minCorner.Z);
+
+            // Создаем новый динамический объект
+            // TODO: Определять материал более осмысленно
+            _createAndAddVoxelObject(newObjectVoxels, sourceChunk.Material, newObjectWorldPos);
+
+            // Важно! После удаления группы вокселей, нужно прекратить проверку других соседей,
+            // так как они уже являются частью обработанной группы.
+            return; 
+        }
+    }
+}
+
+    public void Render(Shader shader, Matrix4 view, Matrix4 projection)
+    {
+        foreach (var chunk in _chunks.Values)
+        {
+            chunk.Render(shader, view, projection);
+        }
+    }
+
+    public void Dispose()
+    {
+        foreach (var vo in _bodyToVoxelObjectMap.Values)
+        {
+            QueueForRemoval(vo);
+        }
+        ProcessRemovals();
+
+        foreach (var chunk in _chunks.Values)
+        {
+            chunk.Dispose();
+        }
+        _chunks.Clear();
+        _bodyToVoxelObjectMap.Clear();
+        _staticToChunkMap.Clear();
     }
 }
