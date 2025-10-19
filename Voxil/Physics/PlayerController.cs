@@ -15,14 +15,19 @@ public class PlayerController
     public const float Width = 0.6f;
     public const float EyeHeight = 1.62f;
 
-    public float WalkSpeed { get; set; } = 5.0f;
-    public float SprintSpeed { get; set; } = 8.0f;
-    public float JumpVelocity { get; set; } = 6.0f;
+    public float WalkSpeed { get; set; } = 4.3f;
+    public float SprintSpeed { get; set; } = 5.6f;
+    public float JumpVelocity { get; set; } = 7.0f;
 
     public bool IsOnGround { get; private set; }
 
+    // НОВОЕ: Целевая горизонтальная скорость, которую мы передадим в физику
+    public System.Numerics.Vector2 DesiredHorizontalVelocity { get; private set; }
+
     private readonly PhysicsWorld _physicsWorld;
     private readonly Camera _camera;
+    private float _coyoteTime = 0f;
+    private const float CoyoteTimeDuration = 0.1f;
 
     public PlayerController(PhysicsWorld physicsWorld, Camera camera, System.Numerics.Vector3 startPosition)
     {
@@ -30,114 +35,81 @@ public class PlayerController
         _camera = camera;
 
         float radius = Width / 2f;
-
-        // ИСПРАВЛЕНИЕ №1: Высота цилиндра должна быть равна полной высоте игрока.
-        var shape = new Cylinder(radius, Height);
-
+        // КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: Используем капсулу вместо цилиндра!
+        var shape = new Capsule(radius, Height - 2 * radius);
         var shapeIndex = physicsWorld.Simulation.Shapes.Add(shape);
-        var activityDescription = new BodyActivityDescription(0f);
 
         var bodyDescription = BodyDescription.CreateDynamic(
             new RigidPose(startPosition),
-            new BodyInertia { InverseMass = 1f / 70f },
+            new BodyInertia { InverseMass = 1f / 70f }, // Масса 70 кг
             new CollidableDescription(shapeIndex, 0.1f),
-            activityDescription);
+            new BodyActivityDescription(0f));
 
+        // Блокируем вращение
         bodyDescription.LocalInertia.InverseInertiaTensor = default;
+
         BodyHandle = physicsWorld.Simulation.Bodies.Add(bodyDescription);
+        Console.WriteLine($"[PlayerController] Создан с BodyHandle: {BodyHandle.Value} (форма: Capsule)");
     }
 
-    private bool IsObstacleInDirection(System.Numerics.Vector3 direction)
-    {
-        var bodyReference = _physicsWorld.Simulation.Bodies.GetBodyReference(BodyHandle);
-        var bodyPosition = bodyReference.Pose.Position;
-        float probeDistance = Width / 2f + 0.05f;
-
-        // Щуп №1: На уровне центра тела (остается без изменений)
-        if (_physicsWorld.Raycast(bodyPosition, direction, probeDistance, out _, out _, out _, BodyHandle))
-        {
-            return true;
-        }
-
-        // --- ИСПРАВЛЕНИЕ №2: ПРАВИЛЬНЫЙ РАСЧЕТ ПОЛОЖЕНИЯ НИЖНЕГО ЛУЧА ---
-        // Цель: луч должен начинаться ВНУТРИ коллайдера, но очень близко к его дну.
-        // 1. Находим самую нижнюю точку коллайдера: bodyPosition.Y - Height / 2
-        // 2. Прибавляем небольшой зазор (например, 0.2f), чтобы луч начался чуть выше.
-        float bottomY = bodyPosition.Y - (Height / 2f);
-        float feetProbeY = bottomY + 0.2f;
-
-        var feetProbeStart = new System.Numerics.Vector3(bodyPosition.X, feetProbeY, bodyPosition.Z);
-
-        if (_physicsWorld.Raycast(feetProbeStart, direction, probeDistance, out _, out _, out _, BodyHandle))
-        {
-            return true; // Найдено препятствие на уровне ног
-        }
-
-        return false;
-    }
-
-    public void Update(InputManager input)
+    public void Update(InputManager input, float deltaTime)
     {
         var bodyReference = _physicsWorld.Simulation.Bodies.GetBodyReference(BodyHandle);
         var bodyPosition = bodyReference.Pose.Position;
 
+        // 1. Вращение камеры (остается без изменений)
         Vector2 mouseDelta = input.GetMouseDelta();
         _camera.Rotate(mouseDelta.X, mouseDelta.Y);
 
-        Vector2 movementInput = input.GetMovementInput();
-
-        var forward = System.Numerics.Vector3.Normalize(new System.Numerics.Vector3(_camera.Front.X, 0, _camera.Front.Z));
-        var right = System.Numerics.Vector3.Normalize(new System.Numerics.Vector3(_camera.Right.X, 0, _camera.Right.Z));
-
-        var forwardVelocity = forward * movementInput.Y;
-        var rightVelocity = right * movementInput.X;
-
-        if (movementInput.Y != 0)
-        {
-            var moveDir = forward * Math.Sign(movementInput.Y);
-            if (IsObstacleInDirection(moveDir))
-            {
-                forwardVelocity = System.Numerics.Vector3.Zero;
-            }
-        }
-
-        if (movementInput.X != 0)
-        {
-            var moveDir = right * Math.Sign(movementInput.X);
-            if (IsObstacleInDirection(moveDir))
-            {
-                rightVelocity = System.Numerics.Vector3.Zero;
-            }
-        }
-
-        var desiredVelocity = forwardVelocity + rightVelocity;
-
-        if (desiredVelocity.LengthSquared() > 0)
-        {
-            float speed = input.IsSprintPressed() ? SprintSpeed : WalkSpeed;
-            desiredVelocity = System.Numerics.Vector3.Normalize(desiredVelocity) * speed;
-        }
-
-        var currentVerticalVelocity = bodyReference.Velocity.Linear.Y;
-        bodyReference.Velocity.Linear = new System.Numerics.Vector3(desiredVelocity.X, currentVerticalVelocity, desiredVelocity.Z);
-
+        // 2. Проверка опоры под ногами (остается почти без изменений)
         CheckGrounded(bodyPosition);
 
-        if (input.IsJumpPressed() && IsOnGround)
+        // 3. Определяем ЖЕЛАЕМУЮ горизонтальную скорость
+        Vector2 movementInput = input.GetMovementInput();
+        var desiredVelocity = System.Numerics.Vector2.Zero;
+        if (movementInput.LengthSquared > 0.01f)
         {
-            var vel = bodyReference.Velocity.Linear;
-            vel.Y = JumpVelocity;
-            bodyReference.Velocity.Linear = vel;
+            var forward = new System.Numerics.Vector3(_camera.Front.X, 0, _camera.Front.Z);
+            var right = new System.Numerics.Vector3(_camera.Right.X, 0, _camera.Right.Z);
+
+            // Нормализуем, чтобы избежать ускорения по диагонали
+            var moveDirection = System.Numerics.Vector3.Normalize(forward * movementInput.Y + right * movementInput.X);
+
+            float speed = input.IsSprintPressed() ? SprintSpeed : WalkSpeed;
+            desiredVelocity = new System.Numerics.Vector2(moveDirection.X, moveDirection.Z) * speed;
+        }
+        DesiredHorizontalVelocity = desiredVelocity;
+
+        // 4. Обработка прыжка
+        if (IsOnGround)
+        {
+            _coyoteTime = CoyoteTimeDuration;
+        }
+        else
+        {
+            _coyoteTime = Math.Max(0, _coyoteTime - deltaTime);
         }
 
+        if (input.IsJumpPressed() && _coyoteTime > 0)
+        {
+            // Применяем ОДНОРАЗОВЫЙ импульс. Дальше гравитация сделает свое дело.
+            var currentVelocity = bodyReference.Velocity.Linear;
+            bodyReference.Velocity.Linear = new System.Numerics.Vector3(currentVelocity.X, JumpVelocity, currentVelocity.Z);
+            _coyoteTime = 0; // Предотвращаем двойной прыжок
+        }
+
+        // 5. Обновление позиции камеры
         UpdateCameraPosition(bodyPosition);
     }
 
     private void CheckGrounded(System.Numerics.Vector3 bodyPosition)
     {
+        // Для капсулы луч нужно пускать чуть ниже
+        float rayLength = (Height / 2f) + 0.15f;
         var down = -System.Numerics.Vector3.UnitY;
-        // Для цилиндра лучше сделать луч для проверки земли чуть длиннее
-        float rayLength = (Height / 2f) + 0.1f;
+
+        // Проверяем землю с помощью одного луча из центра. 
+        // Для капсулы этого обычно достаточно, но можно вернуть и боковые лучи при необходимости.
         IsOnGround = _physicsWorld.Raycast(bodyPosition, down, rayLength, out _, out _, out _, BodyHandle);
     }
 

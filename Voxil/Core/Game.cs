@@ -27,7 +27,6 @@ public class Game : GameWindow
 
         GL.ClearColor(0.1f, 0.3f, 0.5f, 1.0f);
         GL.Enable(EnableCap.DepthTest);
-        GL.Enable(EnableCap.CullFace);
         GL.CullFace(TriangleFace.Back);
 
         try
@@ -41,24 +40,24 @@ public class Game : GameWindow
             return;
         }
 
-        // ИЗМЕНЕНИЕ: ПОРЯДОК ОПЕРАЦИЙ
-
-        // 1. Создаем физический мир.
+        // 1. Создаем физический мир. Simulation создается внутри конструктора.
         _physicsWorld = new PhysicsWorld();
 
-        // 2. Создаем менеджер мира. В этот момент его конструктор
-        //    СРАЗУ ЖЕ генерирует стартовую землю.
+        // 2. Создаем менеджер мира.
         _worldManager = new WorldManager(_physicsWorld);
 
-        // 3. Определяем безопасную стартовую позицию НАД сгенерированной землей.
-        //    Если земля на Y=50, ставим игрока на Y=55.
+        // 3. Определяем стартовую позицию.
         var startPosition = new System.Numerics.Vector3(8f, 55f, 8f);
 
-        // 4. Создаем камеру и игрока в мире, где УЖЕ ЕСТЬ земля.
+        // 4. Создаем камеру и игрока. Конструктор PlayerController теперь работает без ошибок.
         _camera = new Camera(VectorExtensions.ToOpenTK(startPosition), Size.X / (float)Size.Y);
         _playerController = new PlayerController(_physicsWorld, _camera, startPosition);
 
-        // 5. Создаем менеджер ввода.
+        // 5. Сообщаем физическому миру, какой BodyHandle у игрока,
+        //    чтобы он записал его в общее состояние PlayerState.
+        _physicsWorld.SetPlayerHandle(_playerController.BodyHandle);
+
+        // 6. Создаем менеджер ввода.
         _input = new InputManager();
 
         CursorState = CursorState.Grabbed;
@@ -77,9 +76,10 @@ public class Game : GameWindow
             return;
         }
 
-        _playerController.Update(_input);
+        _playerController.Update(_input, deltaTime);
+        _physicsWorld.SetPlayerGoalVelocity(_playerController.DesiredHorizontalVelocity);
         _physicsWorld.Update(deltaTime);
-        _worldManager.Update();
+        _worldManager.Update(deltaTime); // ИСПРАВЛЕНО: передаем deltaTime
 
         if (_input.IsMouseButtonPressed(MouseButton.Left))
         {
@@ -96,15 +96,8 @@ public class Game : GameWindow
 
             if (hitHandler.Hit)
             {
-                Console.WriteLine($"[Raycast] Попадание в объект.");
-                // ИСПРАВЛЕНО: hitLocation и hitNormal уже являются System.Numerics.Vector3,
-                // поэтому их можно передавать напрямую в исправленный метод DestroyVoxelAt.
                 var hitLocation = cameraPosition + lookDirection * hitHandler.T;
                 _worldManager.DestroyVoxelAt(hitHandler.Collidable, hitLocation, hitHandler.Normal);
-            }
-            else
-            {
-                Console.WriteLine("[Raycast] Промах.");
             }
         }
     }
