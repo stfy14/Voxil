@@ -69,7 +69,7 @@ public class Chunk : IDisposable
         _isLoaded = false;
     }
 
-    public bool RemoveVoxelAt(Vector3i localPosition)
+    public bool RemoveVoxelAndUpdate(Vector3i localPosition)
     {
         if (Voxels.Remove(localPosition))
         {
@@ -82,6 +82,24 @@ public class Chunk : IDisposable
             return true;
         }
         return false;
+    }
+
+    // ДОБАВЬТЕ этот новый метод. Он просто удаляет воксель из данных, НЕ обновляя меш.
+    // Он будет использоваться для удаления больших групп.
+    public bool RemoveVoxelAt(Vector3i localPosition)
+    {
+        return Voxels.Remove(localPosition);
+    }
+
+    // ДОБАВЬТЕ этот метод для завершения пакетного удаления.
+    public void FinalizeGroupRemoval()
+    {
+        if (_isLoaded)
+        {
+            BuildMesh();
+            _needsPhysicsRebuild = true;
+            _physicsRebuildTimer = PhysicsRebuildDelay;
+        }
     }
 
     public void AddVoxelObject(VoxelObject obj) => _voxelObjects.Add(obj);

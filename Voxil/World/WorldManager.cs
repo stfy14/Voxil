@@ -203,15 +203,9 @@ public class WorldManager : IDisposable
             (int)Math.Floor(localHitLocation.Y + 0.5f),
             (int)Math.Floor(localHitLocation.Z + 0.5f));
 
-        if (chunk.RemoveVoxelAt(voxelToRemove))
+        // ИЗМЕНЕНИЕ: Используем метод, который сразу обновляет чанк
+        if (chunk.RemoveVoxelAndUpdate(voxelToRemove))
         {
-            // --- СТАРЫЙ КОД (можно закомментировать или удалить) ---
-            // var voxelList = new List<Vector3i> { new(0, 0, 0) };
-            // var voxelWorldPosition = chunkWorldPos + new BepuVector3(voxelToRemove.X, voxelToRemove.Y, voxelToRemove.Z);
-            // _createAndAddVoxelObject(voxelList, MaterialType.Stone, voxelWorldPosition);
-
-            // --- НОВЫЙ ВЫЗОВ ---
-            // После успешного удаления вокселя, проверяем, не отвалилось ли что-нибудь
             CheckForDetachedVoxelGroups(chunk, voxelToRemove);
         }
     }
@@ -410,24 +404,30 @@ public class WorldManager : IDisposable
             {
                 newObjectVoxels.Add(pos - minCorner);
             }
-            
-            // Удаляем эти воксели из статического чанка
+
+            bool removedAny = false;
             foreach (var pos in visited)
             {
-                sourceChunk.RemoveVoxelAt(pos);
+                if (sourceChunk.RemoveVoxelAt(pos))
+                {
+                    removedAny = true;
+                }
             }
-            
-            // Определяем мировую позицию для нового физического объекта
+
+            // Шаг 2: Если что-то было удалено, ОДИН РАЗ финализируем изменения
+            if (removedAny)
+            {
+                sourceChunk.FinalizeGroupRemoval();
+            }
+
+            // --- КОНЕЦ ИЗМЕНЕНИЙ ---
+
             var chunkWorldPos = (sourceChunk.Position * Chunk.ChunkSize).ToSystemNumerics();
             var newObjectWorldPos = chunkWorldPos + new BepuVector3(minCorner.X, minCorner.Y, minCorner.Z);
 
-            // Создаем новый динамический объект
-            // TODO: Определять материал более осмысленно
             _createAndAddVoxelObject(newObjectVoxels, sourceChunk.Material, newObjectWorldPos);
 
-            // Важно! После удаления группы вокселей, нужно прекратить проверку других соседей,
-            // так как они уже являются частью обработанной группы.
-            return; 
+            return;
         }
     }
 }
