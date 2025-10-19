@@ -27,6 +27,7 @@ public class Game : GameWindow
 
         GL.ClearColor(0.1f, 0.3f, 0.5f, 1.0f);
         GL.Enable(EnableCap.DepthTest);
+        GL.Enable(EnableCap.CullFace);
         GL.CullFace(TriangleFace.Back);
 
         try

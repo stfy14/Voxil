@@ -8,7 +8,7 @@ using System.Linq;
 
 public class Chunk : IDisposable
 {
-    public const int ChunkSize = 4;
+    public const int ChunkSize = 16;
     public Vector3i Position { get; }
     public WorldManager WorldManager { get; }
     public MaterialType Material { get; private set; } = MaterialType.Dirt;
