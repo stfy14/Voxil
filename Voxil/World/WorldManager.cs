@@ -92,11 +92,11 @@ public class WorldManager : IDisposable
     }
 
 
-    public void Update()
+    public void Update(float deltaTime)
     {
         ProcessRemovals();
         foreach (var chunk in _chunks.Values)
-            chunk.Update();
+            chunk.Update(deltaTime); // Передаем deltaTime
     }
 
     public void Render(Shader shader, Matrix4 view, Matrix4 projection)

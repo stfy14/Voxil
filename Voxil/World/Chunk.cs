@@ -16,10 +16,14 @@ public class Chunk : IDisposable
     private VoxelObjectRenderer _renderer;
 
     private StaticHandle _staticHandle;
-    // НОВОЕ ПОЛЕ: Этот флаг будет надежно отслеживать, создана ли физика для чанка.
     private bool _physicsBodyInitialized = false;
 
     private readonly List<VoxelObject> _voxelObjects = new();
+
+    // НОВОЕ: Отложенная перестройка физики
+    private bool _needsPhysicsRebuild = false;
+    private float _physicsRebuildTimer = 0f;
+    private const float PhysicsRebuildDelay = 0.1f; // 100ms задержка
 
     public Chunk(Vector3i position, WorldManager worldManager)
     {
@@ -35,8 +39,10 @@ public class Chunk : IDisposable
 
     public void Rebuild()
     {
-        BuildMesh();
-        InitializePhysics();
+        BuildMesh(); // Меш обновляем сразу
+        // Физику помечаем для отложенного обновления
+        _needsPhysicsRebuild = true;
+        _physicsRebuildTimer = PhysicsRebuildDelay;
     }
 
     private void BuildMesh()
@@ -63,20 +69,6 @@ public class Chunk : IDisposable
 
         if (_voxels.Count > 0)
         {
-            // ДИАГНОСТИКА: Найдём минимальную и максимальную Y координату
-            int minY = int.MaxValue;
-            int maxY = int.MinValue;
-            foreach (var voxel in _voxels)
-            {
-                if (voxel.Y < minY) minY = voxel.Y;
-                if (voxel.Y > maxY) maxY = voxel.Y;
-            }
-
-            Console.WriteLine($"[Chunk] Создание статического физического тела для чанка {Position} с {_voxels.Count} вокселями.");
-            Console.WriteLine($"[Chunk] World position: {worldPosition}");
-            Console.WriteLine($"[Chunk] Voxels Y range: {minY} to {maxY}");
-            Console.WriteLine($"[Chunk] Actual world Y range: {worldPosition.Y + minY} to {worldPosition.Y + maxY}");
-
             _staticHandle = physicsWorld.CreateStaticVoxelBody(worldPosition, _voxels.ToList());
             WorldManager.RegisterChunkStatic(_staticHandle, this);
             _physicsBodyInitialized = true;
@@ -85,13 +77,15 @@ public class Chunk : IDisposable
         {
             _physicsBodyInitialized = false;
         }
+
+        _needsPhysicsRebuild = false;
     }
 
     public bool RemoveVoxelAt(Vector3i localPosition)
     {
         if (_voxels.Remove(localPosition))
         {
-            Rebuild();
+            Rebuild(); // Пометит для отложенного обновления
             return true;
         }
         return false;
@@ -100,8 +94,18 @@ public class Chunk : IDisposable
     public void AddVoxelObject(VoxelObject obj) => _voxelObjects.Add(obj);
     public void RemoveVoxelObject(VoxelObject obj) => _voxelObjects.Remove(obj);
 
-    public void Update()
+    public void Update(float deltaTime)
     {
+        // НОВОЕ: Отложенное обновление физики
+        if (_needsPhysicsRebuild)
+        {
+            _physicsRebuildTimer -= deltaTime;
+            if (_physicsRebuildTimer <= 0f)
+            {
+                InitializePhysics();
+            }
+        }
+
         foreach (var voxelObject in _voxelObjects)
         {
             var pose = WorldManager.PhysicsWorld.GetPose(voxelObject.BodyHandle);
@@ -130,7 +134,6 @@ public class Chunk : IDisposable
             WorldManager.QueueForRemoval(obj);
         _voxelObjects.Clear();
 
-        // ИСПРАВЛЕНО: Используем тот же надежный флаг при уничтожении объекта.
         if (_physicsBodyInitialized)
         {
             WorldManager.PhysicsWorld.Simulation.Statics.Remove(_staticHandle);
