@@ -3,50 +3,242 @@ using BepuPhysics;
 using BepuPhysics.Collidables;
 using OpenTK.Mathematics;
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using BepuVector3 = System.Numerics.Vector3;
+
+#region Helper Classes for Async Tasks
+
+/// <summary>
+/// Результат работы потока генерации: содержит только данные о вокселях.
+/// </summary>
+public class ChunkGenerationResult
+{
+    public Vector3i Position { get; }
+    public Dictionary<Vector3i, MaterialType> Voxels { get; }
+
+    public ChunkGenerationResult(Vector3i position, Dictionary<Vector3i, MaterialType> voxels)
+    {
+        Position = position;
+        Voxels = voxels;
+    }
+}
+
+/// <summary>
+/// Задача для потока финализации: содержит данные для построения финального меша.
+/// </summary>
+public class ChunkFinalizeRequest
+{
+    public Vector3i Position;
+    public Dictionary<Vector3i, MaterialType> Voxels;
+    public Func<Vector3i, bool> IsVoxelSolidGlobalFunc;
+}
+
+/// <summary>
+/// Результат работы потока финализации: содержит готовый меш.
+/// </summary>
+public class FinalizedChunkData
+{
+    public Vector3i Position;
+    public List<float> Vertices;
+    public List<float> Colors;
+    public List<float> AoValues;
+}
+
+/// <summary>
+/// Задача для потока проверки отсоединения.
+/// </summary>
+public class DetachmentCheckRequest
+{
+    public Chunk Chunk;
+    public Vector3i RemovedVoxelLocalPos;
+}
+
+/// <summary>
+/// Результат работы потока проверки отсоединения.
+/// </summary>
+public class DetachmentCheckResult
+{
+    public Chunk OriginChunk;
+    public List<Vector3i> DetachedGroup;
+    public MaterialType Material;
+}
+
+#endregion
 
 public class WorldManager : IDisposable
 {
     public PhysicsWorld PhysicsWorld { get; }
     private readonly PlayerController _playerController;
 
-    // --- НАСТРОЙКА ---
-    // Вы можете изменить это значение, чтобы увеличить или уменьшить дальность прорисовки.
-    private int _viewDistance = 8;
-
-    // Словарь _chunks теперь наша база данных мира.
-    // Он хранит ВСЕ когда-либо сгенерированные чанки, даже если они выгружены.
+    private int _viewDistance = 16;
     private readonly Dictionary<Vector3i, Chunk> _chunks = new();
-
     private readonly Dictionary<BodyHandle, VoxelObject> _bodyToVoxelObjectMap = new();
     private readonly Dictionary<StaticHandle, Chunk> _staticToChunkMap = new();
     private readonly IWorldGenerator _generator;
-    private readonly List<VoxelObject> _objectsToRemove = new();
 
-    // --- Новая система управления чанками ---
-    private Vector3i _lastPlayerChunkPosition = new Vector3i(int.MaxValue); // Инициализируем невозможным значением, чтобы запустить первую проверку
-    private readonly Queue<Vector3i> _chunksToProcessQueue = new();
+    private readonly List<VoxelObject> _voxelObjects = new List<VoxelObject>();
+    private readonly ConcurrentQueue<VoxelObject> _voxelObjectsToAdd = new ConcurrentQueue<VoxelObject>();
+    private readonly List<VoxelObject> _objectsToRemove = new List<VoxelObject>();
+    private float _memoryLogTimer = 0f;
+    private bool _isDisposed = false;
+
+    // --- Threads ---
+    private readonly Thread _generationThread;
+    private readonly Thread _finalizationThread;
+    private readonly Thread _detachmentCheckThread;
+
+    // --- Queues ---
+    private readonly ConcurrentQueue<Vector3i> _generationQueue = new ConcurrentQueue<Vector3i>();
+    private readonly ConcurrentQueue<ChunkGenerationResult> _initialDataQueue = new ConcurrentQueue<ChunkGenerationResult>();
+
+    private readonly ConcurrentQueue<ChunkFinalizeRequest> _finalizeQueue = new ConcurrentQueue<ChunkFinalizeRequest>();
+    private readonly ConcurrentQueue<FinalizedChunkData> _finalizedDataQueue = new ConcurrentQueue<FinalizedChunkData>();
+
+    private readonly ConcurrentQueue<DetachmentCheckRequest> _detachmentCheckQueue = new ConcurrentQueue<DetachmentCheckRequest>();
+    private readonly ConcurrentQueue<DetachmentCheckResult> _detachmentResultQueue = new ConcurrentQueue<DetachmentCheckResult>();
+
+    private readonly HashSet<Chunk> _chunksNeedingPhysicsRebuild = new HashSet<Chunk>();
+    private readonly HashSet<Vector3i> _chunksInProgress = new HashSet<Vector3i>();
+    private Vector3i _lastPlayerChunkPosition = new Vector3i(int.MaxValue);
     private readonly HashSet<Vector3i> _activeChunkPositions = new HashSet<Vector3i>();
-
+    private const int ChunksToProcessPerFrame = 8;
 
     public WorldManager(PhysicsWorld physicsWorld, PlayerController playerController)
     {
         PhysicsWorld = physicsWorld;
         _playerController = playerController;
         _generator = new PerlinGenerator(12345);
+
+        _isDisposed = false;
+        _generationThread = new Thread(GenerationLoop) { IsBackground = true, Name = "GenerationThread" };
+        _generationThread.Start();
+
+        _finalizationThread = new Thread(FinalizationLoop) { IsBackground = true, Name = "FinalizationThread" };
+        _finalizationThread.Start();
+
+        _detachmentCheckThread = new Thread(DetachmentCheckLoop) { IsBackground = true, Name = "DetachmentCheckThread" };
+        _detachmentCheckThread.Start();
     }
 
-    private float _memoryLogTimer = 0f; //Дебаг 
+    #region Thread Loops
+
+    private void GenerationLoop()
+    {
+        Console.WriteLine("[GenerationThread] Рабочий поток запущен.");
+        while (!_isDisposed)
+        {
+            if (_generationQueue.TryDequeue(out var chunkPos))
+            {
+                var voxels = new Dictionary<Vector3i, MaterialType>();
+                _generator.GenerateChunk(chunkPos, voxels);
+                var result = new ChunkGenerationResult(chunkPos, voxels);
+                _initialDataQueue.Enqueue(result);
+            }
+            else
+            {
+                Thread.Sleep(15);
+            }
+        }
+        Console.WriteLine("[GenerationThread] Рабочий поток остановлен.");
+    }
+
+    private void FinalizationLoop()
+    {
+        Console.WriteLine("[FinalizationThread] Рабочий поток запущен.");
+        while (!_isDisposed)
+        {
+            if (_finalizeQueue.TryDequeue(out var request))
+            {
+                VoxelMeshBuilder.GenerateMesh(request.Voxels,
+                    out var vertices, out var colors, out var aoValues,
+                    request.IsVoxelSolidGlobalFunc);
+
+                var result = new FinalizedChunkData
+                {
+                    Position = request.Position,
+                    Vertices = vertices,
+                    Colors = colors,
+                    AoValues = aoValues
+                };
+                _finalizedDataQueue.Enqueue(result);
+            }
+            else
+            {
+                Thread.Sleep(10);
+            }
+        }
+        Console.WriteLine("[FinalizationThread] Рабочий поток остановлен.");
+    }
+
+    private void DetachmentCheckLoop()
+    {
+        Console.WriteLine("[DetachmentThread] Рабочий поток запущен.");
+        while (!_isDisposed)
+        {
+            if (_detachmentCheckQueue.TryDequeue(out var request))
+            {
+                var neighbors = new List<Vector3i>
+                {
+                    request.RemovedVoxelLocalPos + new Vector3i(1, 0, 0), request.RemovedVoxelLocalPos + new Vector3i(-1, 0, 0),
+                    request.RemovedVoxelLocalPos + new Vector3i(0, 1, 0), request.RemovedVoxelLocalPos + new Vector3i(0, -1, 0),
+                    request.RemovedVoxelLocalPos + new Vector3i(0, 0, 1), request.RemovedVoxelLocalPos + new Vector3i(0, 0, -1)
+                };
+
+                var processedGroups = new HashSet<Vector3i>();
+                foreach (var neighborPos in neighbors)
+                {
+                    if (!request.Chunk.Voxels.ContainsKey(neighborPos) || processedGroups.Contains(neighborPos)) continue;
+
+                    if (!IsConnectedToGround(request.Chunk, neighborPos))
+                    {
+                        var detachedGroup = GetConnectedVoxels(request.Chunk, neighborPos);
+                        if (detachedGroup.Count > 0 && request.Chunk.Voxels.TryGetValue(detachedGroup[0], out var mat))
+                        {
+                            _detachmentResultQueue.Enqueue(new DetachmentCheckResult
+                            {
+                                OriginChunk = request.Chunk,
+                                DetachedGroup = detachedGroup,
+                                Material = mat
+                            });
+
+                            foreach (var voxel in detachedGroup)
+                            {
+                                processedGroups.Add(voxel);
+                            }
+                        }
+                    }
+                }
+            }
+            else
+            {
+                Thread.Sleep(20);
+            }
+        }
+        Console.WriteLine("[DetachmentThread] Рабочий поток остановлен.");
+    }
+
+    #endregion
+
     public void Update(float deltaTime)
     {
         UpdateVisibleChunkList();
-        ProcessChunkQueue();
+        ProcessInitialDataQueue();
+        ProcessFinalizedDataQueue();
+        ProcessDetachmentResults();
+        ProcessPhysicsRebuildQueue();
 
-        foreach (var chunk in _chunks.Values)
+        while (_voxelObjectsToAdd.TryDequeue(out var vo)) _voxelObjects.Add(vo);
+
+        foreach (var vo in _voxelObjects)
         {
-            chunk.Update(deltaTime);
+            if (PhysicsWorld.Simulation.Bodies.BodyExists(vo.BodyHandle))
+            {
+                var pose = PhysicsWorld.GetPose(vo.BodyHandle);
+                vo.UpdatePose(pose);
+            }
         }
 
         ProcessRemovals();
@@ -54,125 +246,150 @@ public class WorldManager : IDisposable
         _memoryLogTimer += deltaTime;
         if (_memoryLogTimer >= 5.0f)
         {
-            var loadedCount = _chunks.Values.Count(c => c._isLoaded); // Потребует сделать _isLoaded public ПОТОМ УБРАТЬ НА PRIVATE
-            var totalCount = _chunks.Count;
+            var loadedCount = _chunks.Values.Count(c => c._isLoaded);
             var memoryMB = GC.GetTotalMemory(false) / (1024 * 1024);
-
-            Console.WriteLine($"[WorldManager] Чанков загружено: {loadedCount}/{totalCount}, Память: {memoryMB} MB");
+            Console.WriteLine($"[World] Chunks: {loadedCount}/{_chunks.Count}, VObjects: {_voxelObjects.Count}, Mem: {memoryMB}MB");
             _memoryLogTimer = 0f;
         }
     }
 
-    private void UpdateVisibleChunkList()
+    #region Queue Processing
+
+    private void ProcessInitialDataQueue()
     {
-        var playerPosition = PhysicsWorld.Simulation.Bodies.GetBodyReference(_playerController.BodyHandle).Pose.Position;
-        var playerChunkPos = new Vector3i(
-            (int)Math.Floor(playerPosition.X / Chunk.ChunkSize),
-            0, // Y-координата чанка пока не важна
-            (int)Math.Floor(playerPosition.Z / Chunk.ChunkSize)
-        );
-
-        if (playerChunkPos == _lastPlayerChunkPosition) return;
-
-        _lastPlayerChunkPosition = playerChunkPos;
-        Console.WriteLine($"[WorldManager] Игрок вошел в чанк: {playerChunkPos}. Обновление списка активных чанков.");
-
-        var previouslyActiveChunks = new HashSet<Vector3i>(_activeChunkPositions);
-        _activeChunkPositions.Clear();
-
-        for (int x = -_viewDistance; x <= _viewDistance; x++)
+        for (int i = 0; i < ChunksToProcessPerFrame && _initialDataQueue.TryDequeue(out var result); i++)
         {
-            for (int z = -_viewDistance; z <= _viewDistance; z++)
+            if (!_activeChunkPositions.Contains(result.Position))
             {
-                var chunkPos = new Vector3i(playerChunkPos.X + x, 0, playerChunkPos.Z + z);
-                _activeChunkPositions.Add(chunkPos);
+                _chunksInProgress.Remove(result.Position);
+                continue;
+            }
 
-                // Если этот чанк не был активен в прошлый раз, добавляем его в очередь на обработку
-                if (!previouslyActiveChunks.Contains(chunkPos))
+            if (!_chunks.ContainsKey(result.Position))
+            {
+                var newChunk = new Chunk(result.Position, this);
+                newChunk.SetVoxelData(result.Voxels);
+                _chunks.Add(result.Position, newChunk);
+
+                Func<Vector3i, bool> solidCheckFunc = localPos => IsVoxelSolidWorld((newChunk.Position * Chunk.ChunkSize) + localPos);
+                QueueForFinalization(new ChunkFinalizeRequest
                 {
-                    _chunksToProcessQueue.Enqueue(chunkPos);
+                    Position = newChunk.Position,
+                    Voxels = newChunk.Voxels,
+                    IsVoxelSolidGlobalFunc = solidCheckFunc
+                });
+            }
+            _chunksInProgress.Remove(result.Position);
+        }
+    }
+
+    private void ProcessFinalizedDataQueue()
+    {
+        while (_finalizedDataQueue.TryDequeue(out var data))
+        {
+            if (_chunks.TryGetValue(data.Position, out var chunk))
+            {
+                chunk.ApplyFinalizedData(data);
+            }
+        }
+    }
+
+    private void ProcessDetachmentResults()
+    {
+        while (_detachmentResultQueue.TryDequeue(out var result))
+        {
+            if (result.OriginChunk == null || !result.OriginChunk._isLoaded) continue;
+
+            bool removedAny = false;
+            foreach (var voxel in result.DetachedGroup)
+            {
+                if (result.OriginChunk.Voxels.Remove(voxel))
+                {
+                    removedAny = true;
                 }
             }
-        }
 
-        // Находим чанки, которые больше не активны, и добавляем их в очередь на выгрузку
-        foreach (var oldChunkPos in previouslyActiveChunks)
+            if (removedAny)
+            {
+                result.OriginChunk.RebuildMesh();
+            }
+
+            var chunkWorldPos = (result.OriginChunk.Position * Chunk.ChunkSize).ToSystemNumerics();
+            CreateAndAddVoxelObject(result.DetachedGroup, result.Material, chunkWorldPos);
+        }
+    }
+
+    private void ProcessPhysicsRebuildQueue()
+    {
+        var chunksToProcess = _chunksNeedingPhysicsRebuild.Take(4).ToList();
+        foreach (var chunk in chunksToProcess)
         {
-            if (!_activeChunkPositions.Contains(oldChunkPos))
+            if (chunk != null && chunk._isLoaded)
             {
-                _chunksToProcessQueue.Enqueue(oldChunkPos);
+                chunk.RebuildPhysics();
             }
+            _chunksNeedingPhysicsRebuild.Remove(chunk);
         }
     }
 
-    private void ProcessChunkQueue()
+    #endregion
+
+    #region Public API and Helpers
+
+    public void QueueForFinalization(ChunkFinalizeRequest request)
     {
-        if (_chunksToProcessQueue.Count == 0) return;
+        _finalizeQueue.Enqueue(request);
+    }
 
-        var chunkPos = _chunksToProcessQueue.Dequeue();
-
-        // Решаем, нужно ли загружать или выгружать этот чанк
-        bool shouldBeActive = _activeChunkPositions.Contains(chunkPos);
-
-        _chunks.TryGetValue(chunkPos, out var chunk);
-
-        if (shouldBeActive)
+    public void QueueForPhysicsRebuild(Chunk chunk)
+    {
+        if (chunk != null && chunk._isLoaded)
         {
-            // Если чанк должен быть активен, но его нет, создаем и генерируем
-            if (chunk == null)
-            {
-                var newChunk = new Chunk(chunkPos, this);
-                _chunks.Add(chunkPos, newChunk);
-                newChunk.Generate(_generator); // Generate сразу вызывает Load
-            }
-            else // Если он есть, но был выгружен, загружаем
-            {
-                chunk.Load();
-            }
+            _chunksNeedingPhysicsRebuild.Add(chunk);
         }
-        else
+    }
+
+    public void QueueForDetachmentCheck(Chunk chunk, Vector3i removedVoxelLocalPos)
+    {
+        _detachmentCheckQueue.Enqueue(new DetachmentCheckRequest
         {
-            // Если чанк не должен быть активен, но он существует и загружен, выгружаем
-            if (chunk != null)
-            {
-                chunk.Unload();
-            }
-        }
+            Chunk = chunk,
+            RemovedVoxelLocalPos = removedVoxelLocalPos
+        });
     }
 
-    public void RegisterChunkStatic(StaticHandle handle, Chunk chunk)
+    public void NotifyNeighborsOfVoxelChange(Vector3i chunkPos, Vector3i localVoxelPos)
     {
-        _staticToChunkMap[handle] = chunk;
-    }
-
-    private void RegisterVoxelObjectBody(BodyHandle handle, VoxelObject voxelObject)
-    {
-        _bodyToVoxelObjectMap[handle] = voxelObject;
-    }
-
-    public void QueueForRemoval(VoxelObject obj)
-    {
-        if (obj != null && !_objectsToRemove.Contains(obj))
-            _objectsToRemove.Add(obj);
-    }
-
-    private void ProcessRemovals()
-    {
-        if (_objectsToRemove.Count == 0) return;
-
-        foreach (var obj in _objectsToRemove)
+        Action<Vector3i> rebuildNeighbor = (offset) =>
         {
-            if (obj == null) continue;
-            _bodyToVoxelObjectMap.Remove(obj.BodyHandle);
-            PhysicsWorld.RemoveBody(obj.BodyHandle);
-            // TODO: Улучшить логику поиска чанка, в котором находится объект
-            if (_chunks.TryGetValue(Vector3i.Zero, out var chunk))
+            if (_chunks.TryGetValue(chunkPos + offset, out var neighbor))
             {
-                chunk.RemoveVoxelObject(obj);
+                neighbor.RebuildMesh();
             }
-            obj.Dispose();
+        };
+
+        if (localVoxelPos.X == 0) rebuildNeighbor(new Vector3i(-1, 0, 0));
+        else if (localVoxelPos.X == Chunk.ChunkSize - 1) rebuildNeighbor(new Vector3i(1, 0, 0));
+        if (localVoxelPos.Z == 0) rebuildNeighbor(new Vector3i(0, 0, -1));
+        else if (localVoxelPos.Z == Chunk.ChunkSize - 1) rebuildNeighbor(new Vector3i(0, 0, 1));
+    }
+
+    public bool IsVoxelSolidWorld(Vector3i worldPos)
+    {
+        var chunkPos = new Vector3i(
+            (int)Math.Floor(worldPos.X / (float)Chunk.ChunkSize), 0,
+            (int)Math.Floor(worldPos.Z / (float)Chunk.ChunkSize));
+
+        if (_chunks.TryGetValue(chunkPos, out var chunk) && chunk._isLoaded)
+        {
+            var localPos = new Vector3i(
+                worldPos.X - chunk.Position.X * Chunk.ChunkSize,
+                worldPos.Y,
+                worldPos.Z - chunk.Position.Z * Chunk.ChunkSize
+            );
+            return chunk.Voxels.ContainsKey(localPos);
         }
-        _objectsToRemove.Clear();
+        return false;
     }
 
     public void DestroyVoxelAt(CollidableReference collidable, BepuVector3 worldHitLocation, BepuVector3 worldHitNormal)
@@ -180,55 +397,161 @@ public class WorldManager : IDisposable
         if (collidable.Mobility == CollidableMobility.Dynamic)
         {
             if (_bodyToVoxelObjectMap.TryGetValue(collidable.BodyHandle, out var dynamicObject))
-            {
                 DestroyDynamicVoxelAt(dynamicObject, worldHitLocation, worldHitNormal);
-            }
         }
-        else
+        else if (_staticToChunkMap.TryGetValue(collidable.StaticHandle, out var chunk))
         {
-            if (_staticToChunkMap.TryGetValue(collidable.StaticHandle, out var chunk))
+            var chunkWorldPos = (chunk.Position * Chunk.ChunkSize).ToSystemNumerics();
+            var localHit = worldHitLocation - chunkWorldPos - worldHitNormal * 0.001f;
+            var voxelToRemove = new Vector3i((int)Math.Floor(localHit.X + 0.5f), (int)Math.Floor(localHit.Y + 0.5f), (int)Math.Floor(localHit.Z + 0.5f));
+
+            if (chunk.Voxels.ContainsKey(voxelToRemove))
             {
-                DestroyStaticVoxelAt(chunk, worldHitLocation, worldHitNormal);
+                chunk.RemoveVoxelAndUpdate(voxelToRemove);
             }
         }
     }
 
-    private void DestroyStaticVoxelAt(Chunk chunk, BepuVector3 worldHitLocation, BepuVector3 worldHitNormal)
+    #endregion
+
+    #region Private Logic
+
+    private void UpdateVisibleChunkList()
     {
-        var chunkWorldPos = (chunk.Position * Chunk.ChunkSize).ToSystemNumerics();
-        var localHitLocation = worldHitLocation - chunkWorldPos - worldHitNormal * 0.001f;
+        var playerPosition = PhysicsWorld.Simulation.Bodies.GetBodyReference(_playerController.BodyHandle).Pose.Position;
+        var playerChunkPos = new Vector3i((int)Math.Floor(playerPosition.X / Chunk.ChunkSize), 0, (int)Math.Floor(playerPosition.Z / Chunk.ChunkSize));
 
-        var voxelToRemove = new Vector3i(
-            (int)Math.Floor(localHitLocation.X + 0.5f),
-            (int)Math.Floor(localHitLocation.Y + 0.5f),
-            (int)Math.Floor(localHitLocation.Z + 0.5f));
+        if (playerChunkPos == _lastPlayerChunkPosition) return;
+        _lastPlayerChunkPosition = playerChunkPos;
 
-        // ИЗМЕНЕНИЕ: Используем метод, который сразу обновляет чанк
-        if (chunk.RemoveVoxelAndUpdate(voxelToRemove))
+        var newRequiredChunks = new HashSet<Vector3i>();
+        for (int x = -_viewDistance; x <= _viewDistance; x++)
         {
-            CheckForDetachedVoxelGroups(chunk, voxelToRemove);
+            for (int z = -_viewDistance; z <= _viewDistance; z++)
+            {
+                newRequiredChunks.Add(new Vector3i(playerChunkPos.X + x, 0, playerChunkPos.Z + z));
+            }
         }
+
+        var previousActiveChunks = new HashSet<Vector3i>(_activeChunkPositions);
+        previousActiveChunks.ExceptWith(newRequiredChunks);
+
+        foreach (var posToUnload in previousActiveChunks)
+        {
+            if (_chunks.TryGetValue(posToUnload, out var chunk))
+            {
+                _chunksNeedingPhysicsRebuild.Remove(chunk);
+                chunk.Dispose();
+                _chunks.Remove(posToUnload);
+            }
+            _chunksInProgress.Remove(posToUnload);
+        }
+
+        var chunksToLoad = new List<Vector3i>();
+        foreach (var posToLoad in newRequiredChunks)
+        {
+            if (!_activeChunkPositions.Contains(posToLoad))
+            {
+                chunksToLoad.Add(posToLoad);
+            }
+        }
+
+        chunksToLoad.Sort((a, b) => (a - playerChunkPos).LengthSquared().CompareTo((b - playerChunkPos).LengthSquared()));
+
+        foreach (var pos in chunksToLoad)
+        {
+            if (!_chunksInProgress.Contains(pos) && !_chunks.ContainsKey(pos))
+            {
+                _chunksInProgress.Add(pos);
+                _generationQueue.Enqueue(pos);
+            }
+        }
+
+        _activeChunkPositions.Clear();
+        foreach (var pos in newRequiredChunks)
+        {
+            _activeChunkPositions.Add(pos);
+        }
+    }
+
+    private bool IsConnectedToGround(Chunk startChunk, Vector3i startVoxel)
+    {
+        var visited = new HashSet<(Vector3i, Vector3i)>();
+        var queue = new Queue<(Chunk, Vector3i)>();
+
+        queue.Enqueue((startChunk, startVoxel));
+        visited.Add((startChunk.Position, startVoxel));
+
+        while (queue.Count > 0)
+        {
+            var (currentChunk, currentLocalPos) = queue.Dequeue();
+            if (currentLocalPos.Y == 0) return true;
+
+            var directions = new[] { new Vector3i(1, 0, 0), new Vector3i(-1, 0, 0), new Vector3i(0, 1, 0), new Vector3i(0, -1, 0), new Vector3i(0, 0, 1), new Vector3i(0, 0, -1) };
+            foreach (var dir in directions)
+            {
+                var neighborLocalPos = currentLocalPos + dir;
+                var neighborChunk = currentChunk;
+
+                if (neighborLocalPos.X < 0) { neighborChunk = GetChunk(currentChunk.Position + new Vector3i(-1, 0, 0)); if (neighborChunk != null) neighborLocalPos.X = Chunk.ChunkSize - 1; }
+                else if (neighborLocalPos.X >= Chunk.ChunkSize) { neighborChunk = GetChunk(currentChunk.Position + new Vector3i(1, 0, 0)); if (neighborChunk != null) neighborLocalPos.X = 0; }
+                if (neighborLocalPos.Z < 0) { neighborChunk = GetChunk(currentChunk.Position + new Vector3i(0, 0, -1)); if (neighborChunk != null) neighborLocalPos.Z = Chunk.ChunkSize - 1; }
+                else if (neighborLocalPos.Z >= Chunk.ChunkSize) { neighborChunk = GetChunk(currentChunk.Position + new Vector3i(0, 0, 1)); if (neighborChunk != null) neighborLocalPos.Z = 0; }
+
+                if (neighborChunk == null || !neighborChunk._isLoaded) continue;
+
+                if (neighborChunk.Voxels.ContainsKey(neighborLocalPos) && !visited.Contains((neighborChunk.Position, neighborLocalPos)))
+                {
+                    visited.Add((neighborChunk.Position, neighborLocalPos));
+                    queue.Enqueue((neighborChunk, neighborLocalPos));
+                }
+            }
+        }
+        return false;
+    }
+
+    private List<Vector3i> GetConnectedVoxels(Chunk chunk, Vector3i startVoxel)
+    {
+        var result = new List<Vector3i>();
+        var visited = new HashSet<Vector3i>();
+        var queue = new Queue<Vector3i>();
+        queue.Enqueue(startVoxel);
+        visited.Add(startVoxel);
+        result.Add(startVoxel);
+
+        while (queue.Count > 0)
+        {
+            var current = queue.Dequeue();
+            var neighbors = new[] { new Vector3i(1, 0, 0), new Vector3i(-1, 0, 0), new Vector3i(0, 1, 0), new Vector3i(0, -1, 0), new Vector3i(0, 0, 1), new Vector3i(0, 0, -1) };
+            foreach (var dir in neighbors)
+            {
+                var neighbor = current + dir;
+                if (!visited.Contains(neighbor) && chunk.Voxels.ContainsKey(neighbor))
+                {
+                    visited.Add(neighbor);
+                    queue.Enqueue(neighbor);
+                    result.Add(neighbor);
+                }
+            }
+        }
+        return result;
+    }
+
+    public VoxelObject CreateAndAddVoxelObject(List<Vector3i> localVoxelCoordinates, MaterialType material, BepuVector3 worldPosition)
+    {
+        return _createAndAddVoxelObject(localVoxelCoordinates, material, worldPosition);
     }
 
     private VoxelObject _createAndAddVoxelObject(List<Vector3i> localVoxelCoordinates, MaterialType material, BepuVector3 worldPosition)
     {
         if (localVoxelCoordinates == null || localVoxelCoordinates.Count == 0) return null;
-
-        var newObject = new VoxelObject(localVoxelCoordinates, material);
+        var newObject = new VoxelObject(localVoxelCoordinates, material, this);
         var handle = PhysicsWorld.CreateVoxelObjectBody(localVoxelCoordinates, material, worldPosition, out var newCenterOfMass);
-
         if (!PhysicsWorld.Simulation.Bodies.BodyExists(handle)) return null;
-
         newObject.InitializePhysics(handle, newCenterOfMass.ToOpenTK());
         newObject.BuildMesh();
-
-        // TODO: Логика добавления в правильный чанк
-        if (_chunks.TryGetValue(Vector3i.Zero, out var chunk))
-        {
-            chunk.AddVoxelObject(newObject);
-        }
+        _voxelObjectsToAdd.Enqueue(newObject);
         RegisterVoxelObjectBody(handle, newObject);
-
         return newObject;
     }
 
@@ -236,17 +559,10 @@ public class WorldManager : IDisposable
     {
         var pose = PhysicsWorld.GetPose(targetObject.BodyHandle);
         var invOrientation = System.Numerics.Quaternion.Inverse(pose.Orientation);
-        var localHitLocation = BepuVector3.Transform(worldHitLocation - pose.Position, invOrientation) + targetObject.LocalCenterOfMass.ToSystemNumerics();
-        var localNormal = BepuVector3.Transform(worldHitNormal, invOrientation);
-        localHitLocation -= localNormal * 0.001f;
-
-        var voxelToRemove = new Vector3i(
-            (int)Math.Floor(localHitLocation.X + 0.5f),
-            (int)Math.Floor(localHitLocation.Y + 0.5f),
-            (int)Math.Floor(localHitLocation.Z + 0.5f));
+        var localHit = BepuVector3.Transform(worldHitLocation - pose.Position, invOrientation) + targetObject.LocalCenterOfMass.ToSystemNumerics() - BepuVector3.Transform(worldHitNormal, invOrientation) * 0.001f;
+        var voxelToRemove = new Vector3i((int)Math.Floor(localHit.X + 0.5f), (int)Math.Floor(localHit.Y + 0.5f), (int)Math.Floor(localHit.Z + 0.5f));
 
         if (!targetObject.VoxelCoordinates.Contains(voxelToRemove)) return;
-
         var remainingVoxels = new List<Vector3i>(targetObject.VoxelCoordinates);
         remainingVoxels.Remove(voxelToRemove);
 
@@ -256,8 +572,7 @@ public class WorldManager : IDisposable
             return;
         }
 
-        List<List<Vector3i>> newVoxelIslands = FindConnectedVoxelIslands(remainingVoxels);
-
+        var newVoxelIslands = FindConnectedVoxelIslands(remainingVoxels);
         if (newVoxelIslands.Count == 1)
         {
             targetObject.VoxelCoordinates.Remove(voxelToRemove);
@@ -267,54 +582,45 @@ public class WorldManager : IDisposable
         {
             var originalMaterial = targetObject.Material;
             var originalPose = pose;
-
             foreach (var island in newVoxelIslands)
             {
                 var localIslandCenter = BepuVector3.Zero;
-                foreach (var voxel in island)
-                    localIslandCenter += new BepuVector3(voxel.X, voxel.Y, voxel.Z);
+                foreach (var voxel in island) localIslandCenter += new BepuVector3(voxel.X, voxel.Y, voxel.Z);
                 localIslandCenter /= island.Count;
-
                 var offsetFromOldCoM = localIslandCenter - targetObject.LocalCenterOfMass.ToSystemNumerics();
                 var rotatedOffset = BepuVector3.Transform(offsetFromOldCoM, originalPose.Orientation);
                 var newWorldPosition = originalPose.Position + rotatedOffset;
-
-                _createAndAddVoxelObject(island, originalMaterial, newWorldPosition);
+                CreateAndAddVoxelObject(island, originalMaterial, newWorldPosition);
             }
             QueueForRemoval(targetObject);
         }
     }
 
-    private List<List<Vector3i>> FindConnectedVoxelIslands(List<Vector3i> voxels)
+    public List<List<Vector3i>> FindConnectedVoxelIslands(List<Vector3i> voxels)
     {
         var islands = new List<List<Vector3i>>();
         var voxelsToVisit = new HashSet<Vector3i>(voxels);
-
         while (voxelsToVisit.Count > 0)
         {
             var newIsland = new List<Vector3i>();
             var queue = new Queue<Vector3i>();
-            queue.Enqueue(voxelsToVisit.First());
-            voxelsToVisit.Remove(queue.Peek());
+            var firstVoxel = voxelsToVisit.First();
+            queue.Enqueue(firstVoxel);
+            voxelsToVisit.Remove(firstVoxel);
+            newIsland.Add(firstVoxel);
 
             while (queue.Count > 0)
             {
                 var currentVoxel = queue.Dequeue();
-                newIsland.Add(currentVoxel);
-
-                var neighbors = new Vector3i[]
+                var neighbors = new[] { new Vector3i(1, 0, 0), new Vector3i(-1, 0, 0), new Vector3i(0, 1, 0), new Vector3i(0, -1, 0), new Vector3i(0, 0, 1), new Vector3i(0, 0, -1) };
+                foreach (var dir in neighbors)
                 {
-                    currentVoxel + new Vector3i(1,0,0), currentVoxel + new Vector3i(-1,0,0),
-                    currentVoxel + new Vector3i(0,1,0), currentVoxel + new Vector3i(0,-1,0),
-                    currentVoxel + new Vector3i(0,0,1), currentVoxel + new Vector3i(0,0,-1)
-                };
-
-                foreach (var neighbor in neighbors)
-                {
+                    var neighbor = currentVoxel + dir;
                     if (voxelsToVisit.Contains(neighbor))
                     {
                         voxelsToVisit.Remove(neighbor);
                         queue.Enqueue(neighbor);
+                        newIsland.Add(neighbor);
                     }
                 }
             }
@@ -323,114 +629,9 @@ public class WorldManager : IDisposable
         return islands;
     }
 
-    private void CheckForDetachedVoxelGroups(Chunk sourceChunk, Vector3i removedVoxelLocalPos)
-{
-    var directions = new[]
-    {
-        new Vector3i(1, 0, 0), new Vector3i(-1, 0, 0),
-        new Vector3i(0, 1, 0), new Vector3i(0, -1, 0),
-        new Vector3i(0, 0, 1), new Vector3i(0, 0, -1)
-    };
+    #endregion
 
-    // Проверяем каждого соседа удаленного вокселя
-    foreach (var direction in directions)
-    {
-        var neighborPos = removedVoxelLocalPos + direction;
-
-        // Получаем доступ к вокселям чанка. Для этого нужно сделать поле _voxels в Chunk "internal" или добавить public get-тер
-        // В файле Chunk.cs измените: private readonly HashSet<Vector3i> _voxels -> public readonly HashSet<Vector3i> Voxels { get; }
-        if (!sourceChunk.Voxels.Contains(neighborPos)) continue;
-
-        var visited = new HashSet<Vector3i>();
-        var queue = new Queue<Vector3i>();
-        bool isGrounded = false;
-        
-        // Лимит поиска, чтобы избежать лагов при разрушении огромных структур
-        const int searchLimit = 2000; 
-
-        queue.Enqueue(neighborPos);
-        visited.Add(neighborPos);
-
-        while (queue.Count > 0)
-        {
-            if (visited.Count > searchLimit)
-            {
-                // Если мы проверили слишком много блоков, скорее всего, это часть большой структуры.
-                // Прерываем поиск для производительности.
-                isGrounded = true; 
-                break;
-            }
-
-            var currentPos = queue.Dequeue();
-
-            // Проверка "заземления": если воксель на границе чанка, считаем его устойчивым.
-            if (currentPos.X == 0 || currentPos.X == Chunk.ChunkSize - 1 ||
-                currentPos.Y == 0 || // Y=0 - это всегда земля
-                currentPos.Z == 0 || currentPos.Z == Chunk.ChunkSize - 1)
-            {
-                isGrounded = true;
-                break; // Нашли связь с миром, эта группа не отвалится
-            }
-
-            // Добавляем соседей в очередь
-            foreach (var dir in directions)
-            {
-                var nextPos = currentPos + dir;
-                if (sourceChunk.Voxels.Contains(nextPos) && !visited.Contains(nextPos))
-                {
-                    visited.Add(nextPos);
-                    queue.Enqueue(nextPos);
-                }
-            }
-        }
-
-        // Если поиск завершился, и мы не нашли "землю", значит это плавающий остров
-        if (!isGrounded)
-        {
-            Console.WriteLine($"[WorldManager] Найдена отсоединенная группа из {visited.Count} вокселей.");
-            
-            // Создаем список вокселей для нового объекта.
-            // Координаты должны быть относительными, поэтому найдем "минимальный угол" острова.
-            var minCorner = new Vector3i(int.MaxValue);
-            foreach (var pos in visited)
-            {
-                minCorner.X = Math.Min(minCorner.X, pos.X);
-                minCorner.Y = Math.Min(minCorner.Y, pos.Y);
-                minCorner.Z = Math.Min(minCorner.Z, pos.Z);
-            }
-
-            var newObjectVoxels = new List<Vector3i>();
-            foreach (var pos in visited)
-            {
-                newObjectVoxels.Add(pos - minCorner);
-            }
-
-            bool removedAny = false;
-            foreach (var pos in visited)
-            {
-                if (sourceChunk.RemoveVoxelAt(pos))
-                {
-                    removedAny = true;
-                }
-            }
-
-            // Шаг 2: Если что-то было удалено, ОДИН РАЗ финализируем изменения
-            if (removedAny)
-            {
-                sourceChunk.FinalizeGroupRemoval();
-            }
-
-            // --- КОНЕЦ ИЗМЕНЕНИЙ ---
-
-            var chunkWorldPos = (sourceChunk.Position * Chunk.ChunkSize).ToSystemNumerics();
-            var newObjectWorldPos = chunkWorldPos + new BepuVector3(minCorner.X, minCorner.Y, minCorner.Z);
-
-            _createAndAddVoxelObject(newObjectVoxels, sourceChunk.Material, newObjectWorldPos);
-
-            return;
-        }
-    }
-}
+    #region Boilerplate
 
     public void Render(Shader shader, Matrix4 view, Matrix4 projection)
     {
@@ -438,11 +639,22 @@ public class WorldManager : IDisposable
         {
             chunk.Render(shader, view, projection);
         }
+
+        foreach (var vo in _voxelObjects)
+        {
+            vo.Render(shader, view, projection);
+        }
     }
 
     public void Dispose()
     {
-        foreach (var vo in _bodyToVoxelObjectMap.Values)
+        _isDisposed = true;
+        _generationThread?.Join();
+        _finalizationThread?.Join();
+        _detachmentCheckThread?.Join();
+
+        var allObjects = new List<VoxelObject>(_voxelObjects);
+        foreach (var vo in allObjects)
         {
             QueueForRemoval(vo);
         }
@@ -456,4 +668,26 @@ public class WorldManager : IDisposable
         _bodyToVoxelObjectMap.Clear();
         _staticToChunkMap.Clear();
     }
+
+    public Chunk GetChunk(Vector3i chunkPosition) => _chunks.TryGetValue(chunkPosition, out var chunk) ? chunk : null;
+    public void RegisterChunkStatic(StaticHandle handle, Chunk chunk) => _staticToChunkMap[handle] = chunk;
+    private void RegisterVoxelObjectBody(BodyHandle handle, VoxelObject voxelObject) => _bodyToVoxelObjectMap[handle] = voxelObject;
+    public void QueueForRemoval(VoxelObject obj) { if (obj != null && !_objectsToRemove.Contains(obj)) _objectsToRemove.Add(obj); }
+    public void UnregisterChunkStatic(StaticHandle handle) => _staticToChunkMap.Remove(handle);
+
+    private void ProcessRemovals()
+    {
+        if (_objectsToRemove.Count == 0) return;
+        foreach (var obj in _objectsToRemove)
+        {
+            if (obj == null) continue;
+            _bodyToVoxelObjectMap.Remove(obj.BodyHandle);
+            PhysicsWorld.RemoveBody(obj.BodyHandle);
+            _voxelObjects.Remove(obj);
+            obj.Dispose();
+        }
+        _objectsToRemove.Clear();
+    }
+
+    #endregion
 }

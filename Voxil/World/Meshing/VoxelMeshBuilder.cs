@@ -8,25 +8,31 @@ using System.Collections.Generic;
 /// </summary>
 public static class VoxelMeshBuilder
 {
-    public static void GenerateMesh(ICollection<Vector3i> voxelCoordinates, MaterialType material,
-                                    out List<float> vertices, out List<float> colors, out List<float> aoValues)
+    public static void GenerateMesh(IDictionary<Vector3i, MaterialType> voxels,
+                                    out List<float> vertices, out List<float> colors, out List<float> aoValues,
+                                    System.Func<Vector3i, bool> isVoxelSolid = null) // НОВЫЙ ПАРАМЕТР
     {
         vertices = new List<float>();
         colors = new List<float>();
         aoValues = new List<float>();
 
-        if (voxelCoordinates.Count == 0) return;
+        if (voxels.Count == 0) return;
 
-        var voxelSet = new HashSet<Vector3i>(voxelCoordinates);
-        var blockColor = MaterialRegistry.GetColor(material);
+        // Если функция проверки не передана, используем только локальный словарь
+        isVoxelSolid ??= (pos) => voxels.ContainsKey(pos);
 
-        foreach (var coord in voxelCoordinates)
+        foreach (var pair in voxels)
         {
+            var coord = pair.Key;
+            var material = pair.Value;
+            var blockColor = MaterialRegistry.GetColor(material);
+
             for (int i = 0; i < 6; i++)
             {
-                if (!voxelSet.Contains(coord + FaceDirections[i]))
+                // ИСПОЛЬЗУЕМ ФУНКЦИЮ ПРОВЕРКИ ВМЕСТО ПРЯМОГО ContainsKey
+                if (!isVoxelSolid(coord + FaceDirections[i]))
                 {
-                    AddFace(vertices, colors, aoValues, coord, (Face)i, blockColor, voxelSet);
+                    AddFace(vertices, colors, aoValues, coord, (Face)i, blockColor, isVoxelSolid);
                 }
             }
         }
@@ -77,8 +83,8 @@ public static class VoxelMeshBuilder
     };
 
     private static void AddFace(List<float> vertices, List<float> colors, List<float> aoValues,
-                               Vector3i localPos, Face face, (float r, float g, float b) color,
-                               HashSet<Vector3i> voxelSet)
+                                Vector3i localPos, Face face, (float r, float g, float b) color,
+                                System.Func<Vector3i, bool> isVoxelSolid) // БЫЛО: IDictionary<Vector3i, MaterialType> voxels
     {
         int faceIndex = (int)face;
         var cornerIndices = FaceCornerIndices[faceIndex];
@@ -89,19 +95,14 @@ public static class VoxelMeshBuilder
         {
             int offset = i * 3;
             cornerAO[i] = CalculateVertexAO(
-                localPos + aoNeighbors[offset], localPos + aoNeighbors[offset + 1], localPos + aoNeighbors[offset + 2], voxelSet);
+                localPos + aoNeighbors[offset],
+                localPos + aoNeighbors[offset + 1],
+                localPos + aoNeighbors[offset + 2],
+                isVoxelSolid); // ИСПОЛЬЗУЕМ ФУНКЦИЮ
         }
 
-        if (cornerAO[0] + cornerAO[2] > cornerAO[1] + cornerAO[3])
-        {
-            AddTriangle(vertices, colors, aoValues, localPos, cornerIndices, cornerAO, color, 0, 1, 3);
-            AddTriangle(vertices, colors, aoValues, localPos, cornerIndices, cornerAO, color, 1, 2, 3);
-        }
-        else
-        {
-            AddTriangle(vertices, colors, aoValues, localPos, cornerIndices, cornerAO, color, 0, 1, 2);
-            AddTriangle(vertices, colors, aoValues, localPos, cornerIndices, cornerAO, color, 0, 2, 3);
-        }
+        AddTriangle(vertices, colors, aoValues, localPos, cornerIndices, cornerAO, color, 0, 1, 2);
+        AddTriangle(vertices, colors, aoValues, localPos, cornerIndices, cornerAO, color, 0, 2, 3);
     }
 
     private static void AddTriangle(List<float> vertices, List<float> colors, List<float> aoValues,
@@ -113,11 +114,12 @@ public static class VoxelMeshBuilder
         AddVertex(vertices, colors, aoValues, localPos + VoxelCorners[cornerIndices[idx2]], color, cornerAO[idx2]);
     }
 
-    private static float CalculateVertexAO(Vector3i side1, Vector3i side2, Vector3i corner, HashSet<Vector3i> voxelSet)
+    private static float CalculateVertexAO(Vector3i side1, Vector3i side2, Vector3i corner,
+                                          System.Func<Vector3i, bool> isVoxelSolid) // БЫЛО: IDictionary<Vector3i, MaterialType> voxels
     {
-        bool s1 = voxelSet.Contains(side1);
-        bool s2 = voxelSet.Contains(side2);
-        bool c = voxelSet.Contains(corner);
+        bool s1 = isVoxelSolid(side1);
+        bool s2 = isVoxelSolid(side2);
+        bool c = isVoxelSolid(corner);
 
         if (s1 && s2) return 0.6f;
 

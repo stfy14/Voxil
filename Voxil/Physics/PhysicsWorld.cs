@@ -45,9 +45,10 @@ public class PhysicsWorld : IDisposable
 
     public StaticHandle CreateStaticVoxelBody(Vector3 position, IList<OpenTK.Mathematics.Vector3i> voxelCoordinates)
     {
-        if (voxelCoordinates.Count == 0)
+        // ЗАЩИТА: Проверяем null и пустой список
+        if (voxelCoordinates == null || voxelCoordinates.Count == 0)
         {
-            Console.WriteLine("[PhysicsWorld] ОШИБКА: Попытка создать статическое тело с 0 вокселями!");
+            Console.WriteLine("[PhysicsWorld] ОШИБКА: Попытка создать статическое тело с null/пустым списком вокселей!");
             return new StaticHandle();
         }
 
@@ -55,22 +56,39 @@ public class PhysicsWorld : IDisposable
         try
         {
             var boxShape = new Box(1, 1, 1);
-            foreach (var coord in voxelCoordinates)
+
+            // ЗАЩИТА: try-catch на случай, если voxelCoordinates изменился во время итерации
+            try
             {
-                var pose = new RigidPose(new Vector3(coord.X, coord.Y, coord.Z));
-                compoundBuilder.Add(boxShape, pose, 1);
+                foreach (var coord in voxelCoordinates)
+                {
+                    var pose = new RigidPose(new Vector3(coord.X, coord.Y, coord.Z));
+                    compoundBuilder.Add(boxShape, pose, 1);
+                }
+            }
+            catch (InvalidOperationException ex)
+            {
+                Console.WriteLine($"[PhysicsWorld] Коллекция вокселей изменилась во время создания тела: {ex.Message}");
+                return new StaticHandle();
             }
 
             compoundBuilder.BuildKinematicCompound(out var children);
 
             if (children.Length == 0)
             {
-                Console.WriteLine("[PhysicsWorld] КРИТИЧЕСКАЯ ОШИБКА: BuildKinematicCompound вернул 0 дочерних объектов!");
+                Console.WriteLine("[PhysicsWorld] ОШИБКА: BuildKinematicCompound вернул 0 дочерних объектов!");
                 return new StaticHandle();
             }
 
             var compound = new Compound(children);
             var shapeIndex = Simulation.Shapes.Add(compound);
+
+            if (!shapeIndex.Exists)
+            {
+                Console.WriteLine("[PhysicsWorld] ОШИБКА: Не удалось добавить форму (возможно, переполнение пула)");
+                _bufferPool.Return(ref children);
+                return new StaticHandle();
+            }
 
             var staticDescription = new StaticDescription(position, shapeIndex);
             var staticHandle = Simulation.Statics.Add(staticDescription);

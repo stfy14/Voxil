@@ -9,12 +9,12 @@ using System;
 
 public class Game : GameWindow
 {
-    private Shader _shader;
-    private Camera _camera;
-    private InputManager _input;
-    private PhysicsWorld _physicsWorld;
-    private WorldManager _worldManager;
-    private PlayerController _playerController;
+    private Shader? _shader;
+    private Camera? _camera;
+    private InputManager? _input;
+    private PhysicsWorld? _physicsWorld;
+    private WorldManager? _worldManager;
+    private PlayerController? _playerController;
 
     public Game(GameWindowSettings gameWindowSettings, NativeWindowSettings nativeWindowSettings)
         : base(gameWindowSettings, nativeWindowSettings)
@@ -59,14 +59,6 @@ public class Game : GameWindow
         // 5. Создаем WorldManager, передавая ему ссылку на игрока
         _worldManager = new WorldManager(_physicsWorld, _playerController);
 
-        // 6. КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Принудительно генерируем стартовые чанки ДО первого кадра
-        Console.WriteLine("[Game] Форсируем генерацию стартовых чанков...");
-        for (int i = 0; i < 100; i++) // Обрабатываем достаточно чанков
-        {
-            _worldManager.Update(0.016f); // Симулируем кадр для обработки очереди
-        }
-        Console.WriteLine("[Game] Стартовые чанки сгенерированы.");
-
         // 7. Создаем менеджер ввода
         _input = new InputManager();
 
@@ -79,16 +71,22 @@ public class Game : GameWindow
         base.OnUpdateFrame(e);
         float deltaTime = (float)e.Time;
 
-        _input.Update(KeyboardState, MouseState);
+        _input!.Update(KeyboardState, MouseState);
         if (_input.IsExitPressed())
         {
             Close();
             return;
         }
 
-        _playerController.Update(_input, deltaTime);
-        _physicsWorld.Update(deltaTime);
-        _worldManager.Update(deltaTime);
+        // 1. Сначала обновляем логику игрока (он решает, куда идти)
+        _playerController!.Update(_input!, deltaTime);
+
+        // 2. Затем обновляем мир (он решает, какие чанки создать/удалить на основе позиции игрока)
+        //    Именно здесь будут происходить все безопасные изменения физики.
+        _worldManager!.Update(deltaTime);
+
+        // 3. И только ПОСЛЕ всех наших изменений мы просим движок посчитать один физический шаг.
+        _physicsWorld!.Update(deltaTime);
 
         if (_input.IsMouseButtonPressed(MouseButton.Left))
         {

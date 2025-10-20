@@ -11,19 +11,12 @@ public class Chunk : IDisposable
     public const int ChunkSize = 16;
     public Vector3i Position { get; }
     public WorldManager WorldManager { get; }
-    public MaterialType Material { get; private set; } = MaterialType.Dirt;
 
-    public HashSet<Vector3i> Voxels = new();
-    private VoxelObjectRenderer _renderer;
+    public Dictionary<Vector3i, MaterialType> Voxels { get; private set; } = new();
+    private VoxelObjectRenderer? _renderer;
     private StaticHandle _staticHandle;
     private bool _hasStaticBody = false;
-    public bool _isLoaded = false; //ИСПРАВИТЬ ПОТОМ НА PRIVATE
-
-    private readonly List<VoxelObject> _voxelObjects = new List<VoxelObject>();
-
-    private bool _needsPhysicsRebuild = false;
-    private float _physicsRebuildTimer = 0f;
-    private const float PhysicsRebuildDelay = 0.1f;
+    public bool _isLoaded = false;
 
     public Chunk(Vector3i position, WorldManager worldManager)
     {
@@ -31,42 +24,42 @@ public class Chunk : IDisposable
         WorldManager = worldManager;
     }
 
-    public void Generate(IWorldGenerator generator)
+    /// <summary>
+    /// Шаг 1: Просто сохраняет данные о вокселях. Меш не создается.
+    /// </summary>
+    public void SetVoxelData(Dictionary<Vector3i, MaterialType> voxels)
     {
-        generator.GenerateChunk(this, Voxels);
-        Load();
-    }
-
-    public void Load()
-    {
-        if (_isLoaded) return;
-        BuildMesh();
-        _needsPhysicsRebuild = true;
-        _physicsRebuildTimer = PhysicsRebuildDelay;
+        this.Voxels = voxels;
         _isLoaded = true;
     }
 
-    public void Unload()
+    /// <summary>
+    /// Шаг 2: Применяет финальный, готовый меш и ставит в очередь физику.
+    /// </summary>
+    public void ApplyFinalizedData(FinalizedChunkData data)
     {
         if (!_isLoaded) return;
 
-        _renderer?.Dispose();
-        _renderer = null;
+        if (_renderer == null)
+            _renderer = new VoxelObjectRenderer(data.Vertices, data.Colors, data.AoValues);
+        else
+            _renderer.UpdateMesh(data.Vertices, data.Colors, data.AoValues);
 
-        if (_hasStaticBody)
+        WorldManager.QueueForPhysicsRebuild(this);
+    }
+
+    public void RebuildMesh()
+    {
+        if (!_isLoaded) return;
+
+        // Создаем задачу на асинхронную перестройку меша
+        Func<Vector3i, bool> solidCheckFunc = localPos => IsVoxelSolidGlobal(localPos);
+        WorldManager.QueueForFinalization(new ChunkFinalizeRequest
         {
-            var staticRef = WorldManager.PhysicsWorld.Simulation.Statics.GetStaticReference(_staticHandle);
-            var shapeIndex = staticRef.Shape;
-
-            WorldManager.PhysicsWorld.Simulation.Statics.Remove(_staticHandle);
-
-            WorldManager.PhysicsWorld.Simulation.Shapes.Remove(shapeIndex);
-
-            _hasStaticBody = false;
-            _staticHandle = default;
-        }
-
-        _isLoaded = false;
+            Position = this.Position,
+            Voxels = this.Voxels,
+            IsVoxelSolidGlobalFunc = solidCheckFunc
+        });
     }
 
     public bool RemoveVoxelAndUpdate(Vector3i localPosition)
@@ -75,87 +68,46 @@ public class Chunk : IDisposable
         {
             if (_isLoaded)
             {
-                BuildMesh();
-                _needsPhysicsRebuild = true;
-                _physicsRebuildTimer = PhysicsRebuildDelay;
+                RebuildMesh();
+                WorldManager.NotifyNeighborsOfVoxelChange(Position, localPosition);
+                WorldManager.QueueForDetachmentCheck(this, localPosition);
             }
             return true;
         }
         return false;
     }
 
-    // ДОБАВЬТЕ этот новый метод. Он просто удаляет воксель из данных, НЕ обновляя меш.
-    // Он будет использоваться для удаления больших групп.
-    public bool RemoveVoxelAt(Vector3i localPosition)
+    public void RebuildPhysics()
     {
-        return Voxels.Remove(localPosition);
-    }
+        if (!_isLoaded) return;
 
-    // ДОБАВЬТЕ этот метод для завершения пакетного удаления.
-    public void FinalizeGroupRemoval()
-    {
-        if (_isLoaded)
-        {
-            BuildMesh();
-            _needsPhysicsRebuild = true;
-            _physicsRebuildTimer = PhysicsRebuildDelay;
-        }
-    }
-
-    public void AddVoxelObject(VoxelObject obj) => _voxelObjects.Add(obj);
-    public void RemoveVoxelObject(VoxelObject obj) => _voxelObjects.Remove(obj);
-
-    private void BuildMesh()
-    {
-        VoxelMeshBuilder.GenerateMesh(Voxels, MaterialType.Dirt, out var vertices, out var colors, out var aoValues);
-        if (_renderer == null)
-            _renderer = new VoxelObjectRenderer(vertices, colors, aoValues);
-        else
-            _renderer.UpdateMesh(vertices, colors, aoValues);
-    }
-
-    private void RebuildPhysics()
-    {
         if (_hasStaticBody)
         {
             var staticRef = WorldManager.PhysicsWorld.Simulation.Statics.GetStaticReference(_staticHandle);
-            var oldShapeIndex = staticRef.Shape;
-
+            var shapeIndex = staticRef.Shape;
             WorldManager.PhysicsWorld.Simulation.Statics.Remove(_staticHandle);
-            WorldManager.PhysicsWorld.Simulation.Shapes.Remove(oldShapeIndex);
-
+            WorldManager.PhysicsWorld.Simulation.Shapes.Remove(shapeIndex);
+            WorldManager.UnregisterChunkStatic(_staticHandle);
             _hasStaticBody = false;
         }
 
         if (Voxels.Count > 0)
         {
             var worldPosition = (Position * ChunkSize).ToSystemNumerics();
-            _staticHandle = WorldManager.PhysicsWorld.CreateStaticVoxelBody(worldPosition, Voxels.ToList());
-            _hasStaticBody = true;
-            WorldManager.RegisterChunkStatic(_staticHandle, this);
-        }
-
-        _needsPhysicsRebuild = false;
-    }
-
-    public void Update(float deltaTime)
-    {
-        if (!_isLoaded) return;
-
-        if (_needsPhysicsRebuild)
-        {
-            _physicsRebuildTimer -= deltaTime;
-            if (_physicsRebuildTimer <= 0f)
+            var voxelCoordinates = Voxels.Keys.ToList();
+            _staticHandle = WorldManager.PhysicsWorld.CreateStaticVoxelBody(worldPosition, voxelCoordinates);
+            if (_staticHandle.Value != 0)
             {
-                RebuildPhysics();
+                _hasStaticBody = true;
+                WorldManager.RegisterChunkStatic(_staticHandle, this);
             }
         }
+    }
 
-        foreach (var voxelObject in _voxelObjects)
-        {
-            var pose = WorldManager.PhysicsWorld.GetPose(voxelObject.BodyHandle);
-            voxelObject.UpdatePose(pose);
-        }
+    private bool IsVoxelSolidGlobal(Vector3i localPos)
+    {
+        Vector3i worldPos = (Position * ChunkSize) + localPos;
+        return WorldManager.IsVoxelSolidWorld(worldPos);
     }
 
     public void Render(Shader shader, Matrix4 view, Matrix4 projection)
@@ -164,21 +116,29 @@ public class Chunk : IDisposable
         var worldPosition = Position * ChunkSize;
         Matrix4 model = Matrix4.CreateTranslation(worldPosition.X, worldPosition.Y, worldPosition.Z);
         _renderer.Render(shader, model, view, projection);
+    }
 
-        foreach (var voxelObject in _voxelObjects)
+    public void Unload()
+    {
+        if (!_isLoaded) return;
+        _isLoaded = false;
+
+        _renderer?.Dispose();
+        _renderer = null;
+
+        if (_hasStaticBody)
         {
-            voxelObject.Render(shader, view, projection);
+            var staticRef = WorldManager.PhysicsWorld.Simulation.Statics.GetStaticReference(_staticHandle);
+            WorldManager.PhysicsWorld.Simulation.Shapes.Remove(staticRef.Shape);
+            WorldManager.PhysicsWorld.Simulation.Statics.Remove(_staticHandle);
+            WorldManager.UnregisterChunkStatic(_staticHandle);
+            _hasStaticBody = false;
+            _staticHandle = default;
         }
     }
 
     public void Dispose()
     {
-        foreach (var obj in new List<VoxelObject>(_voxelObjects))
-        {
-            WorldManager.QueueForRemoval(obj);
-        }
-        _voxelObjects.Clear();
-
         Unload();
         Voxels.Clear();
     }

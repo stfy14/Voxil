@@ -5,4 +5,5 @@ public enum MaterialType : byte
     Dirt = 1,
     Stone = 2,
     Wood = 3,
+    Water = 4
 }

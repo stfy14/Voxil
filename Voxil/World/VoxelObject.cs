@@ -10,16 +10,18 @@ public class VoxelObject : IDisposable
     public MaterialType Material { get; }
     public BodyHandle BodyHandle { get; private set; }
     public Vector3 LocalCenterOfMass { get; private set; }
+    public WorldManager WorldManager { get; }
 
     public Vector3 Position { get; private set; }
     public Quaternion Rotation { get; private set; }
 
     private VoxelObjectRenderer _renderer;
 
-    public VoxelObject(List<Vector3i> voxelCoordinates, MaterialType material)
+    public VoxelObject(List<Vector3i> voxelCoordinates, MaterialType material, WorldManager worldManager)
     {
         VoxelCoordinates = voxelCoordinates;
         Material = material;
+        WorldManager = worldManager;
     }
 
     public void InitializePhysics(BodyHandle handle, Vector3 localCenterOfMass)
@@ -39,24 +41,32 @@ public class VoxelObject : IDisposable
     {
         _renderer?.Dispose();
 
-        VoxelMeshBuilder.GenerateMesh(VoxelCoordinates, Material,
+        var voxelsDict = new Dictionary<Vector3i, MaterialType>();
+        foreach (var coord in VoxelCoordinates)
+        {
+            voxelsDict[coord] = this.Material;
+        }
+
+        VoxelMeshBuilder.GenerateMesh(voxelsDict,
             out var vertices, out var colors, out var aoValues);
 
         _renderer = new VoxelObjectRenderer(vertices, colors, aoValues);
     }
 
-    // ИСПРАВЛЕННЫЙ МЕТОД
     public void RebuildMeshAndPhysics(PhysicsWorld physicsWorld)
     {
-        VoxelMeshBuilder.GenerateMesh(VoxelCoordinates, Material,
+        var voxelsDict = new Dictionary<Vector3i, MaterialType>();
+        foreach (var coord in VoxelCoordinates)
+        {
+            voxelsDict[coord] = this.Material;
+        }
+
+        VoxelMeshBuilder.GenerateMesh(voxelsDict,
             out var vertices, out var colors, out var aoValues);
 
         _renderer.UpdateMesh(vertices, colors, aoValues);
 
-        // Метод UpdateVoxelObjectBody теперь снова существует в PhysicsWorld
         var newHandle = physicsWorld.UpdateVoxelObjectBody(BodyHandle, VoxelCoordinates, Material, out var newCenterOfMass);
-
-        // ИСПРАВЛЕНО: Добавлено преобразование .ToOpenTK()
         this.LocalCenterOfMass = newCenterOfMass.ToOpenTK();
     }
 

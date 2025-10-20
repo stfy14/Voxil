@@ -10,7 +10,7 @@ public struct NarrowPhaseCallbacks : INarrowPhaseCallbacks
 {
     public PlayerState PlayerState;
 
-    public void Initialize(Simulation simulation) { }
+    public void Initialize(Simulation? simulation) { }
     public void Dispose() { }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

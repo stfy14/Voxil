@@ -16,7 +16,8 @@ public static class MaterialRegistry
             [MaterialType.Air] = new MaterialProperties((0, 0, 0), 0f),
             [MaterialType.Dirt] = new MaterialProperties((0.55f, 0.27f, 0.07f), 1.3f),
             [MaterialType.Stone] = new MaterialProperties((0.5f, 0.5f, 0.5f), 2.5f),
-            [MaterialType.Wood] = new MaterialProperties((0.4f, 0.26f, 0.13f), 0.7f)
+            [MaterialType.Wood] = new MaterialProperties((0.4f, 0.26f, 0.13f), 0.7f),
+            [MaterialType.Water] = new MaterialProperties((0.2f, 0.4f, 0.8f), 1.0f)
         };
     }
 
