@@ -25,18 +25,20 @@ public class Chunk : IDisposable
     }
 
     /// <summary>
-    /// Шаг 1: Просто сохраняет данные о вокселях. Меш не создается.
+    /// Шаг 1: Сохраняет данные о вокселях и СРАЗУ ставит в очередь физику.
     /// </summary>
-    public void SetVoxelData(Dictionary<Vector3i, MaterialType> voxels)
+    public void SetVoxelDataAndQueuePhysics(Dictionary<Vector3i, MaterialType> voxels)
     {
         this.Voxels = voxels;
         _isLoaded = true;
+        // Делаем чанк "твердым" как можно раньше
+        WorldManager.QueueForPhysicsRebuild(this);
     }
 
     /// <summary>
-    /// Шаг 2: Применяет финальный, готовый меш и ставит в очередь физику.
+    /// Шаг 2: Применяет финальный, готовый меш, делая чанк видимым.
     /// </summary>
-    public void ApplyFinalizedData(FinalizedChunkData data)
+    public void ApplyFinalizedMesh(FinalizedChunkData data)
     {
         if (!_isLoaded) return;
 
@@ -44,15 +46,12 @@ public class Chunk : IDisposable
             _renderer = new VoxelObjectRenderer(data.Vertices, data.Colors, data.AoValues);
         else
             _renderer.UpdateMesh(data.Vertices, data.Colors, data.AoValues);
-
-        WorldManager.QueueForPhysicsRebuild(this);
     }
 
-    public void RebuildMesh()
+    public void RebuildMeshAsync()
     {
         if (!_isLoaded) return;
 
-        // Создаем задачу на асинхронную перестройку меша
         Func<Vector3i, bool> solidCheckFunc = localPos => IsVoxelSolidGlobal(localPos);
         WorldManager.QueueForFinalization(new ChunkFinalizeRequest
         {
@@ -68,9 +67,9 @@ public class Chunk : IDisposable
         {
             if (_isLoaded)
             {
-                RebuildMesh();
-                WorldManager.NotifyNeighborsOfVoxelChange(Position, localPosition);
-                WorldManager.QueueForDetachmentCheck(this, localPosition);
+                RebuildMeshAsync(); // Асинхронно обновляем свой меш
+                WorldManager.NotifyNeighborsOfVoxelChange(Position, localPosition); // Асинхронно обновляем соседей
+                WorldManager.QueueForDetachmentCheck(this, localPosition); // Асинхронно проверяем отрыв
             }
             return true;
         }
@@ -129,8 +128,8 @@ public class Chunk : IDisposable
         if (_hasStaticBody)
         {
             var staticRef = WorldManager.PhysicsWorld.Simulation.Statics.GetStaticReference(_staticHandle);
-            WorldManager.PhysicsWorld.Simulation.Shapes.Remove(staticRef.Shape);
             WorldManager.PhysicsWorld.Simulation.Statics.Remove(_staticHandle);
+            WorldManager.PhysicsWorld.Simulation.Shapes.Remove(staticRef.Shape);
             WorldManager.UnregisterChunkStatic(_staticHandle);
             _hasStaticBody = false;
             _staticHandle = default;

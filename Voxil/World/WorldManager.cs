@@ -134,6 +134,7 @@ public class WorldManager : IDisposable
             {
                 var voxels = new Dictionary<Vector3i, MaterialType>();
                 _generator.GenerateChunk(chunkPos, voxels);
+                // ИСПРАВЛЕНИЕ: Используем правильный конструктор
                 var result = new ChunkGenerationResult(chunkPos, voxels);
                 _initialDataQueue.Enqueue(result);
             }
@@ -268,9 +269,13 @@ public class WorldManager : IDisposable
             if (!_chunks.ContainsKey(result.Position))
             {
                 var newChunk = new Chunk(result.Position, this);
-                newChunk.SetVoxelData(result.Voxels);
                 _chunks.Add(result.Position, newChunk);
 
+                // --- ГЛАВНОЕ ИЗМЕНЕНИЕ ---
+                // 1. Делаем чанк "твердым"
+                newChunk.SetVoxelDataAndQueuePhysics(result.Voxels);
+
+                // 2. Параллельно запускаем финализацию меша
                 Func<Vector3i, bool> solidCheckFunc = localPos => IsVoxelSolidWorld((newChunk.Position * Chunk.ChunkSize) + localPos);
                 QueueForFinalization(new ChunkFinalizeRequest
                 {
@@ -289,7 +294,8 @@ public class WorldManager : IDisposable
         {
             if (_chunks.TryGetValue(data.Position, out var chunk))
             {
-                chunk.ApplyFinalizedData(data);
+                // Применяем только меш, физика уже в очереди
+                chunk.ApplyFinalizedMesh(data);
             }
         }
     }
@@ -311,7 +317,7 @@ public class WorldManager : IDisposable
 
             if (removedAny)
             {
-                result.OriginChunk.RebuildMesh();
+                result.OriginChunk.RebuildMeshAsync();
             }
 
             var chunkWorldPos = (result.OriginChunk.Position * Chunk.ChunkSize).ToSystemNumerics();
@@ -364,7 +370,7 @@ public class WorldManager : IDisposable
         {
             if (_chunks.TryGetValue(chunkPos + offset, out var neighbor))
             {
-                neighbor.RebuildMesh();
+                neighbor.RebuildMeshAsync();
             }
         };
 
