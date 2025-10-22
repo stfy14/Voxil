@@ -1,0 +1,8 @@
+{
+  "profiles": {
+    "Voxil": {
+      "commandName": "Project",
+      "nativeDebugging": true
+    }
+  }
+}

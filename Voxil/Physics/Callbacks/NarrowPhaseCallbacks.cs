@@ -1,4 +1,4 @@
-﻿// /Physics/Callbacks/NarrowPhaseCallbacks.cs
+﻿// /Physics/Callbacks/NarrowPhaseCallbacks.cs - FIXED
 using BepuPhysics;
 using BepuPhysics.Collidables;
 using BepuPhysics.CollisionDetection;
@@ -10,71 +10,82 @@ public struct NarrowPhaseCallbacks : INarrowPhaseCallbacks
 {
     public PlayerState PlayerState;
 
-    public void Initialize(Simulation? simulation) { }
+    public void Initialize(Simulation simulation) { }
     public void Dispose() { }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public bool AllowContactGeneration(int workerIndex, CollidableReference a, CollidableReference b, ref float speculativeMargin)
     {
-        if (PlayerState == null)
-        {
-            return true;
-        }
-        var playerHandle = PlayerState.BodyHandle;
-        var aIsPlayer = a.Mobility == CollidableMobility.Dynamic && a.BodyHandle.Value == playerHandle.Value;
-        var bIsPlayer = b.Mobility == CollidableMobility.Dynamic && b.BodyHandle.Value == playerHandle.Value;
+        // Разрешаем все контакты
         return true;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public bool AllowContactGeneration(int workerIndex, CollidablePair pair, int childIndexA, int childIndexB) => true;
+    public bool AllowContactGeneration(int workerIndex, CollidablePair pair, int childIndexA, int childIndexB)
+    {
+        return true;
+    }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public bool ConfigureContactManifold<TManifold>(int workerIndex, CollidablePair pair, ref TManifold manifold, out PairMaterialProperties pairMaterialProperties) where TManifold : unmanaged, IContactManifold<TManifold>
+    public bool ConfigureContactManifold<TManifold>(
+        int workerIndex,
+        CollidablePair pair,
+        ref TManifold manifold,
+        out PairMaterialProperties pairMaterialProperties) where TManifold : unmanaged, IContactManifold<TManifold>
     {
-        var aIsPlayer = pair.A.BodyHandle == PlayerState.BodyHandle;
-        var bIsPlayer = pair.B.BodyHandle == PlayerState.BodyHandle;
+        // Проверяем, участвует ли игрок в контакте
+        var aIsPlayer = pair.A.Mobility == CollidableMobility.Dynamic && pair.A.BodyHandle == PlayerState.BodyHandle;
+        var bIsPlayer = pair.B.Mobility == CollidableMobility.Dynamic && pair.B.BodyHandle == PlayerState.BodyHandle;
 
         if (aIsPlayer || bIsPlayer)
         {
-            // Устанавливаем свойства по умолчанию на случай, если нет точек контакта
+            // Инициализируем дефолтные значения
             float friction = 0.0f;
 
-            // --- НАЧАЛО ИСПРАВЛЕНИЯ ---
-            // Проверяем, что есть хотя бы одна точка контакта
+            // ИСПРАВЛЕНИЕ: Проверяем наличие точек контакта
             if (manifold.Count > 0)
             {
-                // Вызываем метод GetNormal, передавая саму структуру manifold по ссылке (ref)
-                // и индекс нужной точки контакта (в данном случае, первой - 0).
-                // Это правильный синтаксис, который ожидает BepuPhysics.
-                Vector3 normal = manifold.GetNormal(ref manifold, 0);
+                // ПРАВИЛЬНЫЙ способ получения нормали из манифолда
+                // GetContact требует все out параметры
+                manifold.GetContact(0, out var offset, out var depth, out var featureId, out var contactIndex);
 
-                // Нормаль всегда направлена от объекта A к объекту B.
-                // Если игрок - это объект A, нам нужно инвертировать нормаль,
-                // чтобы она всегда указывала "от" поверхности, с которой мы столкнулись.
-                if (aIsPlayer)
+                // Вычисляем нормаль из offset
+                Vector3 normal;
+                if (offset.LengthSquared() > 0.0001f)
+                {
+                    normal = Vector3.Normalize(offset);
+                }
+                else
+                {
+                    // Если offset нулевой, используем направление вверх как fallback
+                    normal = Vector3.UnitY;
+                }
+
+                // Если игрок - это объект B, инвертируем нормаль
+                // (нормаль всегда направлена от A к B)
+                if (bIsPlayer)
                 {
                     normal = -normal;
                 }
 
-                // Если Y-компонент нормали смотрит вверх (больше ~cos(45)), это пол.
+                // Проверяем, направлена ли нормаль вверх (это пол)
+                // cos(45°) ≈ 0.707
                 if (normal.Y > 0.707f)
                 {
-                    friction = 1.0f; // Высокое трение для пола
+                    friction = 1.0f; // Высокое трение для ходьбы по полу
                 }
             }
-            // --- КОНЕЦ ИСПРАВЛЕНИЯ ---
 
             pairMaterialProperties = new PairMaterialProperties
             {
-                FrictionCoefficient = friction, // Применяем вычисленное трение
+                FrictionCoefficient = friction,
                 MaximumRecoveryVelocity = 2f,
                 SpringSettings = new SpringSettings(30, 1)
             };
         }
         else
         {
-            // Стандартные свойства для всех остальных объектов
+            // Стандартные свойства для объектов без игрока
             pairMaterialProperties = new PairMaterialProperties
             {
                 FrictionCoefficient = 1f,
@@ -82,10 +93,18 @@ public struct NarrowPhaseCallbacks : INarrowPhaseCallbacks
                 SpringSettings = new SpringSettings(30, 1)
             };
         }
+
         return true;
     }
 
-
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public bool ConfigureContactManifold(int workerIndex, CollidablePair pair, int childIndexA, int childIndexB, ref ConvexContactManifold manifold) => true;
+    public bool ConfigureContactManifold(
+        int workerIndex,
+        CollidablePair pair,
+        int childIndexA,
+        int childIndexB,
+        ref ConvexContactManifold manifold)
+    {
+        return true;
+    }
 }

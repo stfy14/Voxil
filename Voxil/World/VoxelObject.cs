@@ -1,4 +1,4 @@
-﻿// /World/VoxelObject.cs
+﻿// /World/VoxelObject.cs - REFACTORED
 using BepuPhysics;
 using OpenTK.Mathematics;
 using System;
@@ -16,12 +16,13 @@ public class VoxelObject : IDisposable
     public Quaternion Rotation { get; private set; }
 
     private VoxelObjectRenderer _renderer;
+    private bool _isDisposed = false;
 
     public VoxelObject(List<Vector3i> voxelCoordinates, MaterialType material, WorldManager worldManager)
     {
-        VoxelCoordinates = voxelCoordinates;
+        VoxelCoordinates = voxelCoordinates ?? throw new ArgumentNullException(nameof(voxelCoordinates));
         Material = material;
-        WorldManager = worldManager;
+        WorldManager = worldManager ?? throw new ArgumentNullException(nameof(worldManager));
     }
 
     public void InitializePhysics(BodyHandle handle, Vector3 localCenterOfMass)
@@ -39,41 +40,54 @@ public class VoxelObject : IDisposable
 
     public void BuildMesh()
     {
+        if (_isDisposed) return;
+
         _renderer?.Dispose();
 
         var voxelsDict = new Dictionary<Vector3i, MaterialType>();
         foreach (var coord in VoxelCoordinates)
         {
-            voxelsDict[coord] = this.Material;
+            voxelsDict[coord] = Material;
         }
 
+        // Для изолированного объекта используем простую проверку (только внутри объекта)
         VoxelMeshBuilder.GenerateMesh(voxelsDict,
-            out var vertices, out var colors, out var aoValues);
+            out var vertices, out var colors, out var aoValues,
+            localPos => voxelsDict.ContainsKey(localPos));
 
         _renderer = new VoxelObjectRenderer(vertices, colors, aoValues);
     }
 
     public void RebuildMeshAndPhysics(PhysicsWorld physicsWorld)
     {
+        if (_isDisposed) return;
+
         var voxelsDict = new Dictionary<Vector3i, MaterialType>();
         foreach (var coord in VoxelCoordinates)
         {
-            voxelsDict[coord] = this.Material;
+            voxelsDict[coord] = Material;
         }
 
         VoxelMeshBuilder.GenerateMesh(voxelsDict,
-            out var vertices, out var colors, out var aoValues);
+            out var vertices, out var colors, out var aoValues,
+            localPos => voxelsDict.ContainsKey(localPos));
 
-        _renderer.UpdateMesh(vertices, colors, aoValues);
+        _renderer?.UpdateMesh(vertices, colors, aoValues);
 
-        var newHandle = physicsWorld.UpdateVoxelObjectBody(BodyHandle, VoxelCoordinates, Material, out var newCenterOfMass);
-        this.LocalCenterOfMass = newCenterOfMass.ToOpenTK();
+        try
+        {
+            var newHandle = physicsWorld.UpdateVoxelObjectBody(BodyHandle, VoxelCoordinates, Material, out var newCenterOfMass);
+            LocalCenterOfMass = newCenterOfMass.ToOpenTK();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[VoxelObject] Error updating physics: {ex.Message}");
+        }
     }
-
 
     public void Render(Shader shader, Matrix4 view, Matrix4 projection)
     {
-        if (_renderer == null) return;
+        if (_isDisposed || _renderer == null) return;
 
         Matrix4 model = Matrix4.CreateTranslation(-LocalCenterOfMass) *
                         Matrix4.CreateFromQuaternion(Rotation) *
@@ -84,6 +98,10 @@ public class VoxelObject : IDisposable
 
     public void Dispose()
     {
+        if (_isDisposed) return;
+        _isDisposed = true;
+
         _renderer?.Dispose();
+        _renderer = null;
     }
 }

@@ -1,42 +1,37 @@
-﻿// /Physics/Callbacks/RayHitHandler.cs
+﻿// /Physics/RayHitHandler.cs
 using BepuPhysics;
 using BepuPhysics.Collidables;
+using BepuPhysics.CollisionDetection;
 using BepuPhysics.Trees;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 
+/// <summary>
+/// Общий обработчик пересечений луча (для проверки земли под игроком и т.д.)
+/// </summary>
 public struct RayHitHandler : IRayHitHandler
 {
+    public BodyHandle BodyToIgnore;
+
     public bool Hit;
     public float T;
-    public BodyHandle Body;
     public Vector3 Normal;
-    public CollidableReference Collidable;
-    public BodyHandle BodyToIgnore;
+    public BodyHandle Body;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public bool AllowTest(CollidableReference collidable)
     {
-        // Игнорируем только конкретное динамическое тело (например, игрока)
-        if (collidable.Mobility == CollidableMobility.Dynamic &&
-            collidable.BodyHandle.Value == BodyToIgnore.Value)
+        if (collidable.Mobility == CollidableMobility.Dynamic)
         {
-            return false;
+            return collidable.BodyHandle.Value != BodyToIgnore.Value;
         }
-
         return true;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public bool AllowTest(CollidableReference collidable, int childIndex)
     {
-        if (collidable.Mobility == CollidableMobility.Dynamic &&
-            collidable.BodyHandle.Value == BodyToIgnore.Value)
-        {
-            return false;
-        }
-
-        return true;
+        return AllowTest(collidable);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -44,21 +39,16 @@ public struct RayHitHandler : IRayHitHandler
     {
         if (t < maximumT)
         {
-            maximumT = t;
             Hit = true;
             T = t;
             Normal = normal;
-            Collidable = collidable;
 
-            // Body заполняем только для динамических объектов
             if (collidable.Mobility == CollidableMobility.Dynamic)
             {
                 Body = collidable.BodyHandle;
             }
-            else
-            {
-                Body = default;
-            }
+
+            maximumT = t;
         }
     }
 }
