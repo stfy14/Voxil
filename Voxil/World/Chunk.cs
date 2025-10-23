@@ -1,4 +1,4 @@
-﻿// /World/Chunk.cs - REFACTORED
+﻿// /World/Chunk.cs - ПОЛНОСТЬЮ ИСПРАВЛЕН
 using BepuPhysics;
 using BepuPhysics.Collidables;
 using OpenTK.Mathematics;
@@ -12,17 +12,16 @@ public class Chunk : IDisposable
     public WorldManager WorldManager { get; }
 
     public Dictionary<Vector3i, MaterialType> Voxels { get; private set; } = new();
-    public readonly object VoxelsLock = new(); // Thread-safe доступ к вокселям
+    public readonly object VoxelsLock = new();
 
     private VoxelObjectRenderer _renderer;
     private List<StaticHandle> _staticHandles = new List<StaticHandle>();
     private bool _hasStaticBody = false;
 
     public bool IsLoaded { get; private set; } = false;
-    public bool HasPhysics => _hasStaticBody; // НОВОЕ: Проверка наличия физики
+    public bool HasPhysics => _hasStaticBody;
     private bool _isDisposed = false;
 
-    // НОВОЕ: Кеш меша для отложенного применения
     private List<float> _pendingVertices;
     private List<float> _pendingColors;
     private List<float> _pendingAoValues;
@@ -33,9 +32,6 @@ public class Chunk : IDisposable
         WorldManager = worldManager;
     }
 
-    /// <summary>
-    /// Устанавливает данные о вокселях после генерации
-    /// </summary>
     public void SetVoxelData(Dictionary<Vector3i, MaterialType> voxels)
     {
         lock (VoxelsLock)
@@ -45,14 +41,11 @@ public class Chunk : IDisposable
         }
     }
 
-    /// <summary>
-    /// Применяет готовый меш из фонового потока
-    /// </summary>
     public void ApplyMesh(List<float> vertices, List<float> colors, List<float> aoValues)
     {
         if (!IsLoaded || _isDisposed) return;
 
-        // КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Если физики ещё нет - кешируем меш
+        // Если физики ещё нет - кешируем меш
         if (!HasPhysics && _renderer == null)
         {
             _pendingVertices = vertices;
@@ -71,15 +64,12 @@ public class Chunk : IDisposable
             _renderer.UpdateMesh(vertices, colors, aoValues);
         }
 
-        // Очищаем кеш после применения
+        // Очищаем кеш
         _pendingVertices = null;
         _pendingColors = null;
         _pendingAoValues = null;
     }
 
-    /// <summary>
-    /// Удаляет воксель и запускает все необходимые обновления
-    /// </summary>
     public bool RemoveVoxelAndUpdate(Vector3i localPosition)
     {
         bool removed;
@@ -90,116 +80,97 @@ public class Chunk : IDisposable
 
         if (removed && IsLoaded)
         {
-            // Обновляем меш с высоким приоритетом (игрок ждёт результата)
             WorldManager.RebuildChunkMeshAsync(this, priority: 0);
-
-            // Обновляем физику с высоким приоритетом
             WorldManager.QueuePhysicsRebuild(this, priority: 0);
-
-            // Уведомляем соседей (они обновят свои меши для корректного AO)
             WorldManager.NotifyNeighborsOfVoxelChange(Position, localPosition);
-
-            // Проверяем отсоединение
             WorldManager.QueueDetachmentCheck(this, localPosition);
         }
 
         return removed;
     }
 
-    /// <summary>
-    /// Перестраивает физическое тело чанка
-    /// </summary>
-    public void RebuildPhysics()
+    private void ClearPhysics()
     {
-        if (!IsLoaded || _isDisposed) return;
-
-        // Удаляем старое физическое тело (поддерживаем несколько хэндлов)
-        if (_hasStaticBody)
-        {
-            try
-            {
-                foreach (var handle in _staticHandles)
-                {
-                    try
-                    {
-                        if (WorldManager.PhysicsWorld.Simulation.Statics.StaticExists(handle))
-                        {
-                            var staticRef = WorldManager.PhysicsWorld.Simulation.Statics.GetStaticReference(handle);
-                            var shapeIndex = staticRef.Shape;
-
-                            // Сначала удаляем статику
-                            WorldManager.PhysicsWorld.Simulation.Statics.Remove(handle);
-
-                            // Потом удаляем форму (если она существует)
-                            if (shapeIndex.Exists)
-                            {
-                                WorldManager.PhysicsWorld.Simulation.Shapes.Remove(shapeIndex);
-                            }
-
-                            WorldManager.UnregisterChunkStatic(handle);
-                        }
-                    }
-                    catch (Exception innerEx)
-                    {
-                        Console.WriteLine($"[Chunk {Position}] Error removing a static handle: {innerEx.Message}");
-                    }
-                }
-
-                _staticHandles.Clear();
-                _hasStaticBody = false;
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[Chunk {Position}] Error removing physics body: {ex.Message}");
-                _staticHandles.Clear();
-                _hasStaticBody = false;
-            }
-        }
-
-        // Создаём новое физическое тело, если есть воксели
-        List<Vector3i> voxelCoordinates;
-        lock (VoxelsLock)
-        {
-            if (Voxels.Count == 0)
-            {
-                return; // Не логируем - это нормально
-            }
-
-            voxelCoordinates = new List<Vector3i>(Voxels.Keys);
-        }
+        if (!_hasStaticBody) return;
 
         try
         {
-            var worldPosition = (Position * ChunkSize).ToSystemNumerics();
-            var staticHandles = WorldManager.PhysicsWorld.CreateStaticVoxelBody(worldPosition, voxelCoordinates);
-
-            if (staticHandles != null && staticHandles.Count > 0)
+            foreach (var handle in _staticHandles)
             {
-                // Сохраняем все handles
-                foreach (var h in staticHandles)
+                try
                 {
-                    _staticHandles.Add(h);
-                    WorldManager.RegisterChunkStatic(h, this);
+                    if (WorldManager.PhysicsWorld.Simulation.Statics.StaticExists(handle))
+                    {
+                        var staticRef = WorldManager.PhysicsWorld.Simulation.Statics.GetStaticReference(handle);
+                        var shapeIndex = staticRef.Shape;
+
+                        // 1. Удаляем статическое тело
+                        WorldManager.PhysicsWorld.Simulation.Statics.Remove(handle);
+                        WorldManager.UnregisterChunkStatic(handle);
+
+                        // 2. Удаляем его форму ИЗ СИМУЛЯЦИИ
+                        if (shapeIndex.Exists)
+                        {
+                            WorldManager.PhysicsWorld.Simulation.Shapes.Remove(shapeIndex);
+
+                            // 3. ВОЗВРАЩАЕМ ЕГО БУФЕР В ПУЛ!
+                            WorldManager.PhysicsWorld.ReturnCompoundBuffer(shapeIndex);
+                        }
+
+                        // 3. Убираем его из словаря WorldManager'а
+                        WorldManager.UnregisterChunkStatic(handle);
+                    }
                 }
-
-                _hasStaticBody = true;
-
-                // НОВОЕ: Если у нас был отложенный меш - применяем его сейчас
-                if (_pendingVertices != null && _pendingColors != null && _pendingAoValues != null)
+                catch (Exception ex)
                 {
-                    ApplyMesh(_pendingVertices, _pendingColors, _pendingAoValues);
+                    Console.WriteLine($"[Chunk {Position}] Error disposing static handle: {ex.Message}");
                 }
-            }
-            else
-            {
-                Console.WriteLine($"[Chunk {Position}] WARNING: Physics creation returned no handles!");
             }
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[Chunk {Position}] Error creating physics body: {ex.Message}");
+            Console.WriteLine($"[Chunk {Position}] Error disposing physics collection: {ex.Message}");
+        }
+
+        _hasStaticBody = false;
+        _staticHandles.Clear();
+    }
+
+    /// <summary>
+    /// КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Правильная очистка физических ресурсов
+    /// </summary>
+    /// <summary>
+    /// КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Правильная очистка и пересоздание физических ресурсов (единый Compound)
+    /// </summary>
+    public void RebuildPhysics()
+    {
+        // 1. СНАЧАЛА полностью очищаем старые физические ресурсы.
+        ClearPhysics();
+
+        // 2. ЗАЩИТА от гонки потоков: если чанк уже выгружен, ничего не делаем.
+        if (Voxels == null || !IsLoaded) return;
+
+        // 3. СОЗДАЕМ новые физические ресурсы.
+        var worldPosition = (Position * Chunk.ChunkSize).ToSystemNumerics();
+
+        Dictionary<Vector3i, MaterialType> voxelsCopy;
+        lock (VoxelsLock)
+        {
+            if (Voxels == null) return;
+            voxelsCopy = new Dictionary<Vector3i, MaterialType>(Voxels);
+        }
+
+        // Вызываем исправленный метод в PhysicsWorld, который не течет.
+        var handle = WorldManager.PhysicsWorld.CreateStaticChunkBody(worldPosition, voxelsCopy);
+
+        if (handle.Value != 0)
+        {
+            _staticHandles.Add(handle);
+            _hasStaticBody = true;
+            WorldManager.RegisterChunkStatic(handle, this);
         }
     }
+
 
     public void Render(Shader shader, Matrix4 view, Matrix4 projection)
     {
@@ -219,48 +190,16 @@ public class Chunk : IDisposable
         _renderer?.Dispose();
         _renderer = null;
 
-        if (_hasStaticBody)
-        {
-            try
-            {
-                // Удаляем все статик-хэндлы
-                foreach (var handle in _staticHandles)
-                {
-                    try
-                    {
-                        if (WorldManager.PhysicsWorld.Simulation.Statics.StaticExists(handle))
-                        {
-                            var staticRef = WorldManager.PhysicsWorld.Simulation.Statics.GetStaticReference(handle);
-                            var shapeIndex = staticRef.Shape;
-
-                            WorldManager.PhysicsWorld.Simulation.Statics.Remove(handle);
-
-                            if (shapeIndex.Exists)
-                            {
-                                WorldManager.PhysicsWorld.Simulation.Shapes.Remove(shapeIndex);
-                            }
-
-                            WorldManager.UnregisterChunkStatic(handle);
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        Console.WriteLine($"[Chunk {Position}] Error disposing a static handle: {ex.Message}");
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[Chunk {Position}] Error disposing physics: {ex.Message}");
-            }
-
-            _hasStaticBody = false;
-            _staticHandles.Clear();
-        }
+        // Вызываем наш новый, надежный метод очистки.
+        ClearPhysics();
 
         lock (VoxelsLock)
         {
-            Voxels.Clear();
+            Voxels?.Clear();
         }
+
+        _pendingVertices = null;
+        _pendingColors = null;
+        _pendingAoValues = null;
     }
 }

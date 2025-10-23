@@ -1,4 +1,4 @@
-﻿// /World/VoxelObject.cs - REFACTORED
+﻿// /World/VoxelObject.cs - ПОЛНОСТЬЮ ИСПРАВЛЕН
 using BepuPhysics;
 using OpenTK.Mathematics;
 using System;
@@ -50,7 +50,6 @@ public class VoxelObject : IDisposable
             voxelsDict[coord] = Material;
         }
 
-        // Для изолированного объекта используем простую проверку (только внутри объекта)
         VoxelMeshBuilder.GenerateMesh(voxelsDict,
             out var vertices, out var colors, out var aoValues,
             localPos => voxelsDict.ContainsKey(localPos));
@@ -58,9 +57,19 @@ public class VoxelObject : IDisposable
         _renderer = new VoxelObjectRenderer(vertices, colors, aoValues);
     }
 
+    /// <summary>
+    /// ИСПРАВЛЕНИЕ: Проверяем существование body перед обновлением
+    /// </summary>
     public void RebuildMeshAndPhysics(PhysicsWorld physicsWorld)
     {
         if (_isDisposed) return;
+
+        // КРИТИЧЕСКИ ВАЖНО: Проверяем, существует ли body
+        if (!physicsWorld.Simulation.Bodies.BodyExists(BodyHandle))
+        {
+            Console.WriteLine($"[VoxelObject] Cannot rebuild: body {BodyHandle.Value} does not exist!");
+            return;
+        }
 
         var voxelsDict = new Dictionary<Vector3i, MaterialType>();
         foreach (var coord in VoxelCoordinates)
@@ -78,10 +87,11 @@ public class VoxelObject : IDisposable
         {
             var newHandle = physicsWorld.UpdateVoxelObjectBody(BodyHandle, VoxelCoordinates, Material, out var newCenterOfMass);
             LocalCenterOfMass = newCenterOfMass.ToOpenTK();
+            BodyHandle = newHandle; // Обновляем handle (может измениться)
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[VoxelObject] Error updating physics: {ex.Message}");
+            Console.WriteLine($"[VoxelObject] Error updating physics: {ex.Message}\n{ex.StackTrace}");
         }
     }
 

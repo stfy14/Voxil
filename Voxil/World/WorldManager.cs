@@ -68,7 +68,6 @@ public class WorldManager : IDisposable
     private readonly PlayerController _playerController;
     private readonly IWorldGenerator _generator;
 
-    private int _viewDistance = 16;
     private readonly Dictionary<Vector3i, Chunk> _chunks = new();
     private readonly Dictionary<BodyHandle, VoxelObject> _bodyToVoxelObjectMap = new();
     private readonly Dictionary<StaticHandle, Chunk> _staticToChunkMap = new();
@@ -107,6 +106,8 @@ public class WorldManager : IDisposable
     }));
 
     private Vector3i _lastPlayerChunkPosition = new(int.MaxValue);
+
+    private int _viewDistance = 64;
     private const int MaxChunksPerFrame = 8; // Увеличено с 4
     private const int MaxPhysicsRebuildsPerFrame = 6; // Увеличено с 2
     private const int MaxMeshUpdatesPerFrame = 12; // Увеличено с 6
@@ -504,8 +505,7 @@ public class WorldManager : IDisposable
                 RebuildChunkMeshAsync(result.OriginChunk, priority: 0);
                 QueuePhysicsRebuild(result.OriginChunk, priority: 0);
 
-                // КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: Создаём динамический объект
-                // Вычисляем правильную мировую позицию для объекта
+                // ИСПРАВЛЕНИЕ: Вычисляем центр масс для правильного позиционирования
                 var centerSum = System.Numerics.Vector3.Zero;
                 foreach (var voxel in result.DetachedGroup)
                 {
@@ -513,6 +513,7 @@ public class WorldManager : IDisposable
                 }
                 centerSum /= result.DetachedGroup.Count;
 
+                // Мировая позиция = позиция чанка + локальная позиция центра
                 var worldPosition = result.WorldOffset + centerSum;
 
                 CreateDetachedVoxelObject(result.DetachedGroup, result.Material, worldPosition);
@@ -664,32 +665,65 @@ public class WorldManager : IDisposable
         {
             if (_chunks.TryGetValue(position, out var chunk))
             {
-                lock (_physicsRebuildQueue)
+                try
                 {
-                    _physicsRebuildQueue.RemoveWhere(t => t.Chunk == chunk);
-                }
+                    // Удаляем задачи из очереди физики
+                    lock (_physicsRebuildQueue)
+                    {
+                        _physicsRebuildQueue.RemoveWhere(t => t.Chunk == chunk);
+                    }
 
-                chunk.Dispose();
-                _chunks.Remove(position);
+                    // ДОБАВЛЕНО: Очищаем очереди от задач этого чанка
+                    // Это предотвращает работу с удалённым чанком
+
+                    // Dispose чанка (это очистит физику)
+                    chunk.Dispose();
+
+                    _chunks.Remove(position);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[WorldManager] Error unloading chunk {position}: {ex.Message}");
+                }
             }
         }
+
         _chunksInProgress.Remove(position);
+        _activeChunkPositions.Remove(position);
     }
 
-    private void CreateDetachedVoxelObject(List<Vector3i> localCoords, MaterialType material, BepuVector3 chunkWorldPos)
+    private void CreateDetachedVoxelObject(List<Vector3i> localCoords, MaterialType material, BepuVector3 worldPosition)
     {
-        if (localCoords == null || localCoords.Count == 0) return;
+        if (localCoords == null || localCoords.Count == 0)
+        {
+            Console.WriteLine("[WorldManager] Cannot create detached object: empty coordinates");
+            return;
+        }
 
-        var newObject = new VoxelObject(localCoords, material, this);
-        var handle = PhysicsWorld.CreateVoxelObjectBody(localCoords, material, chunkWorldPos, out var centerOfMass);
+        try
+        {
+            var newObject = new VoxelObject(localCoords, material, this);
+            var handle = PhysicsWorld.CreateVoxelObjectBody(localCoords, material, worldPosition, out var centerOfMass);
 
-        if (!PhysicsWorld.Simulation.Bodies.BodyExists(handle)) return;
+            // ИСПРАВЛЕНИЕ: Проверяем, что body действительно создан
+            if (!PhysicsWorld.Simulation.Bodies.BodyExists(handle))
+            {
+                Console.WriteLine("[WorldManager] Failed to create body for detached object");
+                return;
+            }
 
-        newObject.InitializePhysics(handle, centerOfMass.ToOpenTK());
-        newObject.BuildMesh();
+            newObject.InitializePhysics(handle, centerOfMass.ToOpenTK());
+            newObject.BuildMesh();
 
-        _voxelObjectsToAdd.Enqueue(newObject);
-        RegisterVoxelObjectBody(handle, newObject);
+            _voxelObjectsToAdd.Enqueue(newObject);
+            RegisterVoxelObjectBody(handle, newObject);
+
+            Console.WriteLine($"[WorldManager] Created detached object with {localCoords.Count} voxels, BodyHandle={handle.Value}");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[WorldManager] Error creating detached object: {ex.Message}\n{ex.StackTrace}");
+        }
     }
 
     private bool IsConnectedToGround(Chunk startChunk, Vector3i startVoxel, Dictionary<Vector3i, MaterialType> voxels)
@@ -767,6 +801,14 @@ public class WorldManager : IDisposable
 
     private void DestroyDynamicVoxelAt(VoxelObject targetObject, BepuVector3 worldHitLocation, BepuVector3 worldHitNormal)
     {
+        // ДОБАВЛЕНО: Проверяем существование body
+        if (!PhysicsWorld.Simulation.Bodies.BodyExists(targetObject.BodyHandle))
+        {
+            Console.WriteLine($"[WorldManager] Cannot destroy voxel: body {targetObject.BodyHandle.Value} does not exist");
+            QueueForRemoval(targetObject);
+            return;
+        }
+
         var pose = PhysicsWorld.GetPose(targetObject.BodyHandle);
         var invOrientation = System.Numerics.Quaternion.Inverse(pose.Orientation);
         var localHit = BepuVector3.Transform(worldHitLocation - pose.Position, invOrientation) +
@@ -779,13 +821,18 @@ public class WorldManager : IDisposable
             (int)Math.Floor(localHit.Z + 0.5f)
         );
 
-        if (!targetObject.VoxelCoordinates.Contains(voxelToRemove)) return;
+        if (!targetObject.VoxelCoordinates.Contains(voxelToRemove))
+        {
+            Console.WriteLine($"[WorldManager] Voxel {voxelToRemove} not found in object");
+            return;
+        }
 
         var remainingVoxels = new List<Vector3i>(targetObject.VoxelCoordinates);
         remainingVoxels.Remove(voxelToRemove);
 
         if (remainingVoxels.Count == 0)
         {
+            Console.WriteLine($"[WorldManager] Last voxel destroyed, removing object");
             QueueForRemoval(targetObject);
             return;
         }
@@ -794,27 +841,35 @@ public class WorldManager : IDisposable
 
         if (newVoxelIslands.Count == 1)
         {
+            // Объект остался целым
             targetObject.VoxelCoordinates.Remove(voxelToRemove);
             targetObject.RebuildMeshAndPhysics(PhysicsWorld);
         }
         else
         {
+            // Объект распался на части
+            Console.WriteLine($"[WorldManager] Object split into {newVoxelIslands.Count} islands");
+
             var originalMaterial = targetObject.Material;
             var originalPose = pose;
 
             foreach (var island in newVoxelIslands)
             {
+                // Вычисляем центр острова
                 var localIslandCenter = BepuVector3.Zero;
                 foreach (var voxel in island)
                     localIslandCenter += new BepuVector3(voxel.X, voxel.Y, voxel.Z);
                 localIslandCenter /= island.Count;
 
+                // Смещение от старого центра масс к новому
                 var offsetFromOldCoM = localIslandCenter - targetObject.LocalCenterOfMass.ToSystemNumerics();
                 var rotatedOffset = BepuVector3.Transform(offsetFromOldCoM, originalPose.Orientation);
                 var newWorldPosition = originalPose.Position + rotatedOffset;
 
                 CreateDetachedVoxelObject(island, originalMaterial, newWorldPosition);
             }
+
+            // Удаляем исходный объект
             QueueForRemoval(targetObject);
         }
     }
@@ -896,7 +951,8 @@ public class WorldManager : IDisposable
         _meshBuilderThread?.Join(2000);
         _detachmentThread?.Join(2000);
 
-        // Очищаем все объекты
+        // Очищаем все динамические объекты
+        Console.WriteLine($"[WorldManager] Removing {_voxelObjects.Count} voxel objects...");
         var allObjects = new List<VoxelObject>(_voxelObjects);
         foreach (var vo in allObjects)
         {
@@ -905,24 +961,41 @@ public class WorldManager : IDisposable
         ProcessRemovals();
 
         // Очищаем чанки
+        Console.WriteLine($"[WorldManager] Disposing {_chunks.Count} chunks...");
         lock (_chunksLock)
         {
-            foreach (var chunk in _chunks.Values)
+            foreach (var chunk in _chunks.Values.ToList())
             {
-                chunk.Dispose();
+                try
+                {
+                    chunk.Dispose();
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[WorldManager] Error disposing chunk: {ex.Message}");
+                }
             }
             _chunks.Clear();
         }
 
+        // Очищаем маппинги
         _bodyToVoxelObjectMap.Clear();
         _staticToChunkMap.Clear();
+        _chunksInProgress.Clear();
+        _activeChunkPositions.Clear();
+
+        // Очищаем очередь физики
+        lock (_physicsRebuildQueue)
+        {
+            _physicsRebuildQueue.Clear();
+        }
 
         // Освобождаем очереди
         _generationQueue.Dispose();
         _meshQueue.Dispose();
         _detachmentQueue.Dispose();
 
-        Console.WriteLine("[WorldManager] Disposed.");
+        Console.WriteLine("[WorldManager] Disposed successfully.");
     }
 
     public Chunk GetChunk(Vector3i chunkPosition)
@@ -965,11 +1038,26 @@ public class WorldManager : IDisposable
         {
             if (obj == null) continue;
 
-            _bodyToVoxelObjectMap.Remove(obj.BodyHandle);
-            PhysicsWorld.RemoveBody(obj.BodyHandle);
-            _voxelObjects.Remove(obj);
-            obj.Dispose();
+            try
+            {
+                // Удаляем из маппинга
+                _bodyToVoxelObjectMap.Remove(obj.BodyHandle);
+
+                // Удаляем из списка активных объектов
+                _voxelObjects.Remove(obj);
+
+                // Удаляем физическое тело (это также удалит Shape)
+                PhysicsWorld.RemoveBody(obj.BodyHandle);
+
+                // Dispose самого объекта (очистит рендерер)
+                obj.Dispose();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[WorldManager] Error removing voxel object: {ex.Message}\n{ex.StackTrace}");
+            }
         }
+
         _objectsToRemove.Clear();
     }
 

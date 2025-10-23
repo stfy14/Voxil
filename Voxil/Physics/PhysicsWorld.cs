@@ -1,452 +1,272 @@
-﻿// /Physics/PhysicsWorld.cs
-using System;
-using System.Collections.Generic;
-using System.Numerics;
+﻿// /Physics/PhysicsWorld.cs - КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ CRASH
 using BepuPhysics;
 using BepuPhysics.Collidables;
-using BepuPhysics.CollisionDetection;
-using BepuPhysics.Constraints;
 using BepuUtilities;
 using BepuUtilities.Memory;
 using OpenTK.Mathematics;
+using System;
+using System.Collections.Generic;
+using System.Numerics;
 
-// Алиасы, чтобы избежать неоднозначности Vector3
-using NumVec3 = System.Numerics.Vector3;
-using TKVec3 = OpenTK.Mathematics.Vector3;
-using TKVec3i = OpenTK.Mathematics.Vector3i;
+using Vector2 = System.Numerics.Vector2;
+using Vector3 = System.Numerics.Vector3;
 
-/// <summary>
-/// Централизованная, безопасная обёртка вокруг Bepu Physics Simulation.
-/// - Fixed timestep (по умолчанию 60 Hz) + substepping.
-/// - Интерполяция поз для рендера.
-/// - Управление BufferPool / CompoundBuilder с гарантированным возвратом буферов.
-/// - Refcount для форм (TypedIndex).
-/// - Потокобезопасный доступ через lock.
-/// </summary>
 public class PhysicsWorld : IDisposable
 {
-    public Simulation Simulation { get; private set; }
-
+    public Simulation Simulation { get; }
     private readonly BufferPool _bufferPool;
     private readonly ThreadDispatcher _threadDispatcher;
     private readonly PlayerState _player_state = new PlayerState();
-
-    private readonly object _simLock = new object();
     private bool _isDisposed = false;
+    private readonly Dictionary<TypedIndex, Buffer<CompoundChild>> _compoundBuffers = new();
+    private readonly object _bufferLock = new object();
+    public readonly Box VoxelShapeObject;
 
     private readonly int _batchSize;
+    private readonly object _simLock = new object();
 
-    // shape refcount
-    private readonly Dictionary<TypedIndex, int> _shapeRefCount = new();
-
-    // fixed timestep + accumulator
-    private readonly float _fixedTimestep;
-    private float _accumulator = 0f;
-    private const float DefaultFixedTimestep = 1f / 60f;
-
-    // interpolation tracking
-    private readonly HashSet<BodyHandle> _trackedBodies = new();
-    private readonly Dictionary<BodyHandle, RigidPose> _previousPoses = new();
-    private readonly Dictionary<BodyHandle, RigidPose> _currentPoses = new();
-
-    // thread count (dispatcher)
-    public PhysicsWorld(int batchSize = 512, float fixedTimestep = DefaultFixedTimestep, int? threadCount = null)
+    public PhysicsWorld(int batchSize = 512)
     {
         _batchSize = Math.Max(1, batchSize);
-        _fixedTimestep = fixedTimestep > 0 ? fixedTimestep : DefaultFixedTimestep;
-
         _bufferPool = new BufferPool();
 
-        int tc = threadCount ?? Math.Max(1, Environment.ProcessorCount > 4 ? Environment.ProcessorCount - 2 : Environment.ProcessorCount - 1);
-        _threadDispatcher = new ThreadDispatcher(tc);
+        int threadCount = Math.Max(1, Environment.ProcessorCount > 4
+            ? Environment.ProcessorCount - 2
+            : Environment.ProcessorCount - 1);
+
+        _threadDispatcher = new ThreadDispatcher(threadCount);
 
         var narrowPhaseCallbacks = new NarrowPhaseCallbacks { PlayerState = _player_state };
-        var poseIntegratorCallbacks = new PoseIntegratorCallbacks { PlayerState = _player_state, World = this };
+        var poseIntegratorCallbacks = new PoseIntegratorCallbacks
+        {
+            PlayerState = _player_state
+        };
 
-        var solveDescription = new SolveDescription(12, 2);
+        var solveDescription = new SolveDescription(8, 1);
 
         Simulation = Simulation.Create(_bufferPool, narrowPhaseCallbacks, poseIntegratorCallbacks, solveDescription);
 
-        Console.WriteLine($"[PhysicsWorld] Initialized. Threads={tc}, BatchSize={_batchSize}, FixedStep={_fixedTimestep:F6}s");
+        // --- ДОБАВЬТЕ ЭТОТ КОД ПОСЛЕ Simulation.Create ---
+        // 1. Создаем один-единственный "мастер-куб" для всех вокселей.
+        VoxelShapeObject = new Box(1, 1, 1);
+        // 2. Добавляем его в симуляцию ОДИН РАЗ, чтобы "зарегистрировать" его тип.
+        //    Это гарантирует, что BepuPhysics будет знать о типе Box с самого начала.
+        Simulation.Shapes.Add(VoxelShapeObject);
+
+        Console.WriteLine($"[PhysicsWorld] Initialized with {threadCount} physics threads. BatchSize={_batchSize}");
     }
 
-    // ---------------------------
-    // Player helpers
-    // ---------------------------
     public void SetPlayerHandle(BodyHandle playerHandle)
     {
         _player_state.BodyHandle = playerHandle;
-        RegisterBodyForInterpolation(playerHandle);
         Console.WriteLine($"[PhysicsWorld] PlayerHandle set: {playerHandle.Value}");
     }
 
-    public void SetPlayerGoalVelocity(System.Numerics.Vector2 goalVelocity)
+    public void SetPlayerGoalVelocity(Vector2 goalVelocity)
     {
         _player_state.GoalVelocity = goalVelocity;
     }
 
     public PlayerState GetPlayerState() => _player_state;
 
-    // ---------------------------
-    // Update loop: fixed-step + interpolation bookkeeping
-    // ---------------------------
     public void Update(float deltaTime)
     {
         if (_isDisposed) return;
-        if (deltaTime < 0) deltaTime = 0;
-
         lock (_simLock)
         {
-            _accumulator += deltaTime;
+            // СНАЧАЛА обновляем контроллер, когда симуляция стабильна
+            UpdateCharacterController(deltaTime);
 
-            // If no full step yet, we might still want to keep current poses consistent.
-            while (_accumulator >= _fixedTimestep)
+            // ЗАТЕМ запускаем основной шаг физики
+            Simulation.Timestep(deltaTime, _threadDispatcher);
+        }
+    }
+
+    /// <summary>
+    /// КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Правильное создание Compound с shape'ами
+    /// </summary>
+    public StaticHandle CreateStaticChunkBody(Vector3 chunkWorldPosition, Dictionary<Vector3i, MaterialType> voxels)
+    {
+        if (voxels == null || voxels.Count == 0) return default;
+
+        // Паттерн остается тем же: локальный экземпляр, который мы передаем в builder.
+        var boxShape = new Box(1, 1, 1);
+
+        using (var compoundBuilder = new CompoundBuilder(_bufferPool, Simulation.Shapes, voxels.Count))
+        {
+            foreach (var voxel in voxels)
             {
-                // snapshot current to previous for interpolation
-                SnapshotCurrentPosesToPrevious();
+                var localPosition = new Vector3(voxel.Key.X + 0.5f, voxel.Key.Y + 0.5f, voxel.Key.Z + 0.5f);
+                var pose = new RigidPose(localPosition);
+                compoundBuilder.Add(boxShape, pose, 1f);
+            }
 
-                try
-                {
-                    Simulation.Timestep(_fixedTimestep, _threadDispatcher);
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"[PhysicsWorld] Exception during Timestep: {ex}");
-                }
+            // --- КЛЮЧЕВОЕ ИЗМЕНЕНИЕ ---
+            // Вместо BuildKinematicCompound, мы вызываем Build, чтобы получить BigCompound.
+            // Этот метод сам управляет памятью и создает оптимизированное BVH-дерево.
+            compoundBuilder.Build(_bufferPool, out BigCompound bigCompound);
 
-                UpdateCurrentPosesFromSimulation();
+            if (bigCompound.ChildCount == 0)
+            {
+                // Если compound пуст, builder мог все равно выделить буфер.
+                // Мы должны его уничтожить, чтобы избежать утечки.
+                bigCompound.Dispose(_bufferPool);
+                return default;
+            }
 
-                _accumulator -= _fixedTimestep;
+            // Теперь мы добавляем в симуляцию не Compound, а BigCompound.
+            var shapeIndex = Simulation.Shapes.Add(bigCompound);
+            if (!shapeIndex.Exists)
+            {
+                // Если форма не добавилась, мы все равно должны уничтожить буфер.
+                bigCompound.Dispose(_bufferPool);
+                return default;
+            }
+
+            // Для BigCompound не нужно вычислять смещение центра, его позиция - это позиция чанка.
+            var staticDesc = new StaticDescription(chunkWorldPosition, shapeIndex);
+            return Simulation.Statics.Add(staticDesc);
+        }
+    }
+
+
+    public void ReturnCompoundBuffer(TypedIndex shapeIndex)
+    {
+        lock (_bufferLock)
+        {
+            if (_compoundBuffers.TryGetValue(shapeIndex, out var bufferToReturn))
+            {
+                _bufferPool.Return(ref bufferToReturn);
+                _compoundBuffers.Remove(shapeIndex);
             }
         }
     }
 
     /// <summary>
-    /// Возвращает интерполяцию позы тела между предыдущим и текущим состоянием.
-    /// alpha 0 -> previous, 1 -> current.
+    /// КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Правильное создание динамических тел
     /// </summary>
-    public RigidPose GetInterpolatedPose(BodyHandle handle, float alpha)
+    public BodyHandle CreateVoxelObjectBody(
+    IList<OpenTK.Mathematics.Vector3i> voxelCoordinates,
+    MaterialType materialType,
+    Vector3 initialPosition,
+    out Vector3 localCenterOfMass)
     {
-        if (_isDisposed) return new RigidPose(NumVec3.Zero);
-        alpha = Math.Clamp(alpha, 0f, 1f);
-
         lock (_simLock)
         {
-            if (!_currentPoses.TryGetValue(handle, out var cur))
+            localCenterOfMass = Vector3.Zero;
+            if (_isDisposed || voxelCoordinates == null || voxelCoordinates.Count == 0) return new BodyHandle();
+
+            using (var compoundBuilder = new CompoundBuilder(_bufferPool, Simulation.Shapes, voxelCoordinates.Count))
             {
-                try
+                float voxelMass = MaterialRegistry.Get(materialType).MassPerVoxel;
+                foreach (var coord in voxelCoordinates)
                 {
-                    if (Simulation.Bodies.BodyExists(handle))
-                        return Simulation.Bodies.GetBodyReference(handle).Pose;
-                }
-                catch { }
-                return new RigidPose(NumVec3.Zero);
-            }
-            if (!_previousPoses.TryGetValue(handle, out var prev))
-                return cur;
-
-            var pos = NumVec3.Lerp(prev.Position, cur.Position, alpha);
-            var ori = NumVec3QuaternionSlerp(prev.Orientation, cur.Orientation, alpha);
-            return new RigidPose(pos, ori);
-        }
-    }
-
-    // Small helper: slerp for System.Numerics.Quaternion (vectorized minimal impl)
-    private static System.Numerics.Quaternion NumVec3QuaternionSlerp(System.Numerics.Quaternion a, System.Numerics.Quaternion b, float t)
-    {
-        // Avoid using Unity-style api - implement a simple slerp
-        float dot = a.X * b.X + a.Y * b.Y + a.Z * b.Z + a.W * b.W;
-        const float DOT_THRESHOLD = 0.9995f;
-
-        if (Math.Abs(dot) > DOT_THRESHOLD)
-        {
-            // linear interpolation for very close quaternions
-            var result = new System.Numerics.Quaternion(
-                a.X + t * (b.X - a.X),
-                a.Y + t * (b.Y - a.Y),
-                a.Z + t * (b.Z - a.Z),
-                a.W + t * (b.W - a.W)
-            );
-            return System.Numerics.Quaternion.Normalize(result);
-        }
-
-        // slerp
-        dot = Math.Clamp(dot, -1f, 1f);
-        float theta0 = (float)Math.Acos(dot);
-        float theta = theta0 * t;
-        float sinTheta = (float)Math.Sin(theta);
-        float sinTheta0 = (float)Math.Sin(theta0);
-
-        float s0 = (float)Math.Cos(theta) - dot * sinTheta / sinTheta0;
-        float s1 = sinTheta / sinTheta0;
-
-        return new System.Numerics.Quaternion(
-            s0 * a.X + s1 * b.X,
-            s0 * a.Y + s1 * b.Y,
-            s0 * a.Z + s1 * b.Z,
-            s0 * a.W + s1 * b.W
-        );
-    }
-
-    // ---------------------------
-    // Body / shape creation & updates
-    // ---------------------------
-
-    /// <summary>
-    /// Создаёт статические тела (чанковые пачки) из локальных воксельных координат.
-    /// Важно: гарантированный возврат children в pool при ошибках.
-    /// </summary>
-    public List<StaticHandle> CreateStaticVoxelBody(NumVec3 position, IList<TKVec3i> voxelCoordinates)
-    {
-        var results = new List<StaticHandle>();
-        if (_isDisposed || voxelCoordinates == null || voxelCoordinates.Count == 0)
-        {
-            Console.WriteLine("[PhysicsWorld] CreateStaticVoxelBody: invalid input or disposed.");
-            return results;
-        }
-
-        var coordsCopy = new List<TKVec3i>(voxelCoordinates);
-        for (int start = 0; start < coordsCopy.Count; start += _batchSize)
-        {
-            int count = Math.Min(_batchSize, coordsCopy.Count - start);
-            var batch = coordsCopy.GetRange(start, count);
-
-            var builder = new CompoundBuilder(_bufferPool, Simulation.Shapes, batch.Count);
-            Buffer<CompoundChild> children = default;
-            bool childrenTaken = false;
-
-            try
-            {
-                var box = new Box(1f, 1f, 1f);
-                foreach (var c in batch)
-                {
-                    var pose = new RigidPose(new NumVec3(c.X, c.Y, c.Z));
-                    builder.Add(box, pose, 1f);
+                    var pose = new RigidPose(new Vector3(coord.X, coord.Y, coord.Z));
+                    // ИСПОЛЬЗУЕМ ОБЪЕКТ "мастер-куба"
+                    compoundBuilder.Add(VoxelShapeObject, pose, voxelMass);
                 }
 
-                builder.BuildKinematicCompound(out children);
+                compoundBuilder.BuildDynamicCompound(out Buffer<CompoundChild> childrenBuffer, out BodyInertia inertia, out localCenterOfMass);
 
-                if (children.Length == 0)
+                if (childrenBuffer.Length == 0)
                 {
-                    // Nothing produced - return any buffers allocated
-                    try { _bufferPool.Return(ref children); } catch { }
-                    continue;
-                }
-
-                var compound = new Compound(children);
-
-                lock (_simLock)
-                {
-                    TypedIndex shapeIndex;
-                    try
-                    {
-                        shapeIndex = Simulation.Shapes.Add(compound);
-                    }
-                    catch (Exception ex)
-                    {
-                        Console.WriteLine($"[PhysicsWorld] Shapes.Add failed: {ex}");
-                        try { _bufferPool.Return(ref children); } catch { }
-                        continue;
-                    }
-
-                    // We treat shapeIndex as "added" if no exception. Track ref.
-                    AddShapeRef(shapeIndex);
-
-                    var staticDesc = new StaticDescription(position, shapeIndex);
-                    try
-                    {
-                        var sh = Simulation.Statics.Add(staticDesc);
-                        results.Add(sh);
-                        childrenTaken = true; // shapes/compound own children now
-                    }
-                    catch (Exception exStat)
-                    {
-                        Console.WriteLine($"[PhysicsWorld] Statics.Add exception: {exStat}");
-                        // rollback: release shape ref and try remove shape
-                        ReleaseShapeRef(shapeIndex);
-                        try { Simulation.Shapes.Remove(shapeIndex); } catch { }
-                        try { _bufferPool.Return(ref children); } catch { }
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[PhysicsWorld] Exception in CreateStaticVoxelBody batch: {ex}");
-                try { if (!childrenTaken && children.Length > 0) _bufferPool.Return(ref children); } catch { }
-            }
-            finally
-            {
-                try { builder.Dispose(); } catch { }
-            }
-        }
-
-        return results;
-    }
-
-    /// <summary>
-    /// Создаёт динамическое тело для отдельного VoxelObject.
-    /// Возвращает BodyHandle и out local center of mass.
-    /// </summary>
-    public BodyHandle CreateVoxelObjectBody(IList<TKVec3i> voxelCoordinates, MaterialType materialType, NumVec3 initialPosition, out NumVec3 localCenterOfMass)
-    {
-        localCenterOfMass = NumVec3.Zero;
-        if (_isDisposed || voxelCoordinates == null || voxelCoordinates.Count == 0)
-        {
-            Console.WriteLine("[PhysicsWorld] CreateVoxelObjectBody: invalid input or disposed.");
-            return new BodyHandle();
-        }
-
-        var builder = new CompoundBuilder(_bufferPool, Simulation.Shapes, voxelCoordinates.Count);
-        Buffer<CompoundChild> children = default;
-        bool childrenTaken = false;
-
-        try
-        {
-            float voxelMass = MaterialRegistry.Get(materialType).MassPerVoxel;
-            var box = new Box(1f, 1f, 1f);
-            foreach (var c in voxelCoordinates)
-            {
-                var pose = new RigidPose(new NumVec3(c.X, c.Y, c.Z));
-                builder.Add(box, pose, voxelMass);
-            }
-
-            BodyInertia inertia;
-            builder.BuildDynamicCompound(out children, out inertia, out localCenterOfMass);
-
-            if (children.Length == 0)
-            {
-                try { _bufferPool.Return(ref children); } catch { }
-                Console.WriteLine("[PhysicsWorld] BuildDynamicCompound returned 0 children.");
-                return new BodyHandle();
-            }
-
-            var compound = new Compound(children);
-
-            lock (_simLock)
-            {
-                TypedIndex shapeIndex;
-                try
-                {
-                    shapeIndex = Simulation.Shapes.Add(compound);
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"[PhysicsWorld] Shapes.Add failed (dynamic): {ex}");
-                    try { _bufferPool.Return(ref children); } catch { }
+                    if (childrenBuffer.Allocated) _bufferPool.Return(ref childrenBuffer);
                     return new BodyHandle();
                 }
 
-                AddShapeRef(shapeIndex);
+                var compound = new Compound(childrenBuffer);
+                var compoundShapeIndex = Simulation.Shapes.Add(compound);
+                if (!compoundShapeIndex.Exists)
+                {
+                    _bufferPool.Return(ref childrenBuffer);
+                    return new BodyHandle();
+                }
 
-                var bodyDesc = BodyDescription.CreateDynamic(
+                lock (_bufferLock)
+                {
+                    _compoundBuffers.Add(compoundShapeIndex, childrenBuffer);
+                }
+
+                var bodyDescription = BodyDescription.CreateDynamic(
                     new RigidPose(initialPosition),
                     inertia,
-                    new CollidableDescription(shapeIndex, 0.1f),
+                    new CollidableDescription(compoundShapeIndex, 0.1f),
                     new BodyActivityDescription(0.01f)
                 );
-
-                var handle = Simulation.Bodies.Add(bodyDesc);
-                RegisterBodyForInterpolation(handle);
-                childrenTaken = true;
-                return handle;
+                return Simulation.Bodies.Add(bodyDescription);
             }
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"[PhysicsWorld] Exception in CreateVoxelObjectBody: {ex}");
-            return new BodyHandle();
-        }
-        finally
-        {
-            try { builder.Dispose(); } catch { }
-            try { if (!childrenTaken && children.Length > 0) _bufferPool.Return(ref children); } catch { }
         }
     }
 
+
     /// <summary>
-    /// Обновляет форму существующего динамического тела.
+    /// КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Правильное обновление тел
     /// </summary>
-    public BodyHandle UpdateVoxelObjectBody(BodyHandle handle, IList<TKVec3i> voxelCoordinates, MaterialType materialType, out NumVec3 localCenterOfMass)
+    public BodyHandle UpdateVoxelObjectBody(
+    BodyHandle handle,
+    IList<OpenTK.Mathematics.Vector3i> voxelCoordinates,
+    MaterialType materialType,
+    out Vector3 localCenterOfMass)
     {
-        localCenterOfMass = NumVec3.Zero;
-
-        if (_isDisposed) return handle;
-        if (voxelCoordinates == null || voxelCoordinates.Count == 0)
-        {
-            RemoveBody(handle);
-            return new BodyHandle();
-        }
-
         lock (_simLock)
         {
+            localCenterOfMass = Vector3.Zero;
+            if (_isDisposed || voxelCoordinates == null || voxelCoordinates.Count == 0)
+            {
+                RemoveBody(handle);
+                return new BodyHandle();
+            }
+
             if (!Simulation.Bodies.BodyExists(handle))
             {
-                Console.WriteLine("[PhysicsWorld] UpdateVoxelObjectBody: body does not exist.");
-                return handle;
+                return new BodyHandle();
             }
 
-            var bodyRef = Simulation.Bodies.GetBodyReference(handle);
-            var oldShape = bodyRef.Collidable.Shape;
+            var bodyReference = Simulation.Bodies.GetBodyReference(handle);
+            var oldShapeIndex = bodyReference.Collidable.Shape;
 
-            var builder = new CompoundBuilder(_bufferPool, Simulation.Shapes, voxelCoordinates.Count);
-            Buffer<CompoundChild> children = default;
-            bool childrenTaken = false;
-
-            try
+            using (var compoundBuilder = new CompoundBuilder(_bufferPool, Simulation.Shapes, voxelCoordinates.Count))
             {
                 float voxelMass = MaterialRegistry.Get(materialType).MassPerVoxel;
-                var box = new Box(1f, 1f, 1f);
-                foreach (var c in voxelCoordinates)
+                foreach (var coord in voxelCoordinates)
                 {
-                    var pose = new RigidPose(new NumVec3(c.X, c.Y, c.Z));
-                    builder.Add(box, pose, voxelMass);
+                    var pose = new RigidPose(new Vector3(coord.X, coord.Y, coord.Z));
+                    // ИСПОЛЬЗУЕМ ОБЪЕКТ "мастер-куба"
+                    compoundBuilder.Add(VoxelShapeObject, pose, voxelMass);
                 }
 
-                BodyInertia inertia;
-                builder.BuildDynamicCompound(out children, out inertia, out localCenterOfMass);
+                compoundBuilder.BuildDynamicCompound(out Buffer<CompoundChild> childrenBuffer, out BodyInertia inertia, out localCenterOfMass);
 
-                if (children.Length == 0)
+                if (childrenBuffer.Length == 0)
                 {
-                    try { _bufferPool.Return(ref children); } catch { }
-                    Console.WriteLine("[PhysicsWorld] BuildDynamicCompound returned 0 children on update.");
+                    if (childrenBuffer.Allocated) _bufferPool.Return(ref childrenBuffer);
                     return handle;
                 }
 
-                var compound = new Compound(children);
+                var compound = new Compound(childrenBuffer);
+                var newCompoundShapeIndex = Simulation.Shapes.Add(compound);
 
-                TypedIndex newShape;
-                try
+                if (!newCompoundShapeIndex.Exists)
                 {
-                    newShape = Simulation.Shapes.Add(compound);
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"[PhysicsWorld] Shapes.Add failed on update: {ex}");
-                    try { _bufferPool.Return(ref children); } catch { }
+                    _bufferPool.Return(ref childrenBuffer);
                     return handle;
                 }
 
-                AddShapeRef(newShape);
+                lock (_bufferLock)
+                {
+                    _compoundBuffers.Add(newCompoundShapeIndex, childrenBuffer);
+                }
 
-                // update shape and inertia on body
-                bodyRef.SetShape(newShape);
-                bodyRef.LocalInertia = inertia;
+                bodyReference.SetShape(newCompoundShapeIndex);
+                bodyReference.LocalInertia = inertia;
 
-                // release old shape
-                ReleaseShapeRef(oldShape);
+                if (oldShapeIndex.Exists)
+                {
+                    Simulation.Shapes.Remove(oldShapeIndex);
+                    ReturnCompoundBuffer(oldShapeIndex);
+                }
 
-                childrenTaken = true;
                 return handle;
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[PhysicsWorld] Exception in UpdateVoxelObjectBody: {ex}");
-                return handle;
-            }
-            finally
-            {
-                try { builder.Dispose(); } catch { }
-                try { if (!childrenTaken && children.Length > 0) _bufferPool.Return(ref children); } catch { }
             }
         }
     }
@@ -454,174 +274,149 @@ public class PhysicsWorld : IDisposable
     public void RemoveBody(BodyHandle handle)
     {
         if (_isDisposed) return;
-        try
+        // Блокируем симуляцию на время ее изменения.
+        lock (_simLock)
         {
-            lock (_simLock)
+            try
             {
                 if (Simulation.Bodies.BodyExists(handle))
+                {
+                    var bodyReference = Simulation.Bodies.GetBodyReference(handle);
+                    var shapeIndex = bodyReference.Collidable.Shape;
                     Simulation.Bodies.Remove(handle);
-                UnregisterBodyForInterpolation(handle);
+                    if (shapeIndex.Exists)
+                    {
+                        Simulation.Shapes.Remove(shapeIndex);
+                        ReturnCompoundBuffer(shapeIndex);
+                    }
+                }
             }
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"[PhysicsWorld] RemoveBody exception: {ex}");
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[PhysicsWorld] Error removing body: {ex.Message}\n{ex.StackTrace}");
+            }
         }
     }
 
     public RigidPose GetPose(BodyHandle handle)
     {
-        if (_isDisposed) return new RigidPose(NumVec3.Zero);
+        if (_isDisposed) return new RigidPose(Vector3.Zero);
+
         lock (_simLock)
         {
-            if (!Simulation.Bodies.BodyExists(handle)) return new RigidPose(NumVec3.Zero);
-            try { return Simulation.Bodies.GetBodyReference(handle).Pose; } catch { return new RigidPose(NumVec3.Zero); }
+            if (!Simulation.Bodies.BodyExists(handle))
+                return new RigidPose(Vector3.Zero);
+
+            return Simulation.Bodies.GetBodyReference(handle).Pose;
         }
     }
 
-    // ---------------------------
-    // Raycast helpers
-    // ---------------------------
-    public bool Raycast(NumVec3 origin, NumVec3 direction, float maxDistance, out BodyHandle hitBody, out NumVec3 hitLocation, out NumVec3 hitNormal, BodyHandle bodyToIgnore = default)
+    private void UpdateCharacterController(float deltaTime)
+    {
+        // Проверяем, что тело игрока существует в симуляции. 
+        // Это единственная необходимая проверка.
+        if (!Simulation.Bodies.BodyExists(_player_state.BodyHandle)) // << ИСПРАВЛЕНО
+            return;
+
+        var bodyReference = Simulation.Bodies.GetBodyReference(_player_state.BodyHandle);
+        var settings = _player_state.Settings;
+        var bodyPosition = bodyReference.Pose.Position;
+
+        // 1. ВЫПОЛНЯЕМ ОДИН ТОЧНЫЙ РЕЙКАСТ
+        var hitHandler = new RayHitHandler { BodyToIgnore = _player_state.BodyHandle };
+        float rayLength = PlayerController.Height / 2f + settings.HoverHeight + 0.2f;
+
+        Simulation.RayCast(bodyPosition, -Vector3.UnitY, rayLength, ref hitHandler);
+
+        // 2. ОБНОВЛЯЕМ СОСТОЯНИЕ И ПРИМЕНЯЕМ СИЛУ
+        if (hitHandler.Hit)
+        {
+            _player_state.IsOnGround = true;
+
+            float error = hitHandler.T - (PlayerController.Height / 2f + settings.HoverHeight);
+            float springForce = -error * settings.SpringFrequency - bodyReference.Velocity.Linear.Y * settings.SpringDamping;
+
+            bodyReference.ApplyLinearImpulse(new Vector3(0, springForce * deltaTime, 0));
+        }
+        else
+        {
+            _player_state.IsOnGround = false;
+        }
+    }
+
+    public bool Raycast(
+        Vector3 origin,
+        Vector3 direction,
+        float maxDistance,
+        out BodyHandle hitBody,
+        out Vector3 hitLocation,
+        out Vector3 hitNormal,
+        BodyHandle bodyToIgnore = default)
     {
         hitBody = new BodyHandle();
-        hitLocation = NumVec3.Zero;
-        hitNormal = NumVec3.Zero;
+        hitLocation = default;
+        hitNormal = default;
+
         if (_isDisposed) return false;
 
         try
         {
-            direction = NumVec3.Normalize(direction);
-            var handler = new RayHitHandler { BodyToIgnore = bodyToIgnore };
+            direction = Vector3.Normalize(direction);
+            var hitHandler = new RayHitHandler { BodyToIgnore = bodyToIgnore };
+
             lock (_simLock)
             {
-                Simulation.RayCast(origin, direction, maxDistance, ref handler);
+                Simulation.RayCast(origin, direction, maxDistance, ref hitHandler);
             }
 
-            if (handler.Hit)
+            if (hitHandler.Hit)
             {
-                hitBody = handler.Body;
-                hitLocation = origin + direction * handler.T;
-                hitNormal = handler.Normal;
+                hitBody = hitHandler.Body;
+                hitLocation = origin + direction * hitHandler.T;
+                hitNormal = hitHandler.Normal;
                 return true;
             }
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[PhysicsWorld] Raycast exception: {ex}");
+            Console.WriteLine($"[PhysicsWorld] Raycast error: {ex.Message}");
         }
+
         return false;
     }
 
-    // ---------------------------
-    // Shape refcounting
-    // ---------------------------
-    private void AddShapeRef(TypedIndex idx)
-    {
-        if (idx.Equals(default(TypedIndex))) return;
-        lock (_simLock)
-        {
-            if (_shapeRefCount.TryGetValue(idx, out var c)) _shapeRefCount[idx] = c + 1;
-            else _shapeRefCount[idx] = 1;
-        }
-    }
-
-    private void ReleaseShapeRef(TypedIndex idx)
-    {
-        if (idx.Equals(default(TypedIndex))) return;
-        lock (_simLock)
-        {
-            if (!_shapeRefCount.TryGetValue(idx, out var c))
-            {
-                // Not tracked: attempt safe remove
-                try { Simulation.Shapes.Remove(idx); } catch { }
-                return;
-            }
-
-            if (c <= 1)
-            {
-                _shapeRefCount.Remove(idx);
-                try { Simulation.Shapes.Remove(idx); } catch (Exception ex) { Console.WriteLine($"[PhysicsWorld] ReleaseShapeRef remove exception: {ex}"); }
-            }
-            else
-            {
-                _shapeRefCount[idx] = c - 1;
-            }
-        }
-    }
-
-    // ---------------------------
-    // Interpolation / tracking helpers (public register)
-    // ---------------------------
-    public void RegisterBodyForInterpolation(BodyHandle handle)
-    {
-        if (handle.Equals(default)) return;
-        lock (_simLock)
-        {
-            _trackedBodies.Add(handle);
-            try
-            {
-                if (Simulation.Bodies.BodyExists(handle))
-                {
-                    var pose = Simulation.Bodies.GetBodyReference(handle).Pose;
-                    _currentPoses[handle] = pose;
-                    _previousPoses[handle] = pose;
-                }
-            }
-            catch { /* swallow */ }
-        }
-    }
-
-    public void UnregisterBodyForInterpolation(BodyHandle handle)
-    {
-        lock (_simLock)
-        {
-            _trackedBodies.Remove(handle);
-            _currentPoses.Remove(handle);
-            _previousPoses.Remove(handle);
-        }
-    }
-
-    private void SnapshotCurrentPosesToPrevious()
-    {
-        foreach (var kv in _currentPoses)
-        {
-            _previousPoses[kv.Key] = kv.Value;
-        }
-    }
-
-    private void UpdateCurrentPosesFromSimulation()
-    {
-        foreach (var handle in _trackedBodies)
-        {
-            try
-            {
-                if (Simulation.Bodies.BodyExists(handle))
-                {
-                    var pose = Simulation.Bodies.GetBodyReference(handle).Pose;
-                    _currentPoses[handle] = pose;
-                }
-            }
-            catch { /* body may have been removed */ }
-        }
-    }
-
-    // ---------------------------
-    // Dispose
-    // ---------------------------
     public void Dispose()
     {
         if (_isDisposed) return;
         _isDisposed = true;
+
         Console.WriteLine("[PhysicsWorld] Disposing...");
 
-        lock (_simLock)
+        try
         {
-            try { Simulation?.Dispose(); } catch (Exception ex) { Console.WriteLine($"[PhysicsWorld] Exception disposing Simulation: {ex}"); }
-            try { _threadDispatcher?.Dispose(); } catch (Exception ex) { Console.WriteLine($"[PhysicsWorld] Exception disposing ThreadDispatcher: {ex}"); }
-            try { _bufferPool?.Clear(); } catch (Exception ex) { Console.WriteLine($"[PhysicsWorld] Exception clearing BufferPool: {ex}"); }
-        }
+            lock (_simLock)
+            {
+                // Правильный порядок освобождения
+                if (Simulation?.Bodies != null)
+                    Simulation.Bodies.Clear();
 
-        Console.WriteLine("[PhysicsWorld] Disposed.");
+                if (Simulation?.Statics != null)
+                    Simulation.Statics.Clear();
+
+                if (Simulation?.Shapes != null)
+                    Simulation.Shapes.Clear();
+
+                Simulation?.Dispose();
+            }
+
+            _threadDispatcher?.Dispose();
+            _bufferPool?.Clear();
+
+            Console.WriteLine("[PhysicsWorld] Disposed successfully.");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[PhysicsWorld] Error during disposal: {ex.Message}\n{ex.StackTrace}");
+        }
     }
 }

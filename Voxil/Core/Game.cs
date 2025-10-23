@@ -50,7 +50,7 @@ public class Game : GameWindow
         _physicsWorld = new PhysicsWorld();
 
         // 2. ИСПРАВЛЕНИЕ: Безопасная стартовая позиция (чуть выше уровня генерации земли)
-        var startPosition = new System.Numerics.Vector3(8f, 48f, 8f);
+        var startPosition = new System.Numerics.Vector3(8f, 50f, 8f);
 
         // 3. Создаём камеру
         _camera = new Camera(VectorExtensions.ToOpenTK(startPosition), Size.X / (float)Size.Y);

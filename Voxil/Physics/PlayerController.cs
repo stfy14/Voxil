@@ -14,6 +14,7 @@ public class PlayerController
     public const float Height = 1.8f;
     public const float Width = 0.6f;
     public const float EyeHeight = 1.62f;
+    private float _gracePeriodTimer = 3.0f;
 
     // --- УДАЛЯЕМ СТАРЫЕ ПОЛЯ ---
     // public float WalkSpeed { get; set; } = 4.3f; ... и т.д.
