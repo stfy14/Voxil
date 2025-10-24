@@ -30,6 +30,11 @@ public class MeshGenerationTask
 {
     public Chunk ChunkToProcess;
     public bool IsUpdate;
+    // НОВЫЕ ПОЛЯ
+    public Dictionary<Vector3i, MaterialType> Neighbor_NX;
+    public Dictionary<Vector3i, MaterialType> Neighbor_PX;
+    public Dictionary<Vector3i, MaterialType> Neighbor_NZ;
+    public Dictionary<Vector3i, MaterialType> Neighbor_PZ;
 }
 
 public class FinalizedMeshData
@@ -103,14 +108,13 @@ public class WorldManager : IDisposable
     private readonly object _chunksLock = new();
     private readonly HashSet<Vector3i> _chunksInProgress = new();
     private readonly HashSet<Vector3i> _activeChunkPositions = new();
-    private readonly Dictionary<Vector3i, FinalizedMeshData> _pendingMeshes = new();
 
     private Vector3i _lastPlayerChunkPosition = new(int.MaxValue);
 
-    private int _viewDistance = 16;
+    private int _viewDistance = 8;
     private const int MaxChunksPerFrame = 32;
     private const int MaxPhysicsRebuildsPerFrame = 16; // Теперь это лимит на ПРИМЕНЕНИЕ результатов
-    private const int MaxMeshUpdatesPerFrame = 16;
+    private const int MaxMeshUpdatesPerFrame = 64;
 
     private float _memoryLogTimer = 0f;
 
@@ -137,17 +141,53 @@ public class WorldManager : IDisposable
 
     private class MeshBuilderContext
     {
-        public readonly List<float> Vertices = new List<float>(50000);
-        public readonly List<float> Colors = new List<float>(50000);
-        public readonly List<float> AoValues = new List<float>(17000);
-        private readonly WorldManager _worldManager;
-        private Vector3i _chunkPosition;
-        public MeshBuilderContext(WorldManager worldManager) { _worldManager = worldManager; }
-        public void PrepareFor(Vector3i chunkPosition) { _chunkPosition = chunkPosition; Vertices.Clear(); Colors.Clear(); AoValues.Clear(); }
+        // Убрали readonly
+        public List<float> Vertices = new List<float>(50000);
+        public List<float> Colors = new List<float>(50000);
+        public List<float> AoValues = new List<float>(17000);
+
+        // Сделали поля internal для доступа из WorldManager
+        internal Dictionary<Vector3i, MaterialType> _mainChunkVoxels;
+        private Dictionary<Vector3i, MaterialType> _neighbor_NX;
+        private Dictionary<Vector3i, MaterialType> _neighbor_PX;
+        private Dictionary<Vector3i, MaterialType> _neighbor_NZ;
+        private Dictionary<Vector3i, MaterialType> _neighbor_PZ;
+
+        public void LoadData(Chunk mainChunk,
+                             Dictionary<Vector3i, MaterialType> nx, Dictionary<Vector3i, MaterialType> px,
+                             Dictionary<Vector3i, MaterialType> nz, Dictionary<Vector3i, MaterialType> pz)
+        {
+            lock (mainChunk.VoxelsLock)
+            {
+                _mainChunkVoxels = new Dictionary<Vector3i, MaterialType>(mainChunk.Voxels);
+            }
+            _neighbor_NX = nx; _neighbor_PX = px;
+            _neighbor_NZ = nz; _neighbor_PZ = pz;
+
+            Vertices.Clear();
+            Colors.Clear();
+            AoValues.Clear();
+        }
+
         public bool IsVoxelSolidForMesh(Vector3i localPos)
         {
-            Vector3i worldPos = (_chunkPosition * Chunk.ChunkSize) + localPos;
-            return _worldManager.IsVoxelSolidWorld(worldPos);
+            if (localPos.X >= 0 && localPos.X < Chunk.ChunkSize &&
+                localPos.Z >= 0 && localPos.Z < Chunk.ChunkSize &&
+                localPos.Y >= 0)
+            {
+                return _mainChunkVoxels.ContainsKey(localPos);
+            }
+
+            if (localPos.X < 0)
+                return _neighbor_NX?.ContainsKey(localPos + new Vector3i(Chunk.ChunkSize, 0, 0)) ?? false;
+            if (localPos.X >= Chunk.ChunkSize)
+                return _neighbor_PX?.ContainsKey(localPos - new Vector3i(Chunk.ChunkSize, 0, 0)) ?? false;
+            if (localPos.Z < 0)
+                return _neighbor_NZ?.ContainsKey(localPos + new Vector3i(0, 0, Chunk.ChunkSize)) ?? false;
+            if (localPos.Z >= Chunk.ChunkSize)
+                return _neighbor_PZ?.ContainsKey(localPos - new Vector3i(0, 0, Chunk.ChunkSize)) ?? false;
+
+            return false;
         }
     }
 
@@ -178,15 +218,15 @@ public class WorldManager : IDisposable
     private void MeshBuilderThreadLoop()
     {
         Console.WriteLine("[MeshBuilderThread] Started.");
-        var context = new MeshBuilderContext(this);
-        var stopwatch = new Stopwatch();
+        var context = new MeshBuilderContext();
+        var stopwatch = new Stopwatch(); // Добавим замер производительности
         while (!_isDisposed)
         {
             try
             {
                 if (_meshQueue.TryTake(out var task, 50))
                 {
-                    stopwatch.Restart();
+                    stopwatch.Restart(); // <--- Начинаем замер
 
                     while (_finalizedMeshQueue.Count > 40 && !_isDisposed)
                     {
@@ -194,16 +234,12 @@ public class WorldManager : IDisposable
                     }
                     if (task.ChunkToProcess == null || !task.ChunkToProcess.IsLoaded) continue;
 
-                    Dictionary<Vector3i, MaterialType> voxels;
-                    lock (task.ChunkToProcess.VoxelsLock)
-                    {
-                        voxels = task.ChunkToProcess.Voxels;
-                    }
+                    context.LoadData(task.ChunkToProcess, task.Neighbor_NX, task.Neighbor_PX, task.Neighbor_NZ, task.Neighbor_PZ);
 
-                    context.PrepareFor(task.ChunkToProcess.Position);
-                    if (voxels.Count > 0)
+                    // Используем internal поле _mainChunkVoxels
+                    if (context._mainChunkVoxels.Count > 0)
                     {
-                        VoxelMeshBuilder.GenerateMesh(voxels, context.Vertices, context.Colors, context.AoValues, context.IsVoxelSolidForMesh);
+                        VoxelMeshBuilder.GenerateMesh(context._mainChunkVoxels, context.Vertices, context.Colors, context.AoValues, context.IsVoxelSolidForMesh);
                     }
 
                     if (!_meshDataPool.TryDequeue(out var meshData))
@@ -212,17 +248,16 @@ public class WorldManager : IDisposable
                     }
 
                     meshData.ChunkPosition = task.ChunkToProcess.Position;
-                    meshData.Vertices.Clear();
-                    meshData.Vertices.AddRange(context.Vertices);
-                    meshData.Colors.Clear();
-                    meshData.Colors.AddRange(context.Colors);
-                    meshData.AoValues.Clear();
-                    meshData.AoValues.AddRange(context.AoValues);
+
+                    (meshData.Vertices, context.Vertices) = (context.Vertices, meshData.Vertices);
+                    (meshData.Colors, context.Colors) = (context.Colors, meshData.Colors);
+                    (meshData.AoValues, context.AoValues) = (context.AoValues, meshData.AoValues);
+
                     meshData.IsUpdate = task.IsUpdate;
 
                     _finalizedMeshQueue.Enqueue(meshData);
 
-                    stopwatch.Stop(); // <--- Останавливаем таймер
+                    stopwatch.Stop(); // <--- Заканчиваем замер
                     PerformanceMonitor.RecordTiming(ThreadType.Meshing, stopwatch); // <--- Записываем результат
                 }
             }
@@ -393,12 +428,46 @@ public class WorldManager : IDisposable
                 var chunk = new Chunk(result.Position, this);
                 chunk.SetVoxelData(result.Voxels);
                 _chunks[result.Position] = chunk;
+                if (chunk.Position == Vector3i.Zero) Console.WriteLine($"[TRACE 0,0,0] Chunk object created. Queuing Physics and Mesh tasks.");
 
                 // Add to both processing queues
                 _physicsBuildQueue.Add(chunk);
+                QueueMeshGeneration(chunk, false);
                 _meshQueue.Add(new MeshGenerationTask { ChunkToProcess = chunk, IsUpdate = false });
             }
         }
+    }
+
+    private void QueueMeshGeneration(Chunk chunk, bool isUpdate)
+    {
+        if (chunk == null || !chunk.IsLoaded) return;
+
+        Dictionary<Vector3i, MaterialType> GetVoxelData(Vector3i offset)
+        {
+            lock (_chunksLock)
+            {
+                if (_chunks.TryGetValue(chunk.Position + offset, out var neighbor) && neighbor.IsLoaded)
+                {
+                    lock (neighbor.VoxelsLock)
+                    {
+                        // Мы создаем копию, чтобы поток меша не работал с оригиналом
+                        return new Dictionary<Vector3i, MaterialType>(neighbor.Voxels);
+                    }
+                }
+            }
+            return null;
+        }
+
+        var task = new MeshGenerationTask
+        {
+            ChunkToProcess = chunk,
+            IsUpdate = isUpdate,
+            Neighbor_NX = GetVoxelData(new Vector3i(-1, 0, 0)),
+            Neighbor_PX = GetVoxelData(new Vector3i(1, 0, 0)),
+            Neighbor_NZ = GetVoxelData(new Vector3i(0, 0, -1)),
+            Neighbor_PZ = GetVoxelData(new Vector3i(0, 0, 1)),
+        };
+        _meshQueue.Add(task);
     }
 
     private void ProcessFinalizedMeshes()
@@ -407,25 +476,19 @@ public class WorldManager : IDisposable
         while (processedMeshes < MaxMeshUpdatesPerFrame && _finalizedMeshQueue.TryDequeue(out var data))
         {
             processedMeshes++;
-            bool wasPending = false;
+            if (data.ChunkPosition == Vector3i.Zero) Console.WriteLine($"[TRACE 0,0,0] Main thread processing MESH data.");
             lock (_chunksLock)
             {
                 if (_chunks.TryGetValue(data.ChunkPosition, out var chunk))
                 {
-                    if (chunk.HasPhysics)
-                    {
-                        chunk.ApplyMesh(data.Vertices, data.Colors, data.AoValues);
-                    }
-                    else
-                    {
-                        _pendingMeshes[data.ChunkPosition] = data;
-                        wasPending = true;
-                    }
+                    // Просто передаем меш чанку, он сам разберется, что делать
+                    chunk.TrySetMesh(data, _meshDataPool);
                 }
-            }
-            if (!wasPending)
-            {
-                _meshDataPool.Enqueue(data);
+                else
+                {
+                    // Если чанк уже выгружен, возвращаем данные в пул
+                    _meshDataPool.Enqueue(data);
+                }
             }
         }
     }
@@ -437,11 +500,13 @@ public class WorldManager : IDisposable
         {
             if (result.TargetChunk == null || !result.TargetChunk.IsLoaded)
             {
+                if (result.TargetChunk.Position == Vector3i.Zero) Console.WriteLine($"[TRACE 0,0,0] Main thread processing PHYSICS data.");
                 if (result.ChildrenBuffer.Allocated)
                     PhysicsWorld.Simulation.BufferPool.Return(ref result.ChildrenBuffer);
                 continue;
             }
             processed++;
+
 
             StaticHandle handle = default;
             if (result.CompoundShape.HasValue)
@@ -452,22 +517,11 @@ public class WorldManager : IDisposable
                     result.ChildrenBuffer);
             }
 
-            result.TargetChunk.OnPhysicsRebuilt(handle);
-
-            var chunkPos = result.TargetChunk.Position;
-            FinalizedMeshData meshData = null;
-            lock (_chunksLock)
-            {
-                if (_pendingMeshes.TryGetValue(chunkPos, out meshData))
-                {
-                    _pendingMeshes.Remove(chunkPos);
-                }
-            }
-            if (meshData != null)
-            {
-                result.TargetChunk.ApplyMesh(meshData.Vertices, meshData.Colors, meshData.AoValues);
-                _meshDataPool.Enqueue(meshData);
-            }
+            // --- ГЛАВНОЕ ИЗМЕНЕНИЕ ---
+            // Вызываем новый, перегруженный метод OnPhysicsRebuilt
+            result.TargetChunk.OnPhysicsRebuilt(handle, _meshDataPool);
+            // Вся логика по поиску и применению "ожидающего" меша теперь внутри этого метода
+            // -------------------------
         }
     }
 
@@ -535,8 +589,7 @@ public class WorldManager : IDisposable
 
     public void RebuildChunkMeshAsync(Chunk chunk)
     {
-        if (chunk == null || !chunk.IsLoaded) return;
-        _meshQueue.Add(new MeshGenerationTask { ChunkToProcess = chunk, IsUpdate = true });
+        QueueMeshGeneration(chunk, true);
     }
 
     public void RebuildChunkPhysicsAsync(Chunk chunk)
@@ -870,34 +923,4 @@ public class WorldManager : IDisposable
             _objectsToRemove.Add(obj);
     }
     #endregion
-
-    public void Debug_PrintChunkStates()
-    {
-        Console.WriteLine("\n===== CHUNK DEBUG DUMP =====");
-        lock (_chunksLock)
-        {
-            Console.WriteLine($"Total Chunks in Dictionary: {_chunks.Count}");
-            foreach (var pair in _chunks)
-            {
-                var pos = pair.Key;
-                var chunk = pair.Value;
-                Console.WriteLine($"-- Chunk at {pos}:");
-                Console.WriteLine($"   IsLoaded: {chunk.IsLoaded}");
-                Console.WriteLine($"   HasPhysics: {chunk.HasPhysics}");
-                Console.WriteLine($"   Voxel Count: {chunk.Voxels.Count}");
-                Console.WriteLine($"   Static Handles Count: {chunk.StaticHandlesCount}");
-            }
-        }
-
-        Console.WriteLine("\n--- System Maps ---");
-        Console.WriteLine($"_staticToChunkMap Count: {_staticToChunkMap.Count}");
-        Console.WriteLine($"_pendingMeshes Count: {_pendingMeshes.Count}");
-        if (_pendingMeshes.Count > 0)
-        {
-            var keys = string.Join(", ", _pendingMeshes.Keys);
-            Console.WriteLine($"Pending meshes for chunks: [{keys}]");
-        }
-        Console.WriteLine("==========================\n");
-    }
-
 }

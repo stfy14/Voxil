@@ -4,6 +4,7 @@ using BepuPhysics.Collidables;
 using OpenTK.Mathematics;
 using System;
 using System.Collections.Generic;
+using System.Collections.Concurrent;
 
 public class Chunk : IDisposable
 {
@@ -22,6 +23,9 @@ public class Chunk : IDisposable
     public bool HasPhysics => _hasStaticBody;
     private bool _isDisposed = false;
     public int StaticHandlesCount => _staticHandles.Count;
+
+    private FinalizedMeshData _pendingMesh = null;
+    private readonly object _stateLock = new object(); // Единый замок для состояния чанка
 
     public Chunk(Vector3i position, WorldManager worldManager)
     {
@@ -48,6 +52,30 @@ public class Chunk : IDisposable
         else
         {
             _renderer.UpdateMesh(vertices, colors, aoValues);
+        }
+    }
+
+    // --- НОВЫЙ МЕТОД ---
+    public void TrySetMesh(FinalizedMeshData meshData, ConcurrentQueue<FinalizedMeshData> meshDataPool)
+    {
+        if (Position == Vector3i.Zero) Console.WriteLine($"---> [TRACE 0,0,0] TrySetMesh called. Current HasPhysics is {HasPhysics}.");
+        lock (_stateLock)
+        {
+            if (HasPhysics)
+            {
+                if (Position == Vector3i.Zero) Console.WriteLine("     [TRACE 0,0,0] Applying mesh directly.");
+                ApplyMesh(meshData.Vertices, meshData.Colors, meshData.AoValues);
+                meshDataPool.Enqueue(meshData);
+            }
+            else
+            {
+                if (Position == Vector3i.Zero) Console.WriteLine("     [TRACE 0,0,0] Storing mesh as PENDING.");
+                if (_pendingMesh != null)
+                {
+                    meshDataPool.Enqueue(_pendingMesh);
+                }
+                _pendingMesh = meshData;
+            }
         }
     }
 
@@ -147,12 +175,31 @@ public class Chunk : IDisposable
         }
     }
 
-    public void OnPhysicsRebuilt(StaticHandle handle)
+    public void OnPhysicsRebuilt(StaticHandle handle, ConcurrentQueue<FinalizedMeshData> meshDataPool)
     {
-        ClearPhysics();
-        _staticHandles.Add(handle);
-        WorldManager.RegisterChunkStatic(handle, this);
-        _hasStaticBody = (handle.Value != 0);
+        if (Position == Vector3i.Zero) Console.WriteLine($"---> [TRACE 0,0,0] OnPhysicsRebuilt called. Handle value: {handle.Value}.");
+        lock (_stateLock)
+        {
+            ClearPhysics();
+            _staticHandles.Add(handle);
+            WorldManager.RegisterChunkStatic(handle, this);
+            _hasStaticBody = true;
+
+            if (Position == Vector3i.Zero)
+            {
+                if (_pendingMesh != null)
+                    Console.WriteLine("     [TRACE 0,0,0] Found a pending mesh! APPLYING IT NOW.");
+                else
+                    Console.WriteLine("     [TRACE 0,0,0] No pending mesh was found.");
+            }
+
+            if (_pendingMesh != null)
+            {
+                ApplyMesh(_pendingMesh.Vertices, _pendingMesh.Colors, _pendingMesh.AoValues);
+                meshDataPool.Enqueue(_pendingMesh);
+                _pendingMesh = null;
+            }
+        }
     }
 
     public void Render(Shader shader, Matrix4 view, Matrix4 projection)

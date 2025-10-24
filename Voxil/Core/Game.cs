@@ -59,7 +59,7 @@ public class Game : GameWindow
         var worldGenerator = new PerlinGenerator(12345);
 
         // 2. ИЩЕМ БЕЗОПАСНУЮ СТАРТОВУЮ ПОЗИЦИЮ
-        var spawnXZ = new Vector2i(0, 0);
+        var spawnXZ = new Vector2i(8, 8);
         var spawnChunkPos = new Vector3i(spawnXZ.X / Chunk.ChunkSize, 0, spawnXZ.Y / Chunk.ChunkSize);
         var spawnChunkVoxels = new Dictionary<Vector3i, MaterialType>();
         worldGenerator.GenerateChunk(spawnChunkPos, spawnChunkVoxels);
@@ -76,7 +76,7 @@ public class Game : GameWindow
         }
 
         // Ставим игрока на 3 блока выше найденной земли
-        var startPosition = new System.Numerics.Vector3(spawnXZ.X, groundHeight + 3, spawnXZ.Y);
+        var startPosition = new System.Numerics.Vector3(spawnXZ.X, groundHeight + 5, spawnXZ.Y);
         Console.WriteLine($"[Game] Found surface at Y={groundHeight}. Spawning player at {startPosition}");
 
         // 3. Создаём камеру с новой позицией
@@ -127,9 +127,9 @@ public class Game : GameWindow
 
         // Обновляем данные для оверлея раз в секунду
         _debugUpdateTimer += deltaTime;
-        if (_debugUpdateTimer >= 1.0f)
+        if (_debugUpdateTimer >= 0.2f)
         {
-            _debugUpdateTimer -= 1.0f;
+            _debugUpdateTimer = 0f;
             var averages = PerformanceMonitor.GetAveragesAndReset();
             _debugLines.Clear();
             _debugLines.Add("--- Avg Thread Times (ms/task) ---");
