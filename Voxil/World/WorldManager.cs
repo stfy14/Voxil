@@ -269,7 +269,6 @@ public class WorldManager : IDisposable
     private void PhysicsBuilderThreadLoop()
     {
         Console.WriteLine("[PhysicsBuilderThread] Started.");
-        //Точка диагностики
         var stopwatch = new Stopwatch();
         while (!_isDisposed)
         {
@@ -277,11 +276,13 @@ public class WorldManager : IDisposable
             {
                 if (_physicsBuildQueue.TryTake(out var chunkToRebuild, 50))
                 {
-                    stopwatch.Restart(); // <--- Запускаем таймер
+                    stopwatch.Restart();
 
                     if (chunkToRebuild == null || !chunkToRebuild.IsLoaded) continue;
 
+                    // Вызываем старый, простой метод GetSurfaceVoxels без аргументов
                     Dictionary<Vector3i, MaterialType> surfaceVoxels = chunkToRebuild.GetSurfaceVoxels();
+
                     var compoundShape = PhysicsWorld.CreateStaticChunkShape(surfaceVoxels, out var childrenBuffer);
 
                     _physicsResultQueue.Enqueue(new PhysicsBuildResult
@@ -291,8 +292,8 @@ public class WorldManager : IDisposable
                         ChildrenBuffer = childrenBuffer
                     });
 
-                    stopwatch.Stop(); // <--- Останавливаем таймер
-                    PerformanceMonitor.RecordTiming(ThreadType.Physics, stopwatch); // <--- Записываем результат
+                    stopwatch.Stop();
+                    PerformanceMonitor.RecordTiming(ThreadType.Physics, stopwatch);
                 }
             }
             catch (Exception ex)
@@ -414,7 +415,7 @@ public class WorldManager : IDisposable
         int processed = 0;
         while (processed < MaxChunksPerFrame && _generatedChunksQueue.TryDequeue(out var result))
         {
-            if (_meshQueue.Count > 40) // Backpressure for mesh queue
+            if (_meshQueue.Count > 40)
             {
                 _generatedChunksQueue.Enqueue(result);
                 break;
@@ -428,44 +429,41 @@ public class WorldManager : IDisposable
                 var chunk = new Chunk(result.Position, this);
                 chunk.SetVoxelData(result.Voxels);
                 _chunks[result.Position] = chunk;
-                if (chunk.Position == Vector3i.Zero) Console.WriteLine($"[TRACE 0,0,0] Chunk object created. Queuing Physics and Mesh tasks.");
 
-                // Add to both processing queues
                 _physicsBuildQueue.Add(chunk);
-                QueueMeshGeneration(chunk, false);
                 _meshQueue.Add(new MeshGenerationTask { ChunkToProcess = chunk, IsUpdate = false });
             }
         }
+    }
+
+    private Dictionary<Vector3i, MaterialType> GetVoxelData(Chunk sourceChunk, Vector3i offset)
+    {
+        lock (_chunksLock)
+        {
+            if (_chunks.TryGetValue(sourceChunk.Position + offset, out var neighbor) && neighbor.IsLoaded)
+            {
+                lock (neighbor.VoxelsLock)
+                {
+                    return new Dictionary<Vector3i, MaterialType>(neighbor.Voxels);
+                }
+            }
+        }
+        return null;
     }
 
     private void QueueMeshGeneration(Chunk chunk, bool isUpdate)
     {
         if (chunk == null || !chunk.IsLoaded) return;
 
-        Dictionary<Vector3i, MaterialType> GetVoxelData(Vector3i offset)
-        {
-            lock (_chunksLock)
-            {
-                if (_chunks.TryGetValue(chunk.Position + offset, out var neighbor) && neighbor.IsLoaded)
-                {
-                    lock (neighbor.VoxelsLock)
-                    {
-                        // Мы создаем копию, чтобы поток меша не работал с оригиналом
-                        return new Dictionary<Vector3i, MaterialType>(neighbor.Voxels);
-                    }
-                }
-            }
-            return null;
-        }
-
         var task = new MeshGenerationTask
         {
             ChunkToProcess = chunk,
             IsUpdate = isUpdate,
-            Neighbor_NX = GetVoxelData(new Vector3i(-1, 0, 0)),
-            Neighbor_PX = GetVoxelData(new Vector3i(1, 0, 0)),
-            Neighbor_NZ = GetVoxelData(new Vector3i(0, 0, -1)),
-            Neighbor_PZ = GetVoxelData(new Vector3i(0, 0, 1)),
+            // Добавляем 'chunk' в качестве первого аргумента
+            Neighbor_NX = GetVoxelData(chunk, new Vector3i(-1, 0, 0)),
+            Neighbor_PX = GetVoxelData(chunk, new Vector3i(1, 0, 0)),
+            Neighbor_NZ = GetVoxelData(chunk, new Vector3i(0, 0, -1)),
+            Neighbor_PZ = GetVoxelData(chunk, new Vector3i(0, 0, 1)),
         };
         _meshQueue.Add(task);
     }

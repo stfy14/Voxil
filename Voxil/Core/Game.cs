@@ -76,7 +76,7 @@ public class Game : GameWindow
         }
 
         // Ставим игрока на 3 блока выше найденной земли
-        var startPosition = new System.Numerics.Vector3(spawnXZ.X, groundHeight + 5, spawnXZ.Y);
+        var startPosition = new System.Numerics.Vector3(spawnXZ.X, groundHeight + 15, spawnXZ.Y);
         Console.WriteLine($"[Game] Found surface at Y={groundHeight}. Spawning player at {startPosition}");
 
         // 3. Создаём камеру с новой позицией
