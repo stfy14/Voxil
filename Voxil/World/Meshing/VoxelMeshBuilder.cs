@@ -17,15 +17,12 @@ public static class VoxelMeshBuilder
     /// <param name="isVoxelSolid">Функция проверки, является ли воксель твёрдым (для AO и culling)</param>
     public static void GenerateMesh(
         IDictionary<Vector3i, MaterialType> voxels,
-        out List<float> vertices,
-        out List<float> colors,
-        out List<float> aoValues,
+        // Меняем 'out List<float>' на 'List<float>'
+        List<float> vertices,
+        List<float> colors,
+        List<float> aoValues,
         System.Func<Vector3i, bool> isVoxelSolid = null)
     {
-        vertices = new List<float>();
-        colors = new List<float>();
-        aoValues = new List<float>();
-
         if (voxels.Count == 0) return;
 
         // Если функция не передана, используем только локальный словарь
@@ -215,7 +212,7 @@ public static class VoxelMeshBuilder
         (float r, float g, float b) color,
         float ao)
     {
-        vertices.AddRange(new[] { pos.X, pos.Y, pos.Z });
+        vertices.AddRange(new[] { pos.X + 0.5f, pos.Y + 0.5f, pos.Z + 0.5f });
         colors.AddRange(new[] { color.r, color.g, color.b });
         aoValues.Add(ao);
     }

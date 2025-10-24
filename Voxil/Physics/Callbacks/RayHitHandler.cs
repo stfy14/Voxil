@@ -1,4 +1,4 @@
-﻿// /Physics/RayHitHandler.cs
+﻿// /Physics/RayHitHandler.cs - ИСПРАВЛЕН ДЛЯ BEPU v2.5
 using BepuPhysics;
 using BepuPhysics.Collidables;
 using BepuPhysics.CollisionDetection;
@@ -6,9 +6,6 @@ using BepuPhysics.Trees;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 
-/// <summary>
-/// Общий обработчик пересечений луча (для проверки земли под игроком и т.д.)
-/// </summary>
 public struct RayHitHandler : IRayHitHandler
 {
     public BodyHandle BodyToIgnore;
@@ -34,8 +31,9 @@ public struct RayHitHandler : IRayHitHandler
         return AllowTest(collidable);
     }
 
+    // ИСПРАВЛЕНИЕ v2.5: Сигнатура метода изменена (убраны 'in' у normal и collidable)
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void OnRayHit(in RayData ray, ref float maximumT, float t, in Vector3 normal, CollidableReference collidable, int childIndex)
+    public void OnRayHit(in RayData ray, ref float maximumT, float t, Vector3 normal, CollidableReference collidable, int childIndex)
     {
         if (t < maximumT)
         {

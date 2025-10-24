@@ -1,4 +1,4 @@
-﻿// /Physics/PhysicsWorld.cs - КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ CRASH
+﻿// /Physics/PhysicsWorld.cs - ИСПРАВЛЕН ДЛЯ BEPU v2.5
 using BepuPhysics;
 using BepuPhysics.Collidables;
 using BepuUtilities;
@@ -20,14 +20,13 @@ public class PhysicsWorld : IDisposable
     private bool _isDisposed = false;
     private readonly Dictionary<TypedIndex, Buffer<CompoundChild>> _compoundBuffers = new();
     private readonly object _bufferLock = new object();
-    public readonly Box VoxelShapeObject;
+    // VoxelShapeObject был удален, т.к. мы будем создавать его локально.
 
     private readonly int _batchSize;
     private readonly object _simLock = new object();
 
-    public PhysicsWorld(int batchSize = 512)
+    public PhysicsWorld()
     {
-        _batchSize = Math.Max(1, batchSize);
         _bufferPool = new BufferPool();
 
         int threadCount = Math.Max(1, Environment.ProcessorCount > 4
@@ -46,14 +45,7 @@ public class PhysicsWorld : IDisposable
 
         Simulation = Simulation.Create(_bufferPool, narrowPhaseCallbacks, poseIntegratorCallbacks, solveDescription);
 
-        // --- ДОБАВЬТЕ ЭТОТ КОД ПОСЛЕ Simulation.Create ---
-        // 1. Создаем один-единственный "мастер-куб" для всех вокселей.
-        VoxelShapeObject = new Box(1, 1, 1);
-        // 2. Добавляем его в симуляцию ОДИН РАЗ, чтобы "зарегистрировать" его тип.
-        //    Это гарантирует, что BepuPhysics будет знать о типе Box с самого начала.
-        Simulation.Shapes.Add(VoxelShapeObject);
-
-        Console.WriteLine($"[PhysicsWorld] Initialized with {threadCount} physics threads. BatchSize={_batchSize}");
+        Console.WriteLine($"[PhysicsWorld] Initialized with {threadCount} physics threads");
     }
 
     public void SetPlayerHandle(BodyHandle playerHandle)
@@ -72,63 +64,62 @@ public class PhysicsWorld : IDisposable
     public void Update(float deltaTime)
     {
         if (_isDisposed) return;
-        lock (_simLock)
-        {
-            // СНАЧАЛА обновляем контроллер, когда симуляция стабильна
-            UpdateCharacterController(deltaTime);
-
-            // ЗАТЕМ запускаем основной шаг физики
-            Simulation.Timestep(deltaTime, _threadDispatcher);
-        }
+        // ВАЖНО: Мы больше не блокируем здесь всю симуляцию.
+        // Блокировка будет происходить вокруг конкретных операций.
+        UpdateCharacterController(deltaTime);
+        Simulation.Timestep(deltaTime, _threadDispatcher);
     }
 
-    /// <summary>
-    /// КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Правильное создание Compound с shape'ами
-    /// </summary>
-    public StaticHandle CreateStaticChunkBody(Vector3 chunkWorldPosition, Dictionary<Vector3i, MaterialType> voxels)
+    // --- НОВЫЙ МЕТОД (БЕЗОПАСЕН ДЛЯ ФОНОВЫХ ПОТОКОВ) ---
+    // Этот метод только ВЫЧИСЛЯЕТ форму, не трогая симуляцию.
+    public Compound? CreateStaticChunkShape(Dictionary<Vector3i, MaterialType> voxels, out Buffer<CompoundChild> childrenBuffer)
     {
-        if (voxels == null || voxels.Count == 0) return default;
+        childrenBuffer = default;
+        if (voxels == null || voxels.Count == 0)
+            return null;
 
-        // Паттерн остается тем же: локальный экземпляр, который мы передаем в builder.
-        var boxShape = new Box(1, 1, 1);
-
+        // CompoundBuilder можно безопасно использовать в любом потоке,
+        // если он не пытается добавлять/удалять формы из общего Simulation.Shapes.
         using (var compoundBuilder = new CompoundBuilder(_bufferPool, Simulation.Shapes, voxels.Count))
         {
+            var boxShape = new Box(1, 1, 1);
             foreach (var voxel in voxels)
             {
                 var localPosition = new Vector3(voxel.Key.X + 0.5f, voxel.Key.Y + 0.5f, voxel.Key.Z + 0.5f);
                 var pose = new RigidPose(localPosition);
                 compoundBuilder.Add(boxShape, pose, 1f);
             }
+            compoundBuilder.BuildKinematicCompound(out childrenBuffer);
+        }
 
-            // --- КЛЮЧЕВОЕ ИЗМЕНЕНИЕ ---
-            // Вместо BuildKinematicCompound, мы вызываем Build, чтобы получить BigCompound.
-            // Этот метод сам управляет памятью и создает оптимизированное BVH-дерево.
-            compoundBuilder.Build(_bufferPool, out BigCompound bigCompound);
+        if (childrenBuffer.Length == 0)
+            return null;
 
-            if (bigCompound.ChildCount == 0)
-            {
-                // Если compound пуст, builder мог все равно выделить буфер.
-                // Мы должны его уничтожить, чтобы избежать утечки.
-                bigCompound.Dispose(_bufferPool);
-                return default;
-            }
+        return new Compound(childrenBuffer);
+    }
 
-            // Теперь мы добавляем в симуляцию не Compound, а BigCompound.
-            var shapeIndex = Simulation.Shapes.Add(bigCompound);
+    // --- НОВЫЙ МЕТОД (ТОЛЬКО ДЛЯ ГЛАВНОГО ПОТОКА) ---
+    // Этот метод ПРИМЕНЯЕТ готовую форму к симуляции.
+    public StaticHandle AddStaticChunkBody(Vector3 chunkWorldPosition, Compound compoundShape, Buffer<CompoundChild> childrenBuffer)
+    {
+        lock (_simLock) // Блокируем симуляцию на время изменения
+        {
+            var shapeIndex = Simulation.Shapes.Add(compoundShape);
             if (!shapeIndex.Exists)
             {
-                // Если форма не добавилась, мы все равно должны уничтожить буфер.
-                bigCompound.Dispose(_bufferPool);
+                _bufferPool.Return(ref childrenBuffer);
                 return default;
             }
 
-            // Для BigCompound не нужно вычислять смещение центра, его позиция - это позиция чанка.
+            lock (_bufferLock)
+            {
+                _compoundBuffers.Add(shapeIndex, childrenBuffer);
+            }
+
             var staticDesc = new StaticDescription(chunkWorldPosition, shapeIndex);
             return Simulation.Statics.Add(staticDesc);
         }
     }
-
 
     public void ReturnCompoundBuffer(TypedIndex shapeIndex)
     {
@@ -142,14 +133,11 @@ public class PhysicsWorld : IDisposable
         }
     }
 
-    /// <summary>
-    /// КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Правильное создание динамических тел
-    /// </summary>
     public BodyHandle CreateVoxelObjectBody(
-    IList<OpenTK.Mathematics.Vector3i> voxelCoordinates,
-    MaterialType materialType,
-    Vector3 initialPosition,
-    out Vector3 localCenterOfMass)
+        IList<OpenTK.Mathematics.Vector3i> voxelCoordinates,
+        MaterialType materialType,
+        Vector3 initialPosition,
+        out Vector3 localCenterOfMass)
     {
         lock (_simLock)
         {
@@ -158,12 +146,12 @@ public class PhysicsWorld : IDisposable
 
             using (var compoundBuilder = new CompoundBuilder(_bufferPool, Simulation.Shapes, voxelCoordinates.Count))
             {
+                var boxShape = new Box(1, 1, 1); // Создаем один экземпляр
                 float voxelMass = MaterialRegistry.Get(materialType).MassPerVoxel;
                 foreach (var coord in voxelCoordinates)
                 {
                     var pose = new RigidPose(new Vector3(coord.X, coord.Y, coord.Z));
-                    // ИСПОЛЬЗУЕМ ОБЪЕКТ "мастер-куба"
-                    compoundBuilder.Add(VoxelShapeObject, pose, voxelMass);
+                    compoundBuilder.Add(boxShape, pose, voxelMass);
                 }
 
                 compoundBuilder.BuildDynamicCompound(out Buffer<CompoundChild> childrenBuffer, out BodyInertia inertia, out localCenterOfMass);
@@ -199,14 +187,11 @@ public class PhysicsWorld : IDisposable
     }
 
 
-    /// <summary>
-    /// КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Правильное обновление тел
-    /// </summary>
     public BodyHandle UpdateVoxelObjectBody(
-    BodyHandle handle,
-    IList<OpenTK.Mathematics.Vector3i> voxelCoordinates,
-    MaterialType materialType,
-    out Vector3 localCenterOfMass)
+        BodyHandle handle,
+        IList<OpenTK.Mathematics.Vector3i> voxelCoordinates,
+        MaterialType materialType,
+        out Vector3 localCenterOfMass)
     {
         lock (_simLock)
         {
@@ -227,12 +212,12 @@ public class PhysicsWorld : IDisposable
 
             using (var compoundBuilder = new CompoundBuilder(_bufferPool, Simulation.Shapes, voxelCoordinates.Count))
             {
+                var boxShape = new Box(1, 1, 1); // Создаем один экземпляр
                 float voxelMass = MaterialRegistry.Get(materialType).MassPerVoxel;
                 foreach (var coord in voxelCoordinates)
                 {
                     var pose = new RigidPose(new Vector3(coord.X, coord.Y, coord.Z));
-                    // ИСПОЛЬЗУЕМ ОБЪЕКТ "мастер-куба"
-                    compoundBuilder.Add(VoxelShapeObject, pose, voxelMass);
+                    compoundBuilder.Add(boxShape, pose, voxelMass);
                 }
 
                 compoundBuilder.BuildDynamicCompound(out Buffer<CompoundChild> childrenBuffer, out BodyInertia inertia, out localCenterOfMass);
@@ -274,7 +259,6 @@ public class PhysicsWorld : IDisposable
     public void RemoveBody(BodyHandle handle)
     {
         if (_isDisposed) return;
-        // Блокируем симуляцию на время ее изменения.
         lock (_simLock)
         {
             try
@@ -313,34 +297,28 @@ public class PhysicsWorld : IDisposable
 
     private void UpdateCharacterController(float deltaTime)
     {
-        // Проверяем, что тело игрока существует в симуляции. 
-        // Это единственная необходимая проверка.
-        if (!Simulation.Bodies.BodyExists(_player_state.BodyHandle)) // << ИСПРАВЛЕНО
+        if (!Simulation.Bodies.BodyExists(_player_state.BodyHandle))
             return;
 
         var bodyReference = Simulation.Bodies.GetBodyReference(_player_state.BodyHandle);
         var settings = _player_state.Settings;
         var bodyPosition = bodyReference.Pose.Position;
 
-        // 1. ВЫПОЛНЯЕМ ОДИН ТОЧНЫЙ РЕЙКАСТ
         var hitHandler = new RayHitHandler { BodyToIgnore = _player_state.BodyHandle };
         float rayLength = PlayerController.Height / 2f + settings.HoverHeight + 0.2f;
 
-        Simulation.RayCast(bodyPosition, -Vector3.UnitY, rayLength, ref hitHandler);
+        // ИСПРАВЛЕНИЕ v2.5: Добавлен аргумент _bufferPool
+        Simulation.RayCast(bodyPosition, -Vector3.UnitY, rayLength, _bufferPool, ref hitHandler);
 
-        // 2. ОБНОВЛЯЕМ СОСТОЯНИЕ И ПРИМЕНЯЕМ СИЛУ
         if (hitHandler.Hit)
         {
             _player_state.IsOnGround = true;
-
-            float error = hitHandler.T - (PlayerController.Height / 2f + settings.HoverHeight);
-            float springForce = -error * settings.SpringFrequency - bodyReference.Velocity.Linear.Y * settings.SpringDamping;
-
-            bodyReference.ApplyLinearImpulse(new Vector3(0, springForce * deltaTime, 0));
+            _player_state.RayT = hitHandler.T;
         }
         else
         {
             _player_state.IsOnGround = false;
+            _player_state.RayT = float.MaxValue;
         }
     }
 
@@ -366,7 +344,8 @@ public class PhysicsWorld : IDisposable
 
             lock (_simLock)
             {
-                Simulation.RayCast(origin, direction, maxDistance, ref hitHandler);
+                // ИСПРАВЛЕНИЕ v2.5: Добавлен аргумент _bufferPool
+                Simulation.RayCast(origin, direction, maxDistance, _bufferPool, ref hitHandler);
             }
 
             if (hitHandler.Hit)
@@ -396,13 +375,10 @@ public class PhysicsWorld : IDisposable
         {
             lock (_simLock)
             {
-                // Правильный порядок освобождения
                 if (Simulation?.Bodies != null)
                     Simulation.Bodies.Clear();
-
                 if (Simulation?.Statics != null)
                     Simulation.Statics.Clear();
-
                 if (Simulation?.Shapes != null)
                     Simulation.Shapes.Clear();
 

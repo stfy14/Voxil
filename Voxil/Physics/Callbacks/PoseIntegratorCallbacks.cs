@@ -15,34 +15,48 @@ public struct PoseIntegratorCallbacks : IPoseIntegratorCallbacks
     {
         var playerLane = Vector.Equals(bodyIndices, new Vector<int>(PlayerState.BodyHandle.Value));
 
-        // --- ЛОГИКА ДЛЯ ИГРОКА ---
         if (!Vector.EqualsAll(playerLane, Vector<int>.Zero))
         {
             var settings = PlayerState.Settings;
+            float frameDt = dt[0];
 
-            // 1. ГРАВИТАЦИЯ: Применяем гравитацию ТОЛЬКО ЕСЛИ игрок НЕ на земле.
-            if (!PlayerState.IsOnGround)
+            // --- ВСЯ ВЕРТИКАЛЬНАЯ ЛОГИКА ТЕПЕРЬ ЗДЕСЬ ---
+            if (PlayerState.IsOnGround)
             {
+                // --- ЛОГИКА ПРУЖИНЫ (HOVER) ---
+                // Вычисляем ошибку (насколько мы далеко от идеальной высоты)
+                float error = PlayerState.RayT - (PlayerController.Height / 2f + settings.HoverHeight);
+
+                // Вычисляем силу пружины, которая будет бороться с ошибкой и текущей скоростью
+                float springForce = -error * settings.SpringFrequency - velocity.Linear.Y[0] * settings.SpringDamping;
+
+                // Применяем силу как изменение скорости (ускорение)
+                velocity.Linear.Y += new Vector<float>(springForce * frameDt);
+            }
+            else
+            {
+                // --- ЛОГИКА ГРАВИТАЦИИ (КОГДА В ВОЗДУХЕ) ---
                 velocity.Linear.Y += settings.Gravity.Y * dt;
             }
 
-            // 2. ГОРИЗОНТАЛЬНОЕ ДВИЖЕНИЕ
-            Vector2 goalVelocity = PlayerState.GoalVelocity;
-            float frameDt = dt[0];
+            // --- ГОРИЗОНТАЛЬНАЯ ЛОГИКА (остается без изменений) ---
             var currentHorizontalVelocity = new Vector2(velocity.Linear.X[0], velocity.Linear.Z[0]);
-            var velocityDifference = goalVelocity - currentHorizontalVelocity;
-
-            if (goalVelocity.LengthSquared() < 0.01f) // Демпфирование при отсутствии ввода
+            var goalHorizontalVelocity = PlayerState.GoalVelocity;
+            var velocityDifference = goalHorizontalVelocity - currentHorizontalVelocity;
+            var acceleration = velocityDifference * settings.MovementAcceleration;
+            float accelerationMagnitude = acceleration.Length();
+            if (accelerationMagnitude > settings.MovementAcceleration)
             {
-                float dampingFactor = 1.0f - (1.0f - settings.MovementDamping) * frameDt;
+                acceleration *= settings.MovementAcceleration / accelerationMagnitude;
+            }
+            velocity.Linear.X += new Vector<float>(acceleration.X * frameDt);
+            velocity.Linear.Z += new Vector<float>(acceleration.Y * frameDt);
+
+            if (PlayerState.GoalVelocity.LengthSquared() < 0.01f && PlayerState.IsOnGround)
+            {
+                float dampingFactor = (float)Math.Pow(settings.MovementDamping, frameDt);
                 velocity.Linear.X *= new Vector<float>(dampingFactor);
                 velocity.Linear.Z *= new Vector<float>(dampingFactor);
-            }
-            else // Ускорение при наличии ввода
-            {
-                var acceleration = velocityDifference * settings.MovementAcceleration;
-                var impulse = new Vector3Wide { X = new Vector<float>(acceleration.X * frameDt), Y = Vector<float>.Zero, Z = new Vector<float>(acceleration.Y * frameDt) };
-                velocity.Linear += impulse;
             }
         }
     }

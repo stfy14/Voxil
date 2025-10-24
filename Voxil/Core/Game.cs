@@ -18,6 +18,13 @@ public class Game : GameWindow
 
     private bool _isInitialized = false;
 
+    // --- НОВЫЕ ПОЛЯ ДЛЯ ОТЛАДКИ ---
+    private DebugOverlay _debugOverlay;
+    private bool _showDebugOverlay = true;
+    private float _debugUpdateTimer = 0f;
+    private List<string> _debugLines = new List<string>();
+    // -----------------------------
+
     public Game(GameWindowSettings gameWindowSettings, NativeWindowSettings nativeWindowSettings)
         : base(gameWindowSettings, nativeWindowSettings)
     {
@@ -48,11 +55,31 @@ public class Game : GameWindow
 
         // 1. Создаём физический мир
         _physicsWorld = new PhysicsWorld();
+        // СОЗДАЕМ ГЕНЕРАТОР ЗДЕСЬ, ЧТОБЫ НАЙТИ ТОЧКУ СПАВНА
+        var worldGenerator = new PerlinGenerator(12345);
 
-        // 2. ИСПРАВЛЕНИЕ: Безопасная стартовая позиция (чуть выше уровня генерации земли)
-        var startPosition = new System.Numerics.Vector3(8f, 50f, 8f);
+        // 2. ИЩЕМ БЕЗОПАСНУЮ СТАРТОВУЮ ПОЗИЦИЮ
+        var spawnXZ = new Vector2i(0, 0);
+        var spawnChunkPos = new Vector3i(spawnXZ.X / Chunk.ChunkSize, 0, spawnXZ.Y / Chunk.ChunkSize);
+        var spawnChunkVoxels = new Dictionary<Vector3i, MaterialType>();
+        worldGenerator.GenerateChunk(spawnChunkPos, spawnChunkVoxels);
 
-        // 3. Создаём камеру
+        int groundHeight = 0;
+        // Ищем сверху вниз первый твердый блок
+        for (int y = 100; y > 0; y--)
+        {
+            if (spawnChunkVoxels.ContainsKey(new Vector3i(spawnXZ.X % Chunk.ChunkSize, y, spawnXZ.Y % Chunk.ChunkSize)))
+            {
+                groundHeight = y;
+                break;
+            }
+        }
+
+        // Ставим игрока на 3 блока выше найденной земли
+        var startPosition = new System.Numerics.Vector3(spawnXZ.X, groundHeight + 3, spawnXZ.Y);
+        Console.WriteLine($"[Game] Found surface at Y={groundHeight}. Spawning player at {startPosition}");
+
+        // 3. Создаём камеру с новой позицией
         _camera = new Camera(VectorExtensions.ToOpenTK(startPosition), Size.X / (float)Size.Y);
 
         // 4. Создаём контроллер игрока
@@ -71,37 +98,61 @@ public class Game : GameWindow
         CursorState = CursorState.Grabbed;
         _isInitialized = true;
 
+        //Debug overlay
+        _debugOverlay = new DebugOverlay(Size.X, Size.Y);
+        _isInitialized = true;
+
         Console.WriteLine("[Game] Initialization complete.");
     }
 
     protected override void OnUpdateFrame(FrameEventArgs e)
     {
         base.OnUpdateFrame(e);
-
         if (!_isInitialized) return;
-
         float deltaTime = (float)e.Time;
 
-        // 1. Обновляем ввод
+        // 1. Ввод
         _input.Update(KeyboardState, MouseState);
-
         if (_input.IsExitPressed())
         {
             Close();
             return;
         }
 
-        // 2. Обновляем игрока (движение, камера)
+        // --- НОВЫЙ КОД ДЛЯ УПРАВЛЕНИЯ ОВЕРЛЕЕМ ---
+        if (_input.IsKeyPressed(Keys.F3))
+        {
+            _showDebugOverlay = !_showDebugOverlay;
+        }
+
+        // Обновляем данные для оверлея раз в секунду
+        _debugUpdateTimer += deltaTime;
+        if (_debugUpdateTimer >= 1.0f)
+        {
+            _debugUpdateTimer -= 1.0f;
+            var averages = PerformanceMonitor.GetAveragesAndReset();
+            _debugLines.Clear();
+            _debugLines.Add("--- Avg Thread Times (ms/task) ---");
+            _debugLines.Add($"Generation: {averages[ThreadType.Generation]:F2}");
+            _debugLines.Add($"Meshing:    {averages[ThreadType.Meshing]:F2}");
+            _debugLines.Add($"Physics:    {averages[ThreadType.Physics]:F2}");
+            _debugLines.Add($"Detachment: {averages[ThreadType.Detachment]:F2}");
+        }
+
+        // 2. Логика игрока
         _playerController.Update(_input, deltaTime);
 
-        // 3. Обновляем мир (генерация, меши, физика чанков)
-        // КРИТИЧЕСКИ ВАЖНО: это делается ДО Simulation.Timestep
+        // 3. Обновление мира (БЕЗ обновления позиций динамических объектов)
         _worldManager.Update(deltaTime);
 
-        // 4. Обновляем физическую симуляцию
+        // 4. ШАГ ФИЗИЧЕСКОЙ СИМУЛЯЦИИ
         _physicsWorld.Update(deltaTime);
 
-        // 5. Обрабатываем разрушение блоков
+        // 5. --- НОВЫЙ ШАГ ---
+        // ОБНОВЛЯЕМ ВИДИМЫЕ ПОЗИЦИИ из нового состояния физики
+        _worldManager.ProcessVoxelObjects();
+
+        // 6. Обработка разрушения (если есть)
         if (_input.IsMouseButtonPressed(MouseButton.Left))
         {
             ProcessBlockDestruction();
@@ -119,7 +170,8 @@ public class Game : GameWindow
             Simulation = _physicsWorld.Simulation
         };
 
-        _physicsWorld.Simulation.RayCast(cameraPosition, lookDirection, 100f, ref hitHandler);
+        // ИСПРАВЛЕНИЕ v2.5: Добавлен аргумент _physicsWorld.Simulation.BufferPool
+        _physicsWorld.Simulation.RayCast(cameraPosition, lookDirection, 100f, _physicsWorld.Simulation.BufferPool, ref hitHandler);
 
         if (hitHandler.Hit)
         {
@@ -138,6 +190,13 @@ public class Game : GameWindow
 
         _worldManager.Render(_shader, _camera.GetViewMatrix(), _camera.GetProjectionMatrix());
 
+        // --- НОВЫЙ КОД ДЛЯ РЕНДЕРИНГА ОВЕРЛЕЯ ---
+        if (_showDebugOverlay)
+        {
+            _debugOverlay.Render(_debugLines);
+        }
+        // --------------------------------------
+
         SwapBuffers();
     }
 
@@ -146,6 +205,9 @@ public class Game : GameWindow
         base.OnResize(e);
         GL.Viewport(0, 0, Size.X, Size.Y);
         _camera?.UpdateAspectRatio(Size.X / (float)Size.Y);
+
+        // --- ОБНОВЛЯЕМ РАЗМЕР ДЛЯ ОВЕРЛЕЯ ---
+        _debugOverlay?.UpdateScreenSize(Size.X, Size.Y);
     }
 
     protected override void OnUnload()
@@ -157,6 +219,7 @@ public class Game : GameWindow
         _worldManager?.Dispose();
         _physicsWorld?.Dispose();
         _shader?.Dispose();
+        _debugOverlay?.Dispose();
 
         Console.WriteLine("[Game] Resources released.");
     }

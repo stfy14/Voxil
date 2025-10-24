@@ -50,9 +50,17 @@ public class VoxelObject : IDisposable
             voxelsDict[coord] = Material;
         }
 
+        // --- ИЗМЕНЕНИЯ ЗДЕСЬ ---
+        // 1. Создаем списки ПЕРЕД вызовом метода
+        var vertices = new List<float>();
+        var colors = new List<float>();
+        var aoValues = new List<float>();
+
+        // 2. Вызываем метод, передавая ему списки БЕЗ ключевого слова out
         VoxelMeshBuilder.GenerateMesh(voxelsDict,
-            out var vertices, out var colors, out var aoValues,
+            vertices, colors, aoValues,
             localPos => voxelsDict.ContainsKey(localPos));
+        // -------------------------
 
         _renderer = new VoxelObjectRenderer(vertices, colors, aoValues);
     }
@@ -64,7 +72,6 @@ public class VoxelObject : IDisposable
     {
         if (_isDisposed) return;
 
-        // КРИТИЧЕСКИ ВАЖНО: Проверяем, существует ли body
         if (!physicsWorld.Simulation.Bodies.BodyExists(BodyHandle))
         {
             Console.WriteLine($"[VoxelObject] Cannot rebuild: body {BodyHandle.Value} does not exist!");
@@ -77,9 +84,17 @@ public class VoxelObject : IDisposable
             voxelsDict[coord] = Material;
         }
 
+        // --- ИЗМЕНЕНИЯ ЗДЕСЬ ---
+        // 1. Создаем списки ПЕРЕД вызовом метода
+        var vertices = new List<float>();
+        var colors = new List<float>();
+        var aoValues = new List<float>();
+
+        // 2. Вызываем метод, передавая ему списки БЕЗ ключевого слова out
         VoxelMeshBuilder.GenerateMesh(voxelsDict,
-            out var vertices, out var colors, out var aoValues,
+            vertices, colors, aoValues,
             localPos => voxelsDict.ContainsKey(localPos));
+        // -------------------------
 
         _renderer?.UpdateMesh(vertices, colors, aoValues);
 
@@ -87,7 +102,7 @@ public class VoxelObject : IDisposable
         {
             var newHandle = physicsWorld.UpdateVoxelObjectBody(BodyHandle, VoxelCoordinates, Material, out var newCenterOfMass);
             LocalCenterOfMass = newCenterOfMass.ToOpenTK();
-            BodyHandle = newHandle; // Обновляем handle (может измениться)
+            BodyHandle = newHandle;
         }
         catch (Exception ex)
         {
