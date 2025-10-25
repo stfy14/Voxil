@@ -55,29 +55,9 @@ public class Game : GameWindow
 
         // 1. Создаём физический мир
         _physicsWorld = new PhysicsWorld();
-        // СОЗДАЕМ ГЕНЕРАТОР ЗДЕСЬ, ЧТОБЫ НАЙТИ ТОЧКУ СПАВНА
-        var worldGenerator = new PerlinGenerator(12345);
-
-        // 2. ИЩЕМ БЕЗОПАСНУЮ СТАРТОВУЮ ПОЗИЦИЮ
-        var spawnXZ = new Vector2i(8, 8);
-        var spawnChunkPos = new Vector3i(spawnXZ.X / Chunk.ChunkSize, 0, spawnXZ.Y / Chunk.ChunkSize);
-        var spawnChunkVoxels = new Dictionary<Vector3i, MaterialType>();
-        worldGenerator.GenerateChunk(spawnChunkPos, spawnChunkVoxels);
-
-        int groundHeight = 0;
-        // Ищем сверху вниз первый твердый блок
-        for (int y = 100; y > 0; y--)
-        {
-            if (spawnChunkVoxels.ContainsKey(new Vector3i(spawnXZ.X % Chunk.ChunkSize, y, spawnXZ.Y % Chunk.ChunkSize)))
-            {
-                groundHeight = y;
-                break;
-            }
-        }
 
         // Ставим игрока на 3 блока выше найденной земли
-        var startPosition = new System.Numerics.Vector3(spawnXZ.X, groundHeight + 15, spawnXZ.Y);
-        Console.WriteLine($"[Game] Found surface at Y={groundHeight}. Spawning player at {startPosition}");
+        var startPosition = new System.Numerics.Vector3(8, 50, 8);
 
         // 3. Создаём камеру с новой позицией
         _camera = new Camera(VectorExtensions.ToOpenTK(startPosition), Size.X / (float)Size.Y);

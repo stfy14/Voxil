@@ -34,4 +34,20 @@ public static class MaterialRegistry
            ? props.Color
            : (1.0f, 0.0f, 1.0f); // Розовый для отладки
     }
+
+    public static bool IsSolidForPhysics(MaterialType type)
+    {
+        switch (type)
+        {
+            case MaterialType.Dirt:
+            case MaterialType.Stone:
+            case MaterialType.Wood:
+                return true; // Это твердые блоки, с которыми мы сталкиваемся
+
+            case MaterialType.Air:
+            case MaterialType.Water:
+            default:
+                return false; // Это "проходимые" блоки
+        }
+    }
 }

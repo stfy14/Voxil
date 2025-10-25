@@ -129,46 +129,38 @@ public class Chunk : IDisposable
         {
             if (Voxels.Count == 0) return new Dictionary<Vector3i, MaterialType>();
 
-            // Мы сразу создаем финальный словарь, без промежуточных HashSet.
             var surfaceVoxels = new Dictionary<Vector3i, MaterialType>();
 
-            // Проходим по всем твердым вокселям в чанке
             foreach (var kvp in Voxels)
             {
                 var pos = kvp.Key;
+                var material = kvp.Value;
 
-                // Проверяем 6 соседей. Если находим ХОТЯ БЫ ОДНОГО соседа-воздуха,
-                // то этот блок - поверхностный. Добавляем его и НЕМЕДЛЕННО
-                // переходим к следующему блоку в основном цикле `foreach`.
-                if (!Voxels.ContainsKey(pos + Vector3i.UnitX))
+                // Пропускаем материалы, у которых не должно быть коллайдеров
+                if (!MaterialRegistry.IsSolidForPhysics(material))
                 {
-                    surfaceVoxels.Add(pos, kvp.Value);
-                    continue; // <- Ключевая оптимизация
-                }
-                if (!Voxels.ContainsKey(pos - Vector3i.UnitX))
-                {
-                    surfaceVoxels.Add(pos, kvp.Value);
                     continue;
                 }
-                if (!Voxels.ContainsKey(pos + Vector3i.UnitY))
+
+                // Функция-помощник для проверки соседа
+                bool IsNeighborSolid(Vector3i neighborPos)
                 {
-                    surfaceVoxels.Add(pos, kvp.Value);
-                    continue;
+                    return Voxels.TryGetValue(neighborPos, out var neighborMaterial) &&
+                           MaterialRegistry.IsSolidForPhysics(neighborMaterial);
                 }
-                if (!Voxels.ContainsKey(pos - Vector3i.UnitY))
+
+                // --- ИСПРАВЛЕНИЕ ЛОГИКИ ---
+                // Воксель является поверхностью, если ХОТЯ БЫ ОДИН из его 6 соседей не является твердым.
+                bool isSurface = !IsNeighborSolid(pos + Vector3i.UnitX) ||
+                                 !IsNeighborSolid(pos - Vector3i.UnitX) ||
+                                 !IsNeighborSolid(pos + Vector3i.UnitY) ||
+                                 !IsNeighborSolid(pos - Vector3i.UnitY) ||
+                                 !IsNeighborSolid(pos + Vector3i.UnitZ) ||
+                                 !IsNeighborSolid(pos - Vector3i.UnitZ);
+
+                if (isSurface)
                 {
-                    surfaceVoxels.Add(pos, kvp.Value);
-                    continue;
-                }
-                if (!Voxels.ContainsKey(pos + Vector3i.UnitZ))
-                {
-                    surfaceVoxels.Add(pos, kvp.Value);
-                    continue;
-                }
-                if (!Voxels.ContainsKey(pos - Vector3i.UnitZ))
-                {
-                    surfaceVoxels.Add(pos, kvp.Value);
-                    continue;
+                    surfaceVoxels.Add(pos, material);
                 }
             }
             return surfaceVoxels;
@@ -181,16 +173,23 @@ public class Chunk : IDisposable
         lock (_stateLock)
         {
             ClearPhysics();
-            _staticHandles.Add(handle);
-            WorldManager.RegisterChunkStatic(handle, this);
-            _hasStaticBody = true;
+            _hasStaticBody = false; // Сначала сбрасываем флаг
+
+            // --- ГЛАВНОЕ ИСПРАВЛЕНИЕ ---
+            // Проверяем, что полученный хэндл действителен. У дефолтного/невалидного хэндла значение 0.
+            if (handle.Value != 0 && WorldManager.PhysicsWorld.Simulation.Statics.StaticExists(handle))
+            {
+                _staticHandles.Add(handle);
+                WorldManager.RegisterChunkStatic(handle, this);
+                _hasStaticBody = true; // Устанавливаем флаг, только если хэндл валиден
+            }
 
             if (Position == Vector3i.Zero)
             {
                 if (_pendingMesh != null)
-                    Console.WriteLine("     [TRACE 0,0,0] Found a pending mesh! APPLYING IT NOW.");
+                    Console.WriteLine($"     [TRACE 0,0,0] Found a pending mesh! Applying it now. HasPhysics is now: {_hasStaticBody}");
                 else
-                    Console.WriteLine("     [TRACE 0,0,0] No pending mesh was found.");
+                    Console.WriteLine($"     [TRACE 0,0,0] No pending mesh was found. HasPhysics is now: {_hasStaticBody}");
             }
 
             if (_pendingMesh != null)
