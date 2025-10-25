@@ -1,10 +1,11 @@
-﻿// /World/Chunk.cs - FINAL, OPTIMIZED VERSION
+﻿// /World/Chunk.cs - FINAL ZERO-GARBAGE VERSION
 using BepuPhysics;
 using BepuPhysics.Collidables;
 using OpenTK.Mathematics;
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Threading;
 
 public class Chunk : IDisposable
 {
@@ -13,7 +14,7 @@ public class Chunk : IDisposable
     public WorldManager WorldManager { get; }
 
     public Dictionary<Vector3i, MaterialType> Voxels { get; private set; } = new();
-    public readonly object VoxelsLock = new();
+    private readonly ReaderWriterLockSlim _voxelsLock = new ReaderWriterLockSlim();
 
     private VoxelObjectRenderer _renderer;
     private List<StaticHandle> _staticHandles = new List<StaticHandle>();
@@ -35,24 +36,23 @@ public class Chunk : IDisposable
 
     public void SetVoxelData(Dictionary<Vector3i, MaterialType> voxels)
     {
-        lock (VoxelsLock)
+        _voxelsLock.EnterWriteLock();
+        try
         {
             Voxels = new Dictionary<Vector3i, MaterialType>(voxels);
             IsLoaded = true;
+        }
+        finally
+        {
+            _voxelsLock.ExitWriteLock();
         }
     }
 
     public void ApplyMesh(List<float> vertices, List<float> colors, List<float> aoValues)
     {
         if (!IsLoaded || _isDisposed) return;
-        if (_renderer == null)
-        {
-            _renderer = new VoxelObjectRenderer(vertices, colors, aoValues);
-        }
-        else
-        {
-            _renderer.UpdateMesh(vertices, colors, aoValues);
-        }
+        if (_renderer == null) _renderer = new VoxelObjectRenderer(vertices, colors, aoValues);
+        else _renderer.UpdateMesh(vertices, colors, aoValues);
     }
 
     public void TrySetMesh(FinalizedMeshData meshData, ConcurrentQueue<FinalizedMeshData> meshDataPool)
@@ -66,10 +66,7 @@ public class Chunk : IDisposable
             }
             else
             {
-                if (_pendingMesh != null)
-                {
-                    meshDataPool.Enqueue(_pendingMesh);
-                }
+                if (_pendingMesh != null) meshDataPool.Enqueue(_pendingMesh);
                 _pendingMesh = meshData;
             }
         }
@@ -78,13 +75,18 @@ public class Chunk : IDisposable
     public bool RemoveVoxelAndUpdate(Vector3i localPosition)
     {
         bool removed;
-        lock (VoxelsLock)
+        _voxelsLock.EnterWriteLock();
+        try
         {
             removed = Voxels.Remove(localPosition);
         }
+        finally
+        {
+            _voxelsLock.ExitWriteLock();
+        }
+
         if (removed && IsLoaded)
         {
-            // Эта одна функция теперь ставит в очередь и меш, и физику.
             WorldManager.RebuildChunkAsync(this);
             WorldManager.NotifyNeighborsOfVoxelChange(Position, localPosition);
             WorldManager.QueueDetachmentCheck(this, localPosition);
@@ -118,59 +120,46 @@ public class Chunk : IDisposable
         _staticHandles.Clear();
     }
 
-    public Dictionary<Vector3i, MaterialType> GetSurfaceVoxels(
-        Dictionary<Vector3i, MaterialType> neighbor_NX,
-        Dictionary<Vector3i, MaterialType> neighbor_PX,
-        Dictionary<Vector3i, MaterialType> neighbor_NZ,
-        Dictionary<Vector3i, MaterialType> neighbor_PZ)
+    public Dictionary<Vector3i, MaterialType> GetSurfaceVoxels(Chunk neighbor_NX, Chunk neighbor_PX, Chunk neighbor_NZ, Chunk neighbor_PZ)
     {
-        lock (VoxelsLock)
+        var surfaceVoxels = new Dictionary<Vector3i, MaterialType>();
+        var localVoxels = new Dictionary<Vector3i, MaterialType>();
+        CopyVoxelsData(localVoxels); // Используем новый безопасный метод
+
+        if (localVoxels.Count == 0) return surfaceVoxels;
+
+        foreach (var kvp in localVoxels)
         {
-            if (Voxels.Count == 0) return new Dictionary<Vector3i, MaterialType>();
+            var pos = kvp.Key;
+            var material = kvp.Value;
 
-            var surfaceVoxels = new Dictionary<Vector3i, MaterialType>();
+            if (!MaterialRegistry.IsSolidForPhysics(material)) continue;
 
-            foreach (var kvp in Voxels)
+            bool IsNeighborSolid(Vector3i localPos)
             {
-                var pos = kvp.Key;
-                var material = kvp.Value;
-
-                if (!MaterialRegistry.IsSolidForPhysics(material))
+                if (localPos.X >= 0 && localPos.X < ChunkSize && localPos.Z >= 0 && localPos.Z < ChunkSize && localPos.Y >= 0)
                 {
-                    continue;
+                    return localVoxels.TryGetValue(localPos, out var m) && MaterialRegistry.IsSolidForPhysics(m);
                 }
 
-                bool IsNeighborSolid(Vector3i localPos)
-                {
-                    if (localPos.X >= 0 && localPos.X < ChunkSize &&
-                        localPos.Z >= 0 && localPos.Z < ChunkSize &&
-                        localPos.Y >= 0)
-                    {
-                        return Voxels.TryGetValue(localPos, out var neighborMaterial) &&
-                               MaterialRegistry.IsSolidForPhysics(neighborMaterial);
-                    }
+                var posInNeighbor = Vector3i.Zero;
+                Chunk neighborChunk = null;
+                if (localPos.X < 0) { neighborChunk = neighbor_NX; posInNeighbor = localPos + new Vector3i(ChunkSize, 0, 0); }
+                else if (localPos.X >= ChunkSize) { neighborChunk = neighbor_PX; posInNeighbor = localPos - new Vector3i(ChunkSize, 0, 0); }
+                else if (localPos.Z < 0) { neighborChunk = neighbor_NZ; posInNeighbor = localPos + new Vector3i(0, 0, ChunkSize); }
+                else if (localPos.Z >= ChunkSize) { neighborChunk = neighbor_PZ; posInNeighbor = localPos - new Vector3i(0, 0, ChunkSize); }
 
-                    if (localPos.X < 0)
-                        return neighbor_NX != null && neighbor_NX.TryGetValue(localPos + new Vector3i(ChunkSize, 0, 0), out var mat) && MaterialRegistry.IsSolidForPhysics(mat);
-                    if (localPos.X >= ChunkSize)
-                        return neighbor_PX != null && neighbor_PX.TryGetValue(localPos - new Vector3i(ChunkSize, 0, 0), out var mat) && MaterialRegistry.IsSolidForPhysics(mat);
-                    if (localPos.Z < 0)
-                        return neighbor_NZ != null && neighbor_NZ.TryGetValue(localPos + new Vector3i(0, 0, ChunkSize), out var mat) && MaterialRegistry.IsSolidForPhysics(mat);
-                    if (localPos.Z >= ChunkSize)
-                        return neighbor_PZ != null && neighbor_PZ.TryGetValue(localPos - new Vector3i(0, 0, ChunkSize), out var mat) && MaterialRegistry.IsSolidForPhysics(mat);
-
-                    return false;
-                }
-
-                if (!IsNeighborSolid(pos + Vector3i.UnitX) || !IsNeighborSolid(pos - Vector3i.UnitX) ||
-                    !IsNeighborSolid(pos + Vector3i.UnitY) || !IsNeighborSolid(pos - Vector3i.UnitY) ||
-                    !IsNeighborSolid(pos + Vector3i.UnitZ) || !IsNeighborSolid(pos - Vector3i.UnitZ))
-                {
-                    surfaceVoxels.Add(pos, material);
-                }
+                return neighborChunk != null && neighborChunk.IsLoaded && neighborChunk.IsVoxelSolidAt(posInNeighbor);
             }
-            return surfaceVoxels;
+
+            if (!IsNeighborSolid(pos + Vector3i.UnitX) || !IsNeighborSolid(pos - Vector3i.UnitX) ||
+                !IsNeighborSolid(pos + Vector3i.UnitY) || !IsNeighborSolid(pos - Vector3i.UnitY) ||
+                !IsNeighborSolid(pos + Vector3i.UnitZ) || !IsNeighborSolid(pos - Vector3i.UnitZ))
+            {
+                surfaceVoxels.Add(pos, material);
+            }
         }
+        return surfaceVoxels;
     }
 
     public void OnPhysicsRebuilt(StaticHandle handle, ConcurrentQueue<FinalizedMeshData> meshDataPool)
@@ -179,14 +168,12 @@ public class Chunk : IDisposable
         {
             ClearPhysics();
             _hasStaticBody = false;
-
             if (WorldManager.PhysicsWorld.Simulation.Statics.StaticExists(handle))
             {
                 _staticHandles.Add(handle);
                 WorldManager.RegisterChunkStatic(handle, this);
                 _hasStaticBody = true;
             }
-
             if (_hasStaticBody && _pendingMesh != null)
             {
                 ApplyMesh(_pendingMesh.Vertices, _pendingMesh.Colors, _pendingMesh.AoValues);
@@ -212,9 +199,46 @@ public class Chunk : IDisposable
         _renderer?.Dispose();
         _renderer = null;
         ClearPhysics();
-        lock (VoxelsLock)
+        _voxelsLock.EnterWriteLock();
+        try
         {
             Voxels?.Clear();
+        }
+        finally
+        {
+            _voxelsLock.ExitWriteLock();
+        }
+        _voxelsLock.Dispose();
+    }
+
+    // --- НОВЫЕ ПУБЛИЧНЫЕ БЕЗОПАСНЫЕ МЕТОДЫ ---
+    public bool IsVoxelSolidAt(Vector3i localPos)
+    {
+        _voxelsLock.EnterReadLock();
+        try
+        {
+            return Voxels.TryGetValue(localPos, out var mat) && MaterialRegistry.IsSolidForPhysics(mat);
+        }
+        finally
+        {
+            _voxelsLock.ExitReadLock();
+        }
+    }
+
+    public void CopyVoxelsData(Dictionary<Vector3i, MaterialType> targetDictionary)
+    {
+        targetDictionary.Clear();
+        _voxelsLock.EnterReadLock();
+        try
+        {
+            foreach (var kvp in Voxels)
+            {
+                targetDictionary.Add(kvp.Key, kvp.Value);
+            }
+        }
+        finally
+        {
+            _voxelsLock.ExitReadLock();
         }
     }
 }
