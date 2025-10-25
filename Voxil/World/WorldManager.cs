@@ -99,7 +99,7 @@ public class WorldManager : IDisposable
     private readonly Thread _physicsBuilderThread;
     private volatile bool _isDisposed = false;
 
-    // === QUEUES ===
+    // === QUEUES & POOLS ===
     private readonly BlockingCollection<ChunkGenerationTask> _generationQueue = new(new ConcurrentQueue<ChunkGenerationTask>());
     private readonly ConcurrentQueue<ChunkGenerationResult> _generatedChunksQueue = new();
 
@@ -113,6 +113,10 @@ public class WorldManager : IDisposable
     private readonly BlockingCollection<DetachmentCheckTask> _detachmentQueue = new(new ConcurrentQueue<DetachmentCheckTask>());
     private readonly ConcurrentQueue<DetachmentResult> _detachmentResultQueue = new();
 
+    // --- NEW: OBJECT POOLS FOR TASKS ---
+    private readonly ConcurrentQueue<MeshGenerationTask> _meshTaskPool = new();
+    private readonly ConcurrentQueue<PhysicsBuildTask> _physicsTaskPool = new();
+
     // === SYNCHRONIZATION ===
     private readonly object _chunksLock = new();
     private readonly HashSet<Vector3i> _chunksInProgress = new();
@@ -120,10 +124,10 @@ public class WorldManager : IDisposable
 
     private Vector3i _lastPlayerChunkPosition = new(int.MaxValue);
 
-    private int _viewDistance = 8;
-    private const int MaxChunksPerFrame = 32;
-    private const int MaxPhysicsRebuildsPerFrame = 16;
-    private const int MaxMeshUpdatesPerFrame = 64;
+    private int _viewDistance = 16;
+    private const int MaxChunksPerFrame = 64;
+    private const int MaxPhysicsRebuildsPerFrame = 32;
+    private const int MaxMeshUpdatesPerFrame = 128;
 
     private float _memoryLogTimer = 0f;
 
@@ -154,7 +158,8 @@ public class WorldManager : IDisposable
         public List<float> Colors = new List<float>(50000);
         public List<float> AoValues = new List<float>(17000);
 
-        internal Dictionary<Vector3i, MaterialType> _mainChunkVoxels;
+        // --- OPTIMIZATION: Reusable dictionary ---
+        internal readonly Dictionary<Vector3i, MaterialType> _mainChunkVoxels = new();
         private Dictionary<Vector3i, MaterialType> _neighbor_NX;
         private Dictionary<Vector3i, MaterialType> _neighbor_PX;
         private Dictionary<Vector3i, MaterialType> _neighbor_NZ;
@@ -164,10 +169,17 @@ public class WorldManager : IDisposable
                              Dictionary<Vector3i, MaterialType> nx, Dictionary<Vector3i, MaterialType> px,
                              Dictionary<Vector3i, MaterialType> nz, Dictionary<Vector3i, MaterialType> pz)
         {
+            // --- OPTIMIZATION: Clear and reuse instead of creating new ---
+            _mainChunkVoxels.Clear();
             lock (mainChunk.VoxelsLock)
             {
-                _mainChunkVoxels = new Dictionary<Vector3i, MaterialType>(mainChunk.Voxels);
+                // Копируем вручную, чтобы избежать создания нового словаря
+                foreach (var kvp in mainChunk.Voxels)
+                {
+                    _mainChunkVoxels.Add(kvp.Key, kvp.Value);
+                }
             }
+
             _neighbor_NX = nx; _neighbor_PX = px;
             _neighbor_NZ = nz; _neighbor_PZ = pz;
 
@@ -258,6 +270,7 @@ public class WorldManager : IDisposable
                     meshData.IsUpdate = task.IsUpdate;
 
                     _finalizedMeshQueue.Enqueue(meshData);
+                    _meshTaskPool.Enqueue(task);
 
                     stopwatch.Stop();
                     PerformanceMonitor.RecordTiming(ThreadType.Meshing, stopwatch);
@@ -292,6 +305,8 @@ public class WorldManager : IDisposable
                         CompoundShape = compoundShape,
                         ChildrenBuffer = childrenBuffer
                     });
+
+                    _physicsTaskPool.Enqueue(task);
 
                     stopwatch.Stop();
                     PerformanceMonitor.RecordTiming(ThreadType.Physics, stopwatch);
@@ -435,7 +450,7 @@ public class WorldManager : IDisposable
             }
 
             // Ставим в очередь на перестройку только что созданный чанк
-            RebuildChunk(newChunk, false);
+            RebuildChunkAsync(newChunk, false);
 
             // Уведомляем соседей, что появился новый чанк, и им нужно обновить свои границы
             var offsets = new Vector3i[] { new(-1, 0, 0), new(1, 0, 0), new(0, 0, -1), new(0, 0, 1) };
@@ -445,7 +460,7 @@ public class WorldManager : IDisposable
                 {
                     if (_chunks.TryGetValue(newChunk.Position + offset, out var neighbor))
                     {
-                        RebuildChunk(neighbor, true);
+                        RebuildChunkAsync(neighbor); // Вызываем без второго параметра, будет isUpdate = true
                     }
                 }
             }
@@ -593,11 +608,11 @@ public class WorldManager : IDisposable
 
     #region Public API
 
-    private void RebuildChunk(Chunk chunk, bool isUpdate)
+    public void RebuildChunkAsync(Chunk chunk, bool isUpdate = true)
     {
         if (chunk == null || !chunk.IsLoaded) return;
 
-        // 1. Собираем данные о соседях ОДИН РАЗ
+        // Шаг 1: Собираем данные о соседях. Этот код остается, он важен для производительности.
         Dictionary<Vector3i, MaterialType> nx, px, nz, pz;
         lock (_chunksLock)
         {
@@ -606,38 +621,37 @@ public class WorldManager : IDisposable
             _chunks.TryGetValue(chunk.Position + new Vector3i(0, 0, -1), out var n_nz);
             _chunks.TryGetValue(chunk.Position + new Vector3i(0, 0, 1), out var n_pz);
 
-            // Копируем данные только если сосед существует и загружен
             nx = (n_nx != null && n_nx.IsLoaded) ? new Dictionary<Vector3i, MaterialType>(n_nx.Voxels) : null;
             px = (n_px != null && n_px.IsLoaded) ? new Dictionary<Vector3i, MaterialType>(n_px.Voxels) : null;
             nz = (n_nz != null && n_nz.IsLoaded) ? new Dictionary<Vector3i, MaterialType>(n_nz.Voxels) : null;
             pz = (n_pz != null && n_pz.IsLoaded) ? new Dictionary<Vector3i, MaterialType>(n_pz.Voxels) : null;
         }
 
-        // 2. Создаем и ставим в очередь обе задачи
-        _meshQueue.Add(new MeshGenerationTask
-        {
-            ChunkToProcess = chunk,
-            IsUpdate = isUpdate,
-            Neighbor_NX = nx,
-            Neighbor_PX = px,
-            Neighbor_NZ = nz,
-            Neighbor_PZ = pz
-        });
+        // Шаг 2: Ставим в очередь задачу для меша, используя пул объектов.
+        if (!_meshTaskPool.TryDequeue(out var meshTask))
+            meshTask = new MeshGenerationTask();
 
-        _physicsBuildQueue.Add(new PhysicsBuildTask
-        {
-            ChunkToProcess = chunk,
-            Neighbor_NX = nx,
-            Neighbor_PX = px,
-            Neighbor_NZ = nz,
-            Neighbor_PZ = pz
-        });
-    }
+        meshTask.ChunkToProcess = chunk;
+        meshTask.IsUpdate = isUpdate;
+        meshTask.Neighbor_NX = nx;
+        meshTask.Neighbor_PX = px;
+        meshTask.Neighbor_NZ = nz;
+        meshTask.Neighbor_PZ = pz;
+        _meshQueue.Add(meshTask);
 
-    public void RebuildChunkAsync(Chunk chunk)
-    {
-        // Теперь это просто обертка для обратной совместимости
-        RebuildChunk(chunk, true);
+        // Шаг 3: Ставим в очередь задачу для физики, используя пул объектов.
+        if (!_physicsTaskPool.TryDequeue(out var physicsTask))
+            physicsTask = new PhysicsBuildTask();
+
+        physicsTask.ChunkToProcess = chunk;
+        // ВАЖНО: Мы не можем просто передать nx, px... из meshTask,
+        // так как meshTask будет переиспользован и его поля могут измениться.
+        // Но так как мы создаем копии словарей, мы можем их безопасно передать в обе задачи.
+        physicsTask.Neighbor_NX = nx;
+        physicsTask.Neighbor_PX = px;
+        physicsTask.Neighbor_NZ = nz;
+        physicsTask.Neighbor_PZ = pz;
+        _physicsBuildQueue.Add(physicsTask);
     }
 
     public void QueueDetachmentCheck(Chunk chunk, Vector3i removedVoxelLocalPos)
@@ -694,7 +708,7 @@ public class WorldManager : IDisposable
             {
                 if (_chunks.TryGetValue(chunkPos + offset, out var neighbor))
                 {
-                    RebuildChunk(neighbor, true); // Используем новый централизованный метод
+                    RebuildChunkAsync(neighbor); // Вызываем наш единый метод
                 }
             }
         };

@@ -205,17 +205,29 @@ public static class VoxelMeshBuilder
     }
 
     private static void AddVertex(
-        List<float> vertices,
-        List<float> colors,
-        List<float> aoValues,
-        Vector3 pos,
-        (float r, float g, float b) color,
-        float ao)
+    List<float> vertices,
+    List<float> colors,
+    List<float> aoValues,
+    Vector3 pos,
+    (float r, float g, float b) color,
+    float ao)
     {
-        vertices.AddRange(new[] { pos.X + 0.5f, pos.Y + 0.5f, pos.Z + 0.5f });
-        colors.AddRange(new[] { color.r, color.g, color.b });
+        // --- OPTIMIZATION ---
+        // Было: vertices.AddRange(new[] { pos.X + 0.5f, pos.Y + 0.5f, pos.Z + 0.5f });
+        // Стало:
+        vertices.Add(pos.X + 0.5f);
+        vertices.Add(pos.Y + 0.5f);
+        vertices.Add(pos.Z + 0.5f);
+
+        // Было: colors.AddRange(new[] { color.r, color.g, color.b });
+        // Стало:
+        colors.Add(color.r);
+        colors.Add(color.g);
+        colors.Add(color.b);
+
         aoValues.Add(ao);
     }
+
 
     #endregion
 }
