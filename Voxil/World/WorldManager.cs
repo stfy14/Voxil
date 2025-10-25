@@ -1,4 +1,4 @@
-﻿// /World/WorldManager.cs - FINAL STABLE ARCHITECTURE
+﻿// /World/WorldManager.cs - OPTIMIZED VERSION
 using BepuPhysics;
 using BepuPhysics.Collidables;
 using BepuUtilities;
@@ -17,7 +17,7 @@ using BepuVector3 = System.Numerics.Vector3;
 public class ChunkGenerationTask
 {
     public Vector3i Position;
-    public int Priority; // Чем меньше - тем важнее
+    public int Priority;
 }
 
 public class ChunkGenerationResult
@@ -30,12 +30,21 @@ public class MeshGenerationTask
 {
     public Chunk ChunkToProcess;
     public bool IsUpdate;
-    // НОВЫЕ ПОЛЯ
     public Dictionary<Vector3i, MaterialType> Neighbor_NX;
     public Dictionary<Vector3i, MaterialType> Neighbor_PX;
     public Dictionary<Vector3i, MaterialType> Neighbor_NZ;
     public Dictionary<Vector3i, MaterialType> Neighbor_PZ;
 }
+
+public class PhysicsBuildTask
+{
+    public Chunk ChunkToProcess;
+    public Dictionary<Vector3i, MaterialType> Neighbor_NX;
+    public Dictionary<Vector3i, MaterialType> Neighbor_PX;
+    public Dictionary<Vector3i, MaterialType> Neighbor_NZ;
+    public Dictionary<Vector3i, MaterialType> Neighbor_PZ;
+}
+
 
 public class FinalizedMeshData
 {
@@ -49,7 +58,7 @@ public class FinalizedMeshData
 public class PhysicsBuildResult
 {
     public Chunk TargetChunk;
-    public Compound? CompoundShape; // Nullable, так как форма может не создаться
+    public Compound? CompoundShape;
     public Buffer<CompoundChild> ChildrenBuffer;
 }
 
@@ -98,7 +107,7 @@ public class WorldManager : IDisposable
     private readonly ConcurrentQueue<FinalizedMeshData> _finalizedMeshQueue = new();
     private readonly ConcurrentQueue<FinalizedMeshData> _meshDataPool = new();
 
-    private readonly BlockingCollection<Chunk> _physicsBuildQueue = new(new ConcurrentQueue<Chunk>());
+    private readonly BlockingCollection<PhysicsBuildTask> _physicsBuildQueue = new(new ConcurrentQueue<PhysicsBuildTask>());
     private readonly ConcurrentQueue<PhysicsBuildResult> _physicsResultQueue = new ConcurrentQueue<PhysicsBuildResult>();
 
     private readonly BlockingCollection<DetachmentCheckTask> _detachmentQueue = new(new ConcurrentQueue<DetachmentCheckTask>());
@@ -113,7 +122,7 @@ public class WorldManager : IDisposable
 
     private int _viewDistance = 8;
     private const int MaxChunksPerFrame = 32;
-    private const int MaxPhysicsRebuildsPerFrame = 16; // Теперь это лимит на ПРИМЕНЕНИЕ результатов
+    private const int MaxPhysicsRebuildsPerFrame = 16;
     private const int MaxMeshUpdatesPerFrame = 64;
 
     private float _memoryLogTimer = 0f;
@@ -141,12 +150,10 @@ public class WorldManager : IDisposable
 
     private class MeshBuilderContext
     {
-        // Убрали readonly
         public List<float> Vertices = new List<float>(50000);
         public List<float> Colors = new List<float>(50000);
         public List<float> AoValues = new List<float>(17000);
 
-        // Сделали поля internal для доступа из WorldManager
         internal Dictionary<Vector3i, MaterialType> _mainChunkVoxels;
         private Dictionary<Vector3i, MaterialType> _neighbor_NX;
         private Dictionary<Vector3i, MaterialType> _neighbor_PX;
@@ -205,9 +212,8 @@ public class WorldManager : IDisposable
                     var voxels = new Dictionary<Vector3i, MaterialType>();
                     _generator.GenerateChunk(task.Position, voxels);
                     _generatedChunksQueue.Enqueue(new ChunkGenerationResult { Position = task.Position, Voxels = voxels });
-
-                    stopwatch.Stop(); // <--- Останавливаем таймер
-                    PerformanceMonitor.RecordTiming(ThreadType.Generation, stopwatch); // <--- Записываем результат
+                    stopwatch.Stop();
+                    PerformanceMonitor.RecordTiming(ThreadType.Generation, stopwatch);
                 }
             }
             catch (Exception ex) { Console.WriteLine($"[GenerationThread] Error: {ex.Message}"); }
@@ -219,15 +225,14 @@ public class WorldManager : IDisposable
     {
         Console.WriteLine("[MeshBuilderThread] Started.");
         var context = new MeshBuilderContext();
-        var stopwatch = new Stopwatch(); // Добавим замер производительности
+        var stopwatch = new Stopwatch();
         while (!_isDisposed)
         {
             try
             {
                 if (_meshQueue.TryTake(out var task, 50))
                 {
-                    stopwatch.Restart(); // <--- Начинаем замер
-
+                    stopwatch.Restart();
                     while (_finalizedMeshQueue.Count > 40 && !_isDisposed)
                     {
                         Thread.Sleep(10);
@@ -236,7 +241,6 @@ public class WorldManager : IDisposable
 
                     context.LoadData(task.ChunkToProcess, task.Neighbor_NX, task.Neighbor_PX, task.Neighbor_NZ, task.Neighbor_PZ);
 
-                    // Используем internal поле _mainChunkVoxels
                     if (context._mainChunkVoxels.Count > 0)
                     {
                         VoxelMeshBuilder.GenerateMesh(context._mainChunkVoxels, context.Vertices, context.Colors, context.AoValues, context.IsVoxelSolidForMesh);
@@ -248,17 +252,15 @@ public class WorldManager : IDisposable
                     }
 
                     meshData.ChunkPosition = task.ChunkToProcess.Position;
-
                     (meshData.Vertices, context.Vertices) = (context.Vertices, meshData.Vertices);
                     (meshData.Colors, context.Colors) = (context.Colors, meshData.Colors);
                     (meshData.AoValues, context.AoValues) = (context.AoValues, meshData.AoValues);
-
                     meshData.IsUpdate = task.IsUpdate;
 
                     _finalizedMeshQueue.Enqueue(meshData);
 
-                    stopwatch.Stop(); // <--- Заканчиваем замер
-                    PerformanceMonitor.RecordTiming(ThreadType.Meshing, stopwatch); // <--- Записываем результат
+                    stopwatch.Stop();
+                    PerformanceMonitor.RecordTiming(ThreadType.Meshing, stopwatch);
                 }
             }
             catch (Exception ex) { Console.WriteLine($"[MeshBuilderThread] Error: {ex.Message}"); }
@@ -274,20 +276,19 @@ public class WorldManager : IDisposable
         {
             try
             {
-                if (_physicsBuildQueue.TryTake(out var chunkToRebuild, 50))
+                if (_physicsBuildQueue.TryTake(out var task, 50))
                 {
                     stopwatch.Restart();
+                    if (task.ChunkToProcess == null || !task.ChunkToProcess.IsLoaded) continue;
 
-                    if (chunkToRebuild == null || !chunkToRebuild.IsLoaded) continue;
-
-                    // Вызываем старый, простой метод GetSurfaceVoxels без аргументов
-                    Dictionary<Vector3i, MaterialType> surfaceVoxels = chunkToRebuild.GetSurfaceVoxels();
+                    Dictionary<Vector3i, MaterialType> surfaceVoxels = task.ChunkToProcess.GetSurfaceVoxels(
+                        task.Neighbor_NX, task.Neighbor_PX, task.Neighbor_NZ, task.Neighbor_PZ);
 
                     var compoundShape = PhysicsWorld.CreateStaticChunkShape(surfaceVoxels, out var childrenBuffer);
 
                     _physicsResultQueue.Enqueue(new PhysicsBuildResult
                     {
-                        TargetChunk = chunkToRebuild,
+                        TargetChunk = task.ChunkToProcess,
                         CompoundShape = compoundShape,
                         ChildrenBuffer = childrenBuffer
                     });
@@ -316,9 +317,8 @@ public class WorldManager : IDisposable
                 {
                     stopwatch.Restart();
                     ProcessDetachment(task);
-
-                    stopwatch.Stop(); // <--- Останавливаем таймер
-                    PerformanceMonitor.RecordTiming(ThreadType.Detachment, stopwatch); // <--- Записываем результат
+                    stopwatch.Stop();
+                    PerformanceMonitor.RecordTiming(ThreadType.Detachment, stopwatch);
                 }
             }
             catch (Exception ex) { Console.WriteLine($"[DetachmentThread] Error: {ex.Message}"); }
@@ -423,15 +423,31 @@ public class WorldManager : IDisposable
             processed++;
             _chunksInProgress.Remove(result.Position);
             if (!_activeChunkPositions.Contains(result.Position)) continue;
+
+            Chunk newChunk = null;
             lock (_chunksLock)
             {
                 if (_chunks.ContainsKey(result.Position)) continue;
                 var chunk = new Chunk(result.Position, this);
                 chunk.SetVoxelData(result.Voxels);
                 _chunks[result.Position] = chunk;
+                newChunk = chunk;
+            }
 
-                _physicsBuildQueue.Add(chunk);
-                _meshQueue.Add(new MeshGenerationTask { ChunkToProcess = chunk, IsUpdate = false });
+            // Ставим в очередь на перестройку только что созданный чанк
+            RebuildChunk(newChunk, false);
+
+            // Уведомляем соседей, что появился новый чанк, и им нужно обновить свои границы
+            var offsets = new Vector3i[] { new(-1, 0, 0), new(1, 0, 0), new(0, 0, -1), new(0, 0, 1) };
+            foreach (var offset in offsets)
+            {
+                lock (_chunksLock)
+                {
+                    if (_chunks.TryGetValue(newChunk.Position + offset, out var neighbor))
+                    {
+                        RebuildChunk(neighbor, true);
+                    }
+                }
             }
         }
     }
@@ -474,17 +490,14 @@ public class WorldManager : IDisposable
         while (processedMeshes < MaxMeshUpdatesPerFrame && _finalizedMeshQueue.TryDequeue(out var data))
         {
             processedMeshes++;
-            if (data.ChunkPosition == Vector3i.Zero) Console.WriteLine($"[TRACE 0,0,0] Main thread processing MESH data.");
             lock (_chunksLock)
             {
                 if (_chunks.TryGetValue(data.ChunkPosition, out var chunk))
                 {
-                    // Просто передаем меш чанку, он сам разберется, что делать
                     chunk.TrySetMesh(data, _meshDataPool);
                 }
                 else
                 {
-                    // Если чанк уже выгружен, возвращаем данные в пул
                     _meshDataPool.Enqueue(data);
                 }
             }
@@ -498,13 +511,11 @@ public class WorldManager : IDisposable
         {
             if (result.TargetChunk == null || !result.TargetChunk.IsLoaded)
             {
-                if (result.TargetChunk.Position == Vector3i.Zero) Console.WriteLine($"[TRACE 0,0,0] Main thread processing PHYSICS data.");
                 if (result.ChildrenBuffer.Allocated)
                     PhysicsWorld.Simulation.BufferPool.Return(ref result.ChildrenBuffer);
                 continue;
             }
             processed++;
-
 
             StaticHandle handle = default;
             if (result.CompoundShape.HasValue)
@@ -515,11 +526,7 @@ public class WorldManager : IDisposable
                     result.ChildrenBuffer);
             }
 
-            // --- ГЛАВНОЕ ИЗМЕНЕНИЕ ---
-            // Вызываем новый, перегруженный метод OnPhysicsRebuilt
             result.TargetChunk.OnPhysicsRebuilt(handle, _meshDataPool);
-            // Вся логика по поиску и применению "ожидающего" меша теперь внутри этого метода
-            // -------------------------
         }
     }
 
@@ -536,8 +543,9 @@ public class WorldManager : IDisposable
             if (removedAny)
             {
                 Console.WriteLine($"[WorldManager] Detached {result.DetachedGroup.Count} voxels, creating dynamic object...");
-                RebuildChunkMeshAsync(result.OriginChunk);
-                RebuildChunkPhysicsAsync(result.OriginChunk);
+
+                RebuildChunkAsync(result.OriginChunk);
+
                 var centerSum = BepuVector3.Zero;
                 foreach (var voxel in result.DetachedGroup) { centerSum += new BepuVector3(voxel.X, voxel.Y, voxel.Z); }
                 centerSum /= result.DetachedGroup.Count;
@@ -585,15 +593,51 @@ public class WorldManager : IDisposable
 
     #region Public API
 
-    public void RebuildChunkMeshAsync(Chunk chunk)
-    {
-        QueueMeshGeneration(chunk, true);
-    }
-
-    public void RebuildChunkPhysicsAsync(Chunk chunk)
+    private void RebuildChunk(Chunk chunk, bool isUpdate)
     {
         if (chunk == null || !chunk.IsLoaded) return;
-        _physicsBuildQueue.Add(chunk);
+
+        // 1. Собираем данные о соседях ОДИН РАЗ
+        Dictionary<Vector3i, MaterialType> nx, px, nz, pz;
+        lock (_chunksLock)
+        {
+            _chunks.TryGetValue(chunk.Position + new Vector3i(-1, 0, 0), out var n_nx);
+            _chunks.TryGetValue(chunk.Position + new Vector3i(1, 0, 0), out var n_px);
+            _chunks.TryGetValue(chunk.Position + new Vector3i(0, 0, -1), out var n_nz);
+            _chunks.TryGetValue(chunk.Position + new Vector3i(0, 0, 1), out var n_pz);
+
+            // Копируем данные только если сосед существует и загружен
+            nx = (n_nx != null && n_nx.IsLoaded) ? new Dictionary<Vector3i, MaterialType>(n_nx.Voxels) : null;
+            px = (n_px != null && n_px.IsLoaded) ? new Dictionary<Vector3i, MaterialType>(n_px.Voxels) : null;
+            nz = (n_nz != null && n_nz.IsLoaded) ? new Dictionary<Vector3i, MaterialType>(n_nz.Voxels) : null;
+            pz = (n_pz != null && n_pz.IsLoaded) ? new Dictionary<Vector3i, MaterialType>(n_pz.Voxels) : null;
+        }
+
+        // 2. Создаем и ставим в очередь обе задачи
+        _meshQueue.Add(new MeshGenerationTask
+        {
+            ChunkToProcess = chunk,
+            IsUpdate = isUpdate,
+            Neighbor_NX = nx,
+            Neighbor_PX = px,
+            Neighbor_NZ = nz,
+            Neighbor_PZ = pz
+        });
+
+        _physicsBuildQueue.Add(new PhysicsBuildTask
+        {
+            ChunkToProcess = chunk,
+            Neighbor_NX = nx,
+            Neighbor_PX = px,
+            Neighbor_NZ = nz,
+            Neighbor_PZ = pz
+        });
+    }
+
+    public void RebuildChunkAsync(Chunk chunk)
+    {
+        // Теперь это просто обертка для обратной совместимости
+        RebuildChunk(chunk, true);
     }
 
     public void QueueDetachmentCheck(Chunk chunk, Vector3i removedVoxelLocalPos)
@@ -650,7 +694,7 @@ public class WorldManager : IDisposable
             {
                 if (_chunks.TryGetValue(chunkPos + offset, out var neighbor))
                 {
-                    RebuildChunkMeshAsync(neighbor);
+                    RebuildChunk(neighbor, true); // Используем новый централизованный метод
                 }
             }
         };

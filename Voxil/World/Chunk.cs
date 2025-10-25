@@ -1,10 +1,10 @@
-﻿// /World/Chunk.cs - FINAL, TRULY FAST PERFORMANCE VERSION
+﻿// /World/Chunk.cs - FINAL, OPTIMIZED VERSION
 using BepuPhysics;
 using BepuPhysics.Collidables;
 using OpenTK.Mathematics;
 using System;
-using System.Collections.Generic;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 
 public class Chunk : IDisposable
 {
@@ -25,7 +25,7 @@ public class Chunk : IDisposable
     public int StaticHandlesCount => _staticHandles.Count;
 
     private FinalizedMeshData _pendingMesh = null;
-    private readonly object _stateLock = new object(); // Единый замок для состояния чанка
+    private readonly object _stateLock = new object();
 
     public Chunk(Vector3i position, WorldManager worldManager)
     {
@@ -55,21 +55,17 @@ public class Chunk : IDisposable
         }
     }
 
-    // --- НОВЫЙ МЕТОД ---
     public void TrySetMesh(FinalizedMeshData meshData, ConcurrentQueue<FinalizedMeshData> meshDataPool)
     {
-        if (Position == Vector3i.Zero) Console.WriteLine($"---> [TRACE 0,0,0] TrySetMesh called. Current HasPhysics is {HasPhysics}.");
         lock (_stateLock)
         {
             if (HasPhysics)
             {
-                if (Position == Vector3i.Zero) Console.WriteLine("     [TRACE 0,0,0] Applying mesh directly.");
                 ApplyMesh(meshData.Vertices, meshData.Colors, meshData.AoValues);
                 meshDataPool.Enqueue(meshData);
             }
             else
             {
-                if (Position == Vector3i.Zero) Console.WriteLine("     [TRACE 0,0,0] Storing mesh as PENDING.");
                 if (_pendingMesh != null)
                 {
                     meshDataPool.Enqueue(_pendingMesh);
@@ -88,8 +84,8 @@ public class Chunk : IDisposable
         }
         if (removed && IsLoaded)
         {
-            WorldManager.RebuildChunkMeshAsync(this);
-            WorldManager.RebuildChunkPhysicsAsync(this);
+            // Эта одна функция теперь ставит в очередь и меш, и физику.
+            WorldManager.RebuildChunkAsync(this);
             WorldManager.NotifyNeighborsOfVoxelChange(Position, localPosition);
             WorldManager.QueueDetachmentCheck(this, localPosition);
         }
@@ -122,8 +118,11 @@ public class Chunk : IDisposable
         _staticHandles.Clear();
     }
 
-    // --- НАСТОЯЩИЙ БЫСТРЫЙ АЛГОРИТМ ---
-    public Dictionary<Vector3i, MaterialType> GetSurfaceVoxels()
+    public Dictionary<Vector3i, MaterialType> GetSurfaceVoxels(
+        Dictionary<Vector3i, MaterialType> neighbor_NX,
+        Dictionary<Vector3i, MaterialType> neighbor_PX,
+        Dictionary<Vector3i, MaterialType> neighbor_NZ,
+        Dictionary<Vector3i, MaterialType> neighbor_PZ)
     {
         lock (VoxelsLock)
         {
@@ -136,29 +135,36 @@ public class Chunk : IDisposable
                 var pos = kvp.Key;
                 var material = kvp.Value;
 
-                // Пропускаем материалы, у которых не должно быть коллайдеров
                 if (!MaterialRegistry.IsSolidForPhysics(material))
                 {
                     continue;
                 }
 
-                // Функция-помощник для проверки соседа
-                bool IsNeighborSolid(Vector3i neighborPos)
+                bool IsNeighborSolid(Vector3i localPos)
                 {
-                    return Voxels.TryGetValue(neighborPos, out var neighborMaterial) &&
-                           MaterialRegistry.IsSolidForPhysics(neighborMaterial);
+                    if (localPos.X >= 0 && localPos.X < ChunkSize &&
+                        localPos.Z >= 0 && localPos.Z < ChunkSize &&
+                        localPos.Y >= 0)
+                    {
+                        return Voxels.TryGetValue(localPos, out var neighborMaterial) &&
+                               MaterialRegistry.IsSolidForPhysics(neighborMaterial);
+                    }
+
+                    if (localPos.X < 0)
+                        return neighbor_NX != null && neighbor_NX.TryGetValue(localPos + new Vector3i(ChunkSize, 0, 0), out var mat) && MaterialRegistry.IsSolidForPhysics(mat);
+                    if (localPos.X >= ChunkSize)
+                        return neighbor_PX != null && neighbor_PX.TryGetValue(localPos - new Vector3i(ChunkSize, 0, 0), out var mat) && MaterialRegistry.IsSolidForPhysics(mat);
+                    if (localPos.Z < 0)
+                        return neighbor_NZ != null && neighbor_NZ.TryGetValue(localPos + new Vector3i(0, 0, ChunkSize), out var mat) && MaterialRegistry.IsSolidForPhysics(mat);
+                    if (localPos.Z >= ChunkSize)
+                        return neighbor_PZ != null && neighbor_PZ.TryGetValue(localPos - new Vector3i(0, 0, ChunkSize), out var mat) && MaterialRegistry.IsSolidForPhysics(mat);
+
+                    return false;
                 }
 
-                // --- ИСПРАВЛЕНИЕ ЛОГИКИ ---
-                // Воксель является поверхностью, если ХОТЯ БЫ ОДИН из его 6 соседей не является твердым.
-                bool isSurface = !IsNeighborSolid(pos + Vector3i.UnitX) ||
-                                 !IsNeighborSolid(pos - Vector3i.UnitX) ||
-                                 !IsNeighborSolid(pos + Vector3i.UnitY) ||
-                                 !IsNeighborSolid(pos - Vector3i.UnitY) ||
-                                 !IsNeighborSolid(pos + Vector3i.UnitZ) ||
-                                 !IsNeighborSolid(pos - Vector3i.UnitZ);
-
-                if (isSurface)
+                if (!IsNeighborSolid(pos + Vector3i.UnitX) || !IsNeighborSolid(pos - Vector3i.UnitX) ||
+                    !IsNeighborSolid(pos + Vector3i.UnitY) || !IsNeighborSolid(pos - Vector3i.UnitY) ||
+                    !IsNeighborSolid(pos + Vector3i.UnitZ) || !IsNeighborSolid(pos - Vector3i.UnitZ))
                 {
                     surfaceVoxels.Add(pos, material);
                 }
@@ -169,30 +175,19 @@ public class Chunk : IDisposable
 
     public void OnPhysicsRebuilt(StaticHandle handle, ConcurrentQueue<FinalizedMeshData> meshDataPool)
     {
-        if (Position == Vector3i.Zero) Console.WriteLine($"---> [TRACE 0,0,0] OnPhysicsRebuilt called. Handle value: {handle.Value}.");
         lock (_stateLock)
         {
             ClearPhysics();
-            _hasStaticBody = false; // Сначала сбрасываем флаг
+            _hasStaticBody = false;
 
-            // --- ГЛАВНОЕ ИСПРАВЛЕНИЕ ---
-            // Проверяем, что полученный хэндл действителен. У дефолтного/невалидного хэндла значение 0.
-            if (handle.Value != 0 && WorldManager.PhysicsWorld.Simulation.Statics.StaticExists(handle))
+            if (WorldManager.PhysicsWorld.Simulation.Statics.StaticExists(handle))
             {
                 _staticHandles.Add(handle);
                 WorldManager.RegisterChunkStatic(handle, this);
-                _hasStaticBody = true; // Устанавливаем флаг, только если хэндл валиден
+                _hasStaticBody = true;
             }
 
-            if (Position == Vector3i.Zero)
-            {
-                if (_pendingMesh != null)
-                    Console.WriteLine($"     [TRACE 0,0,0] Found a pending mesh! Applying it now. HasPhysics is now: {_hasStaticBody}");
-                else
-                    Console.WriteLine($"     [TRACE 0,0,0] No pending mesh was found. HasPhysics is now: {_hasStaticBody}");
-            }
-
-            if (_pendingMesh != null)
+            if (_hasStaticBody && _pendingMesh != null)
             {
                 ApplyMesh(_pendingMesh.Vertices, _pendingMesh.Colors, _pendingMesh.AoValues);
                 meshDataPool.Enqueue(_pendingMesh);
