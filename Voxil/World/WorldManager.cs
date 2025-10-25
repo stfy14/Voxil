@@ -30,19 +30,21 @@ public class MeshGenerationTask
 {
     public Chunk ChunkToProcess;
     public bool IsUpdate;
-    public Dictionary<Vector3i, MaterialType> Neighbor_NX;
-    public Dictionary<Vector3i, MaterialType> Neighbor_PX;
-    public Dictionary<Vector3i, MaterialType> Neighbor_NZ;
-    public Dictionary<Vector3i, MaterialType> Neighbor_PZ;
+    // --- ИЗМЕНЕНИЕ: Храним ссылки на чанки, а не копии данных ---
+    public Chunk NeighborChunk_NX;
+    public Chunk NeighborChunk_PX;
+    public Chunk NeighborChunk_NZ;
+    public Chunk NeighborChunk_PZ;
 }
 
 public class PhysicsBuildTask
 {
     public Chunk ChunkToProcess;
-    public Dictionary<Vector3i, MaterialType> Neighbor_NX;
-    public Dictionary<Vector3i, MaterialType> Neighbor_PX;
-    public Dictionary<Vector3i, MaterialType> Neighbor_NZ;
-    public Dictionary<Vector3i, MaterialType> Neighbor_PZ;
+    // --- ИЗМЕНЕНИЕ: Храним ссылки на чанки, а не копии данных ---
+    public Chunk NeighborChunk_NX;
+    public Chunk NeighborChunk_PX;
+    public Chunk NeighborChunk_NZ;
+    public Chunk NeighborChunk_PZ;
 }
 
 
@@ -245,13 +247,19 @@ public class WorldManager : IDisposable
                 if (_meshQueue.TryTake(out var task, 50))
                 {
                     stopwatch.Restart();
-                    while (_finalizedMeshQueue.Count > 40 && !_isDisposed)
+                    if (task.ChunkToProcess == null || !task.ChunkToProcess.IsLoaded)
                     {
-                        Thread.Sleep(10);
+                        _meshTaskPool.Enqueue(task); // Возвращаем задачу в пул
+                        continue;
                     }
-                    if (task.ChunkToProcess == null || !task.ChunkToProcess.IsLoaded) continue;
 
-                    context.LoadData(task.ChunkToProcess, task.Neighbor_NX, task.Neighbor_PX, task.Neighbor_NZ, task.Neighbor_PZ);
+                    // --- OPTIMIZATION: Копирование данных перенесено сюда ---
+                    var nx = (task.NeighborChunk_NX != null && task.NeighborChunk_NX.IsLoaded) ? new Dictionary<Vector3i, MaterialType>(task.NeighborChunk_NX.Voxels) : null;
+                    var px = (task.NeighborChunk_PX != null && task.NeighborChunk_PX.IsLoaded) ? new Dictionary<Vector3i, MaterialType>(task.NeighborChunk_PX.Voxels) : null;
+                    var nz = (task.NeighborChunk_NZ != null && task.NeighborChunk_NZ.IsLoaded) ? new Dictionary<Vector3i, MaterialType>(task.NeighborChunk_NZ.Voxels) : null;
+                    var pz = (task.NeighborChunk_PZ != null && task.NeighborChunk_PZ.IsLoaded) ? new Dictionary<Vector3i, MaterialType>(task.NeighborChunk_PZ.Voxels) : null;
+
+                    context.LoadData(task.ChunkToProcess, nx, px, nz, pz);
 
                     if (context._mainChunkVoxels.Count > 0)
                     {
@@ -259,9 +267,7 @@ public class WorldManager : IDisposable
                     }
 
                     if (!_meshDataPool.TryDequeue(out var meshData))
-                    {
                         meshData = new FinalizedMeshData();
-                    }
 
                     meshData.ChunkPosition = task.ChunkToProcess.Position;
                     (meshData.Vertices, context.Vertices) = (context.Vertices, meshData.Vertices);
@@ -270,10 +276,10 @@ public class WorldManager : IDisposable
                     meshData.IsUpdate = task.IsUpdate;
 
                     _finalizedMeshQueue.Enqueue(meshData);
-                    _meshTaskPool.Enqueue(task);
 
                     stopwatch.Stop();
                     PerformanceMonitor.RecordTiming(ThreadType.Meshing, stopwatch);
+                    _meshTaskPool.Enqueue(task);
                 }
             }
             catch (Exception ex) { Console.WriteLine($"[MeshBuilderThread] Error: {ex.Message}"); }
@@ -292,10 +298,19 @@ public class WorldManager : IDisposable
                 if (_physicsBuildQueue.TryTake(out var task, 50))
                 {
                     stopwatch.Restart();
-                    if (task.ChunkToProcess == null || !task.ChunkToProcess.IsLoaded) continue;
+                    if (task.ChunkToProcess == null || !task.ChunkToProcess.IsLoaded)
+                    {
+                        _physicsTaskPool.Enqueue(task); // Возвращаем задачу в пул
+                        continue;
+                    }
 
-                    Dictionary<Vector3i, MaterialType> surfaceVoxels = task.ChunkToProcess.GetSurfaceVoxels(
-                        task.Neighbor_NX, task.Neighbor_PX, task.Neighbor_NZ, task.Neighbor_PZ);
+                    // --- OPTIMIZATION: Копирование данных перенесено сюда ---
+                    var nx = (task.NeighborChunk_NX != null && task.NeighborChunk_NX.IsLoaded) ? new Dictionary<Vector3i, MaterialType>(task.NeighborChunk_NX.Voxels) : null;
+                    var px = (task.NeighborChunk_PX != null && task.NeighborChunk_PX.IsLoaded) ? new Dictionary<Vector3i, MaterialType>(task.NeighborChunk_PX.Voxels) : null;
+                    var nz = (task.NeighborChunk_NZ != null && task.NeighborChunk_NZ.IsLoaded) ? new Dictionary<Vector3i, MaterialType>(task.NeighborChunk_NZ.Voxels) : null;
+                    var pz = (task.NeighborChunk_PZ != null && task.NeighborChunk_PZ.IsLoaded) ? new Dictionary<Vector3i, MaterialType>(task.NeighborChunk_PZ.Voxels) : null;
+
+                    Dictionary<Vector3i, MaterialType> surfaceVoxels = task.ChunkToProcess.GetSurfaceVoxels(nx, px, nz, pz);
 
                     var compoundShape = PhysicsWorld.CreateStaticChunkShape(surfaceVoxels, out var childrenBuffer);
 
@@ -306,10 +321,9 @@ public class WorldManager : IDisposable
                         ChildrenBuffer = childrenBuffer
                     });
 
-                    _physicsTaskPool.Enqueue(task);
-
                     stopwatch.Stop();
                     PerformanceMonitor.RecordTiming(ThreadType.Physics, stopwatch);
+                    _physicsTaskPool.Enqueue(task);
                 }
             }
             catch (Exception ex)
@@ -430,7 +444,7 @@ public class WorldManager : IDisposable
         int processed = 0;
         while (processed < MaxChunksPerFrame && _generatedChunksQueue.TryDequeue(out var result))
         {
-            if (_meshQueue.Count > 40)
+            if (_meshQueue.Count > 256)
             {
                 _generatedChunksQueue.Enqueue(result);
                 break;
@@ -480,23 +494,6 @@ public class WorldManager : IDisposable
             }
         }
         return null;
-    }
-
-    private void QueueMeshGeneration(Chunk chunk, bool isUpdate)
-    {
-        if (chunk == null || !chunk.IsLoaded) return;
-
-        var task = new MeshGenerationTask
-        {
-            ChunkToProcess = chunk,
-            IsUpdate = isUpdate,
-            // Добавляем 'chunk' в качестве первого аргумента
-            Neighbor_NX = GetVoxelData(chunk, new Vector3i(-1, 0, 0)),
-            Neighbor_PX = GetVoxelData(chunk, new Vector3i(1, 0, 0)),
-            Neighbor_NZ = GetVoxelData(chunk, new Vector3i(0, 0, -1)),
-            Neighbor_PZ = GetVoxelData(chunk, new Vector3i(0, 0, 1)),
-        };
-        _meshQueue.Add(task);
     }
 
     private void ProcessFinalizedMeshes()
@@ -612,45 +609,36 @@ public class WorldManager : IDisposable
     {
         if (chunk == null || !chunk.IsLoaded) return;
 
-        // Шаг 1: Собираем данные о соседях. Этот код остается, он важен для производительности.
-        Dictionary<Vector3i, MaterialType> nx, px, nz, pz;
+        // --- OPTIMIZATION: Этот метод теперь супер-быстрый ---
+        // Он больше не копирует словари, а только находит ссылки на соседей.
+        Chunk n_nx, n_px, n_nz, n_pz;
         lock (_chunksLock)
         {
-            _chunks.TryGetValue(chunk.Position + new Vector3i(-1, 0, 0), out var n_nx);
-            _chunks.TryGetValue(chunk.Position + new Vector3i(1, 0, 0), out var n_px);
-            _chunks.TryGetValue(chunk.Position + new Vector3i(0, 0, -1), out var n_nz);
-            _chunks.TryGetValue(chunk.Position + new Vector3i(0, 0, 1), out var n_pz);
-
-            nx = (n_nx != null && n_nx.IsLoaded) ? new Dictionary<Vector3i, MaterialType>(n_nx.Voxels) : null;
-            px = (n_px != null && n_px.IsLoaded) ? new Dictionary<Vector3i, MaterialType>(n_px.Voxels) : null;
-            nz = (n_nz != null && n_nz.IsLoaded) ? new Dictionary<Vector3i, MaterialType>(n_nz.Voxels) : null;
-            pz = (n_pz != null && n_pz.IsLoaded) ? new Dictionary<Vector3i, MaterialType>(n_pz.Voxels) : null;
+            _chunks.TryGetValue(chunk.Position + new Vector3i(-1, 0, 0), out n_nx);
+            _chunks.TryGetValue(chunk.Position + new Vector3i(1, 0, 0), out n_px);
+            _chunks.TryGetValue(chunk.Position + new Vector3i(0, 0, -1), out n_nz);
+            _chunks.TryGetValue(chunk.Position + new Vector3i(0, 0, 1), out n_pz);
         }
 
-        // Шаг 2: Ставим в очередь задачу для меша, используя пул объектов.
         if (!_meshTaskPool.TryDequeue(out var meshTask))
             meshTask = new MeshGenerationTask();
 
         meshTask.ChunkToProcess = chunk;
         meshTask.IsUpdate = isUpdate;
-        meshTask.Neighbor_NX = nx;
-        meshTask.Neighbor_PX = px;
-        meshTask.Neighbor_NZ = nz;
-        meshTask.Neighbor_PZ = pz;
+        meshTask.NeighborChunk_NX = n_nx;
+        meshTask.NeighborChunk_PX = n_px;
+        meshTask.NeighborChunk_NZ = n_nz;
+        meshTask.NeighborChunk_PZ = n_pz;
         _meshQueue.Add(meshTask);
 
-        // Шаг 3: Ставим в очередь задачу для физики, используя пул объектов.
         if (!_physicsTaskPool.TryDequeue(out var physicsTask))
             physicsTask = new PhysicsBuildTask();
 
         physicsTask.ChunkToProcess = chunk;
-        // ВАЖНО: Мы не можем просто передать nx, px... из meshTask,
-        // так как meshTask будет переиспользован и его поля могут измениться.
-        // Но так как мы создаем копии словарей, мы можем их безопасно передать в обе задачи.
-        physicsTask.Neighbor_NX = nx;
-        physicsTask.Neighbor_PX = px;
-        physicsTask.Neighbor_NZ = nz;
-        physicsTask.Neighbor_PZ = pz;
+        physicsTask.NeighborChunk_NX = n_nx;
+        physicsTask.NeighborChunk_PX = n_px;
+        physicsTask.NeighborChunk_NZ = n_nz;
+        physicsTask.NeighborChunk_PZ = n_pz;
         _physicsBuildQueue.Add(physicsTask);
     }
 
