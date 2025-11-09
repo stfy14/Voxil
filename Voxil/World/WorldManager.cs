@@ -427,9 +427,8 @@ public class WorldManager : IDisposable
         while (_detachmentResultQueue.TryDequeue(out var result))
         {
             if (result.OriginChunk == null || !result.OriginChunk.IsLoaded) continue;
+
             bool removedAny = false;
-            // ИСПРАВЛЕНИЕ: Мы не можем блокировать здесь, так как RemoveVoxelAndUpdate делает это внутри.
-            // Вместо этого, мы просто вызываем RemoveVoxelAndUpdate и проверяем результат.
             foreach (var voxel in result.DetachedGroup)
             {
                 if (result.OriginChunk.RemoveVoxelAndUpdate(voxel))
@@ -437,14 +436,14 @@ public class WorldManager : IDisposable
                     removedAny = true;
                 }
             }
+
             if (removedAny)
             {
                 Console.WriteLine($"[WorldManager] Detached {result.DetachedGroup.Count} voxels, creating dynamic object...");
-                var centerSum = BepuVector3.Zero;
-                foreach (var voxel in result.DetachedGroup) { centerSum += new BepuVector3(voxel.X, voxel.Y, voxel.Z); }
-                centerSum /= result.DetachedGroup.Count;
-                var worldPosition = result.WorldOffset + centerSum;
-                CreateDetachedVoxelObject(result.DetachedGroup, result.Material, worldPosition);
+
+                // --- ИСПРАВЛЕНИЕ ЗДЕСЬ ---
+                // Этот вызов точно соответствует сигнатуре метода из Шага 1.
+                CreateDetachedVoxelObject(result.OriginChunk, result.DetachedGroup, result.Material);
             }
         }
     }
@@ -574,14 +573,71 @@ public class WorldManager : IDisposable
         _activeChunkPositions.Remove(position);
     }
 
-    private void CreateDetachedVoxelObject(List<Vector3i> localCoords, MaterialType material, BepuVector3 worldPosition)
+    private void CreateDetachedVoxelObject(List<Vector3i> voxelCoords, MaterialType material, BepuVector3 worldPosition)
     {
-        if (localCoords == null || localCoords.Count == 0) return;
+        if (voxelCoords == null || voxelCoords.Count == 0) return;
+
+        // Этот метод вызывается, когда мы уже знаем точную мировую позицию центра.
+        // Координаты вокселей (voxelCoords) уже относительны.
+        // Поэтому здесь НЕ НУЖНО пересчитывать их заново.
+
         try
         {
-            var newObject = new VoxelObject(localCoords, material, this);
-            var handle = PhysicsWorld.CreateVoxelObjectBody(localCoords, material, worldPosition, out var centerOfMass);
+            var newObject = new VoxelObject(voxelCoords, material, this);
+            // Мы передаем уже готовые относительные координаты и точную мировую позицию.
+            var handle = PhysicsWorld.CreateVoxelObjectBody(voxelCoords, material, worldPosition, out var centerOfMass);
+
             if (!PhysicsWorld.Simulation.Bodies.BodyExists(handle)) return;
+
+            newObject.InitializePhysics(handle, centerOfMass.ToOpenTK());
+            newObject.BuildMesh();
+            _voxelObjectsToAdd.Enqueue(newObject);
+            RegisterVoxelObjectBody(handle, newObject);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[WorldManager] Error creating detached object from dynamic split: {ex.Message}\n{ex.StackTrace}");
+        }
+    }
+
+    private void CreateDetachedVoxelObject(Chunk originChunk, List<Vector3i> localCoords, MaterialType material)
+    {
+        if (originChunk == null || localCoords == null || localCoords.Count == 0) return;
+
+        // 1. Находим геометрический центр группы вокселей (в координатах чанка).
+        var centerSum = BepuVector3.Zero;
+        foreach (var voxel in localCoords)
+        {
+            centerSum += new BepuVector3(voxel.X, voxel.Y, voxel.Z);
+        }
+        var groupCenterInChunk = centerSum / localCoords.Count;
+
+        // 2. Создаем НОВЫЙ список координат, относительных к этому центру.
+        var relativeCoords = new List<Vector3i>(localCoords.Count);
+        foreach (var coord in localCoords)
+        {
+            var relativePos = new BepuVector3(coord.X, coord.Y, coord.Z) - groupCenterInChunk;
+            relativeCoords.Add(new Vector3i(
+                (int)Math.Round(relativePos.X),
+                (int)Math.Round(relativePos.Y),
+                (int)Math.Round(relativePos.Z)
+            ));
+        }
+
+        // 3. Рассчитываем правильную МИРОВУЮ позицию для центра нового объекта.
+        //    Мировой_ориентир_чанка + смещение_центра_группы_внутри_чанка
+        // --- ВОТ ИСПРАВЛЕНИЕ ОШИБКИ ---
+        var newWorldPosition = (originChunk.Position * Chunk.ChunkSize).ToSystemNumerics() + groupCenterInChunk;
+
+        // 4. Создаем физическое тело, используя НОВЫЕ ОТНОСИТЕЛЬНЫЕ координаты.
+        try
+        {
+            // VoxelObject теперь тоже должен хранить относительные координаты.
+            var newObject = new VoxelObject(relativeCoords, material, this);
+            var handle = PhysicsWorld.CreateVoxelObjectBody(relativeCoords, material, newWorldPosition, out var centerOfMass);
+
+            if (!PhysicsWorld.Simulation.Bodies.BodyExists(handle)) return;
+
             newObject.InitializePhysics(handle, centerOfMass.ToOpenTK());
             newObject.BuildMesh();
             _voxelObjectsToAdd.Enqueue(newObject);

@@ -36,15 +36,14 @@ public class PhysicsWorld : IDisposable
         _threadDispatcher = new ThreadDispatcher(threadCount);
 
         var narrowPhaseCallbacks = new NarrowPhaseCallbacks { PlayerState = _player_state };
+        // ВАЖНО: Мы НЕ передаем 'World = this'. Коллбэк должен быть "чистым".
         var poseIntegratorCallbacks = new PoseIntegratorCallbacks
         {
             PlayerState = _player_state
         };
 
         var solveDescription = new SolveDescription(8, 1);
-
         Simulation = Simulation.Create(_bufferPool, narrowPhaseCallbacks, poseIntegratorCallbacks, solveDescription);
-
         Console.WriteLine($"[PhysicsWorld] Initialized with {threadCount} physics threads");
     }
 
@@ -64,9 +63,9 @@ public class PhysicsWorld : IDisposable
     public void Update(float deltaTime)
     {
         if (_isDisposed) return;
-        // ВАЖНО: Мы больше не блокируем здесь всю симуляцию.
-        // Блокировка будет происходить вокруг конкретных операций.
+        // 1. СНАЧАЛА обновляем состояние персонажа (делаем Raycast)
         UpdateCharacterController(deltaTime);
+        // 2. ПОТОМ делаем шаг симуляции с уже готовыми данными
         Simulation.Timestep(deltaTime, _threadDispatcher);
     }
 
@@ -179,7 +178,7 @@ public class PhysicsWorld : IDisposable
                     new RigidPose(initialPosition),
                     inertia,
                     new CollidableDescription(compoundShapeIndex, 0.1f),
-                    new BodyActivityDescription(0.01f)
+                    new BodyActivityDescription(1.0f)
                 );
                 return Simulation.Bodies.Add(bodyDescription);
             }
@@ -307,9 +306,10 @@ public class PhysicsWorld : IDisposable
         var hitHandler = new RayHitHandler { BodyToIgnore = _player_state.BodyHandle };
         float rayLength = PlayerController.Height / 2f + settings.HoverHeight + 0.2f;
 
-        // ИСПРАВЛЕНИЕ v2.5: Добавлен аргумент _bufferPool
+        // Используем _bufferPool, как того требует Bepu v2.5
         Simulation.RayCast(bodyPosition, -Vector3.UnitY, rayLength, _bufferPool, ref hitHandler);
 
+        // Обновляем общее состояние, которое потом прочитает PoseIntegratorCallbacks
         if (hitHandler.Hit)
         {
             _player_state.IsOnGround = true;
