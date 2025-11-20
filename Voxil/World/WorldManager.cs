@@ -257,24 +257,33 @@ public class WorldManager : IDisposable
                 PhysicsBuildTask task = null;
                 bool gotTask = false;
 
-                // 1. Проверка СРОЧНОЙ очереди
-                if (_urgentPhysicsQueue.TryDequeue(out task))
-                {
-                    gotTask = true;
-                }
-                // 2. Проверка ОБЫЧНОЙ очереди
-                else if (_physicsBuildQueue.TryTake(out task, 10))
-                {
-                    gotTask = true;
-                }
+                if (_urgentPhysicsQueue.TryDequeue(out task)) gotTask = true;
+                else if (_physicsBuildQueue.TryTake(out task, 10)) gotTask = true;
 
                 if (gotTask && task != null)
                 {
                     stopwatch.Restart();
                     if (task.ChunkToProcess == null || !task.ChunkToProcess.IsLoaded) { _physicsTaskPool.Enqueue(task); continue; }
-                    Dictionary<Vector3i, MaterialType> surfaceVoxels = task.ChunkToProcess.GetSurfaceVoxels(task.NeighborChunk_NX, task.NeighborChunk_PX, task.NeighborChunk_NZ, task.NeighborChunk_PZ);
-                    var compoundShape = PhysicsWorld.CreateStaticChunkShape(surfaceVoxels, out var childrenBuffer);
-                    _physicsResultQueue.Enqueue(new PhysicsBuildResult { TargetChunk = task.ChunkToProcess, CompoundShape = compoundShape, ChildrenBuffer = childrenBuffer });
+
+                    // --- ИЗМЕНЕНИЕ ---
+                    // Мы больше не вызываем GetSurfaceVoxels. Это было медленно.
+                    // Мы передаем ВСЕ воксели чанка (просто ссылку на словарь),
+                    // а VoxelPhysicsBuilder сам быстро разберется, что внутри, а что снаружи, используя массив.
+
+                    // Важно: делаем копию словаря для потокобезопасности, как и раньше,
+                    // но теперь мы не тратим время на поиск соседей здесь.
+                    var voxelsCopy = new Dictionary<Vector3i, MaterialType>();
+                    task.ChunkToProcess.CopyVoxelsData(voxelsCopy);
+
+                    var compoundShape = PhysicsWorld.CreateStaticChunkShape(voxelsCopy, out var childrenBuffer);
+
+                    _physicsResultQueue.Enqueue(new PhysicsBuildResult
+                    {
+                        TargetChunk = task.ChunkToProcess,
+                        CompoundShape = compoundShape,
+                        ChildrenBuffer = childrenBuffer
+                    });
+
                     stopwatch.Stop();
                     PerformanceMonitor.RecordTiming(ThreadType.Physics, stopwatch);
                     _physicsTaskPool.Enqueue(task);

@@ -77,15 +77,22 @@ public class PhysicsWorld : IDisposable
         if (voxels == null || voxels.Count == 0)
             return null;
 
-        // CompoundBuilder можно безопасно использовать в любом потоке,
-        // если он не пытается добавлять/удалять формы из общего Simulation.Shapes.
-        using (var compoundBuilder = new CompoundBuilder(_bufferPool, Simulation.Shapes, voxels.Count))
+        // 1. Генерируем список коробок (БЫСТРО)
+        var colliders = VoxelPhysicsBuilder.GenerateColliders(voxels);
+
+        if (colliders.Count == 0) return null;
+
+        // 2. Создаем CompoundShape (ТЕПЕРЬ БЫСТРО, так как коробок в 5 раз меньше)
+        using (var compoundBuilder = new CompoundBuilder(_bufferPool, Simulation.Shapes, colliders.Count))
         {
-            var boxShape = new Box(1, 1, 1);
-            foreach (var voxel in voxels)
+            foreach (var collider in colliders)
             {
-                var localPosition = new Vector3(voxel.Key.X + 0.5f, voxel.Key.Y + 0.5f, voxel.Key.Z + 0.5f);
-                var pose = new RigidPose(localPosition);
+                // Создаем Box нужного размера
+                // Важно: Box создается по HalfSize (половина ширины/высоты) или FullSize?
+                // В Bepu v2 Box(width, height, length) - это полные размеры.
+                var boxShape = new Box(collider.HalfSize.X * 2, collider.HalfSize.Y * 2, collider.HalfSize.Z * 2);
+
+                var pose = new RigidPose(collider.Position);
                 compoundBuilder.Add(boxShape, pose, 1f);
             }
             compoundBuilder.BuildKinematicCompound(out childrenBuffer);
