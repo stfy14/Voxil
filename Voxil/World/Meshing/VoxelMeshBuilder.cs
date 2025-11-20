@@ -1,6 +1,7 @@
-﻿// /World/Meshing/VoxelMeshBuilder.cs - FAST ARRAY VERSION
+﻿// /World/Meshing/VoxelMeshBuilder.cs - ZERO ALLOCATION VERSION
 using OpenTK.Mathematics;
 using System;
+using System.Buffers; // ВАЖНО: Нужен для ArrayPool
 using System.Collections.Generic;
 
 public static class VoxelMeshBuilder
@@ -14,9 +15,7 @@ public static class VoxelMeshBuilder
     {
         if (voxels.Count == 0) return;
 
-        // --- ЭТАП 1: Подготовка данных (Оптимизация) ---
-
-        // 1. Находим границы
+        // --- ЭТАП 1: Подготовка (Bounds) ---
         var min = new Vector3i(int.MaxValue);
         var max = new Vector3i(int.MinValue);
 
@@ -30,166 +29,201 @@ public static class VoxelMeshBuilder
             if (v.Z > max.Z) max.Z = v.Z;
         }
 
-        // Размеры объема с учетом паддинга (1 блок воздуха вокруг)
-        // +1 для инклюзивности max, +2 для паддинга с двух сторон
+        // Размеры с паддингом (+1 блок воздуха с каждой стороны = +2 итого)
         int sizeX = (max.X - min.X) + 3;
         int sizeY = (max.Y - min.Y) + 3;
         int sizeZ = (max.Z - min.Z) + 3;
 
-        // Создаем быстрый плоский массив (симуляция 3D)
-        // Это намного быстрее словаря
-        var volume = new MaterialType?[sizeX * sizeY * sizeZ];
+        int volumeLength = sizeX * sizeY * sizeZ;
 
-        // Заполняем массив данными из словаря
-        // Индекс [1, 1, 1] в массиве соответствует min в мире
-        foreach (var kvp in voxels)
+        // --- ОПТИМИЗАЦИЯ 1: Арендуем массив Volume из пула ---
+        // Мы используем int, потому что это быстрее всего для процессора (0 = пусто)
+        int[] volume = ArrayPool<int>.Shared.Rent(volumeLength);
+
+        // Обязательно чистим арендованный массив, так как там может быть мусор
+        Array.Clear(volume, 0, volumeLength);
+
+        try
         {
-            int lx = kvp.Key.X - min.X + 1;
-            int ly = kvp.Key.Y - min.Y + 1;
-            int lz = kvp.Key.Z - min.Z + 1;
-
-            volume[lx + sizeX * (ly + sizeY * lz)] = kvp.Value;
-        }
-
-        // Вспомогательная функция для чтения из быстрого массива
-        // Возвращает null, если пусто
-        MaterialType? GetMat(int x, int y, int z)
-        {
-            return volume[x + sizeX * (y + sizeY * z)];
-        }
-
-        // --- ЭТАП 2: Алгоритм Greedy Meshing (без словаря) ---
-
-        // Размеры массива по осям для цикла
-        int[] dims = { sizeX, sizeY, sizeZ };
-
-        // Проходим по 3 осям (Dimensions)
-        for (int d = 0; d < 3; d++)
-        {
-            int u = (d + 1) % 3;
-            int v = (d + 2) % 3;
-
-            // Вектора для навигации внутри массива
-            int[] x = { 0, 0, 0 };
-            int[] q = { 0, 0, 0 };
-            q[d] = 1;
-
-            int uSize = dims[u];
-            int vSize = dims[v];
-            var mask = new MaterialType?[uSize * vSize];
-
-            // Проходим по главной оси (Depth) внутри границ массива
-            // (от 0 до dims[d]-2, так как мы сравниваем x и x+1)
-            for (x[d] = 0; x[d] < dims[d] - 1; x[d]++)
+            // Заполняем Volume данными
+            foreach (var kvp in voxels)
             {
-                // Два прохода: Back Face и Front Face
-                for (int faceDir = 0; faceDir < 2; faceDir++)
+                // +1 для паддинга
+                int lx = kvp.Key.X - min.X + 1;
+                int ly = kvp.Key.Y - min.Y + 1;
+                int lz = kvp.Key.Z - min.Z + 1;
+
+                // Прямой расчет индекса: x + width * (y + height * z)
+                volume[lx + sizeX * (ly + sizeY * lz)] = (int)kvp.Value;
+            }
+
+            // --- ОПТИМИЗАЦИЯ 2: Арендуем ОДИН массив Mask для всех проходов ---
+            // Берем максимальный возможный размер среза
+            int maxFaceSize = Math.Max(sizeX * sizeY, Math.Max(sizeX * sizeZ, sizeY * sizeZ));
+            int[] mask = ArrayPool<int>.Shared.Rent(maxFaceSize);
+
+            try
+            {
+                // Размеры для итерации
+                int[] dims = { sizeX, sizeY, sizeZ };
+
+                // Проходим по 3 осям
+                for (int d = 0; d < 3; d++)
                 {
-                    bool lookPositive = (faceDir == 1);
+                    int u = (d + 1) % 3;
+                    int v = (d + 2) % 3;
 
-                    // A. Заполняем маску (БЕЗ TryGetValue, просто массив)
-                    for (int j = 0; j < vSize; j++)
+                    // Вектора навигации
+                    int[] x = { 0, 0, 0 };
+                    int[] q = { 0, 0, 0 };
+                    q[d] = 1;
+
+                    int uSize = dims[u];
+                    int vSize = dims[v];
+
+                    // Чистим маску перед использованием для новой оси (важно!)
+                    // Хотя мы и так ее перезаписываем, но Greedy алгоритм требует чистоты при стирании
+                    // Но мы стираем внутри алгоритма, так что тут достаточно просто переиспользовать.
+
+                    // Проходим по глубине (d)
+                    for (x[d] = 0; x[d] < dims[d] - 1; x[d]++)
                     {
-                        for (int i = 0; i < uSize; i++)
+                        // Два направления: Back Face (0) и Front Face (1)
+                        for (int faceDir = 0; faceDir < 2; faceDir++)
                         {
-                            x[u] = i;
-                            x[v] = j;
+                            bool lookPositive = (faceDir == 1);
 
-                            // Читаем напрямую из массива volume
-                            // current = x
-                            // next = x + q
-                            MaterialType? matCurr = GetMat(x[0], x[1], x[2]);
-                            MaterialType? matNext = GetMat(x[0] + q[0], x[1] + q[1], x[2] + q[2]);
+                            // A. Заполняем маску
+                            // Оптимизация: выносим константы
+                            int maskIdx = 0;
 
-                            bool hasCurrent = matCurr.HasValue;
-                            bool hasNext = matNext.HasValue;
-
-                            MaterialType? faceMat = null;
-
-                            if (lookPositive)
+                            for (int j = 0; j < vSize; j++)
                             {
-                                // Front Face: Current есть, Next нет
-                                if (hasCurrent && !hasNext) faceMat = matCurr;
-                            }
-                            else
-                            {
-                                // Back Face: Current нет, Next есть
-                                if (!hasCurrent && hasNext) faceMat = matNext;
-                            }
+                                // Предварительный расчет части индекса volume
+                                x[v] = j;
+                                int volBaseIdx = x[0] + sizeX * (x[1] + sizeY * x[2]);
 
-                            mask[i + j * uSize] = faceMat;
-                        }
-                    }
+                                // Шаг для volume по оси U
+                                int uStep = (u == 0) ? 1 : (u == 1 ? sizeX : sizeX * sizeY);
 
-                    // B. Greedy Meshing (тот же самый надежный алгоритм)
-                    for (int j = 0; j < vSize; j++)
-                    {
-                        for (int i = 0; i < uSize;)
-                        {
-                            int index = i + j * uSize;
-                            if (mask[index] != null)
-                            {
-                                var material = mask[index].Value;
-                                int width = 1;
-                                int height = 1;
+                                // Шаг для next блока (q)
+                                int qStep = q[0] + sizeX * (q[1] + sizeY * q[2]);
 
-                                // Ширина
-                                while (i + width < uSize && mask[index + width] == material)
+                                for (int i = 0; i < uSize; i++)
                                 {
-                                    width++;
-                                }
+                                    // Вместо пересчета координат x[u]=i каждый раз, используем смещение
+                                    // Текущий индекс в volume
+                                    int idxCurr = volBaseIdx + i * uStep;
+                                    int idxNext = idxCurr + qStep;
 
-                                // Высота
-                                bool done = false;
-                                while (j + height < vSize)
-                                {
-                                    for (int k = 0; k < width; k++)
+                                    int mCurr = volume[idxCurr];
+                                    int mNext = volume[idxNext];
+
+                                    bool hasCurrent = mCurr != 0;
+                                    bool hasNext = mNext != 0;
+
+                                    int faceMat = 0; // 0 = null/air
+
+                                    if (lookPositive)
                                     {
-                                        if (mask[(i + k) + (j + height) * uSize] != material)
+                                        if (hasCurrent && !hasNext) faceMat = mCurr;
+                                    }
+                                    else
+                                    {
+                                        if (!hasCurrent && hasNext) faceMat = mNext;
+                                    }
+
+                                    mask[maskIdx++] = faceMat;
+                                }
+                            }
+
+                            // B. Greedy Meshing
+                            maskIdx = 0;
+                            for (int j = 0; j < vSize; j++)
+                            {
+                                for (int i = 0; i < uSize;)
+                                {
+                                    int material = mask[maskIdx]; // maskIdx == i + j * uSize
+
+                                    if (material != 0)
+                                    {
+                                        int width = 1;
+                                        int height = 1;
+
+                                        // Ширина
+                                        while (i + width < uSize && mask[maskIdx + width] == material)
                                         {
-                                            done = true;
-                                            break;
+                                            width++;
                                         }
+
+                                        // Высота
+                                        bool done = false;
+                                        while (j + height < vSize)
+                                        {
+                                            // Базовый индекс строки в маске
+                                            int rowBase = maskIdx + height * uSize;
+                                            for (int k = 0; k < width; k++)
+                                            {
+                                                if (mask[rowBase + k] != material)
+                                                {
+                                                    done = true;
+                                                    break;
+                                                }
+                                            }
+                                            if (done) break;
+                                            height++;
+                                        }
+
+                                        // C. Генерация
+                                        // Восстанавливаем мировые координаты
+                                        // world = local - 1 + min
+
+                                        // x[d] уже установлен внешним циклом
+                                        Vector3i worldPos = new Vector3i();
+                                        worldPos[d] = x[d] - 1 + min[d];
+                                        worldPos[u] = i - 1 + min[u];
+                                        worldPos[v] = j - 1 + min[v];
+
+                                        AddQuad(vertices, colors, aoValues,
+                                                worldPos, width, height,
+                                                d, u, v,
+                                                lookPositive,
+                                                (MaterialType)material);
+
+                                        // Очистка маски
+                                        for (int l = 0; l < height; l++)
+                                        {
+                                            int rowBase = maskIdx + l * uSize;
+                                            for (int k = 0; k < width; k++)
+                                            {
+                                                mask[rowBase + k] = 0;
+                                            }
+                                        }
+
+                                        i += width;
+                                        maskIdx += width;
                                     }
-                                    if (done) break;
-                                    height++;
-                                }
-
-                                // C. Генерация Квада (Конвертация обратно в мировые координаты)
-                                // Наши x[] сейчас в локальных координатах массива (с учетом паддинга +1)
-                                // Нужно вернуть их в мировые: world = local - 1 + min
-
-                                Vector3i worldPos = new Vector3i();
-                                worldPos[d] = x[d] - 1 + min[d];
-                                worldPos[u] = i - 1 + min[u]; // i соответствует x[u]
-                                worldPos[v] = j - 1 + min[v]; // j соответствует x[v]
-
-                                AddQuad(vertices, colors, aoValues,
-                                        worldPos,
-                                        width, height,
-                                        d, u, v,
-                                        lookPositive,
-                                        material);
-
-                                // Очистка
-                                for (int l = 0; l < height; l++)
-                                {
-                                    for (int k = 0; k < width; k++)
+                                    else
                                     {
-                                        mask[(i + k) + (j + l) * uSize] = null;
+                                        i++;
+                                        maskIdx++;
                                     }
                                 }
-
-                                i += width;
-                            }
-                            else
-                            {
-                                i++;
                             }
                         }
                     }
                 }
             }
+            finally
+            {
+                // Возвращаем маску в пул
+                ArrayPool<int>.Shared.Return(mask);
+            }
+        }
+        finally
+        {
+            // Возвращаем объем в пул
+            ArrayPool<int>.Shared.Return(volume);
         }
     }
 
@@ -206,15 +240,12 @@ public static class VoxelMeshBuilder
         var dv = new Vector3(0, 0, 0); dv[vAxis] = height;
 
         Vector3 v0 = new Vector3(start.X, start.Y, start.Z);
-
-        // Сдвиг плоскости на границу вокселя
         v0[dAxis] += 1.0f;
 
         Vector3 v1 = v0 + du;
         Vector3 v2 = v0 + du + dv;
         Vector3 v3 = v0 + dv;
 
-        // AO пока 1.0
         float ao = 1.0f;
 
         if (isPositiveFace)
