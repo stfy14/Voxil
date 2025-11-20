@@ -53,6 +53,8 @@ public class WorldManager : IDisposable
     private readonly ConcurrentQueue<DetachmentResult> _detachmentResultQueue = new();
     private readonly ConcurrentQueue<MeshGenerationTask> _meshTaskPool = new();
     private readonly ConcurrentQueue<PhysicsBuildTask> _physicsTaskPool = new();
+    private readonly ConcurrentQueue<MeshGenerationTask> _urgentMeshQueue = new();
+    private readonly ConcurrentQueue<PhysicsBuildTask> _urgentPhysicsQueue = new();
 
     private readonly object _chunksLock = new();
     private readonly HashSet<Vector3i> _chunksInProgress = new();
@@ -146,25 +148,45 @@ public class WorldManager : IDisposable
         Console.WriteLine("[MeshBuilderThread] Started.");
         var context = new MeshBuilderContext();
         var stopwatch = new Stopwatch();
+
         while (!_isDisposed)
         {
             try
             {
-                if (_meshQueue.TryTake(out var task, 50))
+                MeshGenerationTask task = null;
+                bool gotTask = false;
+
+                // 1. Сначала проверяем СРОЧНУЮ очередь (всегда опустошаем её полностью перед обычными задачами)
+                if (_urgentMeshQueue.TryDequeue(out task))
                 {
+                    gotTask = true;
+                }
+                // 2. Если срочных нет, пробуем взять из обычной (с небольшим таймаутом 10мс, чтобы не грузить ЦП вхолостую)
+                else if (_meshQueue.TryTake(out task, 10))
+                {
+                    gotTask = true;
+                }
+
+                if (gotTask && task != null)
+                {
+                    // Логика обработки та же самая...
                     stopwatch.Restart();
                     if (task.ChunkToProcess == null || !task.ChunkToProcess.IsLoaded) { _meshTaskPool.Enqueue(task); continue; }
+
                     context.LoadData(task.ChunkToProcess, task.NeighborChunk_NX, task.NeighborChunk_PX, task.NeighborChunk_NZ, task.NeighborChunk_PZ);
                     if (context._mainChunkVoxels.Count > 0)
                     {
                         VoxelMeshBuilder.GenerateMesh(context._mainChunkVoxels, context.Vertices, context.Colors, context.AoValues, context.IsVoxelSolidForMesh);
                     }
+
                     if (!_meshDataPool.TryDequeue(out var meshData)) meshData = new FinalizedMeshData();
                     meshData.ChunkPosition = task.ChunkToProcess.Position;
+                    // Swap buffers
                     (meshData.Vertices, context.Vertices) = (context.Vertices, meshData.Vertices);
                     (meshData.Colors, context.Colors) = (context.Colors, meshData.Colors);
                     (meshData.AoValues, context.AoValues) = (context.AoValues, meshData.AoValues);
                     meshData.IsUpdate = task.IsUpdate;
+
                     _finalizedMeshQueue.Enqueue(meshData);
                     stopwatch.Stop();
                     PerformanceMonitor.RecordTiming(ThreadType.Meshing, stopwatch);
@@ -176,32 +198,27 @@ public class WorldManager : IDisposable
         Console.WriteLine("[MeshBuilderThread] Stopped.");
     }
 
-    private void TryQueueChunkRebuild(Vector3i chunkPos)
+    private void TryQueueChunkRebuild(Vector3i chunkPos, bool isUrgent) // <--- Добавил bool isUrgent
     {
-        // Блокируем словарь ОДИН раз для всей операции
         lock (_chunksLock)
         {
-            // Используем inline-объявление переменных с 'out'.
-            // Они будут в области видимости только внутри этого 'if'.
             if (_chunks.TryGetValue(chunkPos, out Chunk center) && center.IsLoaded &&
                 _chunks.TryGetValue(chunkPos + new Vector3i(-1, 0, 0), out Chunk n_nx) && n_nx.IsLoaded &&
                 _chunks.TryGetValue(chunkPos + new Vector3i(1, 0, 0), out Chunk n_px) && n_px.IsLoaded &&
                 _chunks.TryGetValue(chunkPos + new Vector3i(0, 0, -1), out Chunk n_nz) && n_nz.IsLoaded &&
                 _chunks.TryGetValue(chunkPos + new Vector3i(0, 0, 1), out Chunk n_pz) && n_pz.IsLoaded)
             {
-                // Поскольку мы находимся внутри 'if', мы на 100% уверены,
-                // что все переменные (center, n_nx и т.д.) получили значение.
-                // Вызываем метод немедленно.
-                QueueMeshAndPhysicsTasks(center, n_nx, n_px, n_nz, n_pz);
+                // Передаем isUrgent дальше
+                QueueMeshAndPhysicsTasks(center, n_nx, n_px, n_nz, n_pz, isUpdate: true, isUrgent: isUrgent);
             }
         }
-        // Вне 'lock' и 'if' ничего не происходит, переменные больше не доступны.
     }
 
-    private void QueueMeshAndPhysicsTasks(Chunk chunk, Chunk n_nx, Chunk n_px, Chunk n_nz, Chunk n_pz, bool isUpdate = false)
+    private void QueueMeshAndPhysicsTasks(Chunk chunk, Chunk n_nx, Chunk n_px, Chunk n_nz, Chunk n_pz, bool isUpdate, bool isUrgent)
     {
         if (chunk == null || !chunk.IsLoaded) return;
 
+        // --- MESHING ---
         if (!_meshTaskPool.TryDequeue(out var meshTask)) meshTask = new MeshGenerationTask();
         meshTask.ChunkToProcess = chunk;
         meshTask.IsUpdate = isUpdate;
@@ -209,15 +226,24 @@ public class WorldManager : IDisposable
         meshTask.NeighborChunk_PX = n_px;
         meshTask.NeighborChunk_NZ = n_nz;
         meshTask.NeighborChunk_PZ = n_pz;
-        _meshQueue.Add(meshTask);
 
+        if (isUrgent)
+            _urgentMeshQueue.Enqueue(meshTask); // КИДАЕМ В СРОЧНУЮ
+        else
+            _meshQueue.Add(meshTask);           // КИДАЕМ В ОБЫЧНУЮ
+
+        // --- PHYSICS ---
         if (!_physicsTaskPool.TryDequeue(out var physicsTask)) physicsTask = new PhysicsBuildTask();
         physicsTask.ChunkToProcess = chunk;
         physicsTask.NeighborChunk_NX = n_nx;
         physicsTask.NeighborChunk_PX = n_px;
         physicsTask.NeighborChunk_NZ = n_nz;
         physicsTask.NeighborChunk_PZ = n_pz;
-        _physicsBuildQueue.Add(physicsTask);
+
+        if (isUrgent)
+            _urgentPhysicsQueue.Enqueue(physicsTask); // КИДАЕМ В СРОЧНУЮ
+        else
+            _physicsBuildQueue.Add(physicsTask);      // КИДАЕМ В ОБЫЧНУЮ
     }
 
     private void PhysicsBuilderThreadLoop()
@@ -228,7 +254,21 @@ public class WorldManager : IDisposable
         {
             try
             {
-                if (_physicsBuildQueue.TryTake(out var task, 50))
+                PhysicsBuildTask task = null;
+                bool gotTask = false;
+
+                // 1. Проверка СРОЧНОЙ очереди
+                if (_urgentPhysicsQueue.TryDequeue(out task))
+                {
+                    gotTask = true;
+                }
+                // 2. Проверка ОБЫЧНОЙ очереди
+                else if (_physicsBuildQueue.TryTake(out task, 10))
+                {
+                    gotTask = true;
+                }
+
+                if (gotTask && task != null)
                 {
                     stopwatch.Restart();
                     if (task.ChunkToProcess == null || !task.ChunkToProcess.IsLoaded) { _physicsTaskPool.Enqueue(task); continue; }
@@ -370,14 +410,14 @@ public class WorldManager : IDisposable
             // --- НОВАЯ ЛОГИКА ---
             // 1. Пробуем перестроить сам новый чанк.
             //    (Это сработает, только если все его соседи УЖЕ были загружены)
-            TryQueueChunkRebuild(newChunk.Position);
+            TryQueueChunkRebuild(newChunk.Position, false);
 
             // 2. "Говорим" соседям: "Эй, я появился! Попробуйте перестроиться,
             //    возможно, вы ждали именно меня".
-            TryQueueChunkRebuild(newChunk.Position + new Vector3i(-1, 0, 0));
-            TryQueueChunkRebuild(newChunk.Position + new Vector3i(1, 0, 0));
-            TryQueueChunkRebuild(newChunk.Position + new Vector3i(0, 0, -1));
-            TryQueueChunkRebuild(newChunk.Position + new Vector3i(0, 0, 1));
+            TryQueueChunkRebuild(newChunk.Position + new Vector3i(-1, 0, 0), false);
+            TryQueueChunkRebuild(newChunk.Position + new Vector3i(1, 0, 0), false);
+            TryQueueChunkRebuild(newChunk.Position + new Vector3i(0, 0, -1), false);
+            TryQueueChunkRebuild(newChunk.Position + new Vector3i(0, 0, 1), false);
         }
     }
 
@@ -493,7 +533,7 @@ public class WorldManager : IDisposable
         // ВАЖНО: isUpdate здесь теряется, т.к. первичная сборка всегда false.
         // Если вам нужно различать их, логику нужно усложнять, но для 
         // первоначальной загрузки это не критично.
-        TryQueueChunkRebuild(chunk.Position);
+        TryQueueChunkRebuild(chunk.Position, true);
     }
 
     public void QueueDetachmentCheck(Chunk chunk, Vector3i localPosition)
@@ -539,7 +579,7 @@ public class WorldManager : IDisposable
     {
         Action<Vector3i> rebuildNeighbor = offset =>
         {
-            TryQueueChunkRebuild(chunkPos + offset);
+            TryQueueChunkRebuild(chunkPos + offset, true);
         };
 
         if (localVoxelPos.X == 0) rebuildNeighbor(new Vector3i(-1, 0, 0));
@@ -577,26 +617,58 @@ public class WorldManager : IDisposable
     {
         if (voxelCoords == null || voxelCoords.Count == 0) return;
 
-        // Этот метод вызывается, когда мы уже знаем точную мировую позицию центра.
-        // Координаты вокселей (voxelCoords) уже относительны.
-        // Поэтому здесь НЕ НУЖНО пересчитывать их заново.
-
         try
         {
-            var newObject = new VoxelObject(voxelCoords, material, this);
-            // Мы передаем уже готовые относительные координаты и точную мировую позицию.
-            var handle = PhysicsWorld.CreateVoxelObjectBody(voxelCoords, material, worldPosition, out var centerOfMass);
+            // 1. НОРМАЛИЗАЦИЯ КООРДИНАТ (Решение проблемы "скольжения по льду")
+            // Находим минимальные координаты (левый нижний угол всей конструкции)
+            var min = new Vector3i(int.MaxValue);
+            foreach (var v in voxelCoords)
+            {
+                min.X = Math.Min(min.X, v.X);
+                min.Y = Math.Min(min.Y, v.Y);
+                min.Z = Math.Min(min.Z, v.Z);
+            }
+
+            // Создаем список координат, сдвинутых к (0,0,0). 
+            // Теперь объект компактный, и инерция будет считаться правильно.
+            var normalizedCoords = new List<Vector3i>(voxelCoords.Count);
+            foreach (var v in voxelCoords)
+            {
+                normalizedCoords.Add(v - min);
+            }
+
+            // 2. КОРРЕКЦИЯ ПОЗИЦИИ (Решение проблемы "толчка" при спавне)
+            // worldPosition — это позиция, где был "центр" старого объекта (или куска).
+            // Но так как мы сдвинули координаты вокселей на 'min', нам нужно сдвинуть и мировую позицию на 'min'.
+            // Плюс, нужно учесть поворот! Но пока мы считаем, что объект создается без вращения (или мы его применим позже).
+            // В данном методе worldPosition приходит уже рассчитанным как "новая позиция куска", 
+            // поэтому здесь мы доверяем тому, что пришло на вход, но с поправкой на наш сдвиг min.
+
+            // ПРИМЕЧАНИЕ: В методе DestroyDynamicVoxelAt мы уже рассчитывали newWorldPosition. 
+            // Но там мы не учитывали, что внутри этого метода мы сделаем нормализацию (сдвиг на min).
+            // Чтобы не усложнять, давай создадим тело там, где просят, а Bepu само найдет центр масс.
+
+            // Создаем тело. PhysicsWorld вернет нам localCenterOfMass ОТНОСИТЕЛЬНО normalizedCoords.
+            var handle = PhysicsWorld.CreateVoxelObjectBody(normalizedCoords, material, worldPosition, out var localCenterOfMass);
 
             if (!PhysicsWorld.Simulation.Bodies.BodyExists(handle)) return;
 
-            newObject.InitializePhysics(handle, centerOfMass.ToOpenTK());
+            // 3. СОЗДАНИЕ VoxelObject
+            // Важно: мы передаем normalizedCoords!
+            var newObject = new VoxelObject(normalizedCoords, material, this);
+
+            // Передаем смещение центра масс. VoxelObject будет использовать его при отрисовке,
+            // сдвигая меш так, чтобы (0,0,0) меша совпал с (0,0,0) физического тела.
+            newObject.InitializePhysics(handle, localCenterOfMass.ToOpenTK());
+
             newObject.BuildMesh();
+
             _voxelObjectsToAdd.Enqueue(newObject);
             RegisterVoxelObjectBody(handle, newObject);
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[WorldManager] Error creating detached object from dynamic split: {ex.Message}\n{ex.StackTrace}");
+            Console.WriteLine($"[WorldManager] Error creating detached object: {ex.Message}\n{ex.StackTrace}");
         }
     }
 
@@ -604,41 +676,55 @@ public class WorldManager : IDisposable
     {
         if (originChunk == null || localCoords == null || localCoords.Count == 0) return;
 
-        // 1. Находим геометрический центр группы вокселей (в координатах чанка).
-        var centerSum = BepuVector3.Zero;
-        foreach (var voxel in localCoords)
+        // 1. Находим "опорную точку" (минимальные координаты), чтобы работать в целых числах
+        var min = new Vector3i(int.MaxValue);
+        foreach (var v in localCoords)
         {
-            centerSum += new BepuVector3(voxel.X, voxel.Y, voxel.Z);
+            min.X = Math.Min(min.X, v.X);
+            min.Y = Math.Min(min.Y, v.Y);
+            min.Z = Math.Min(min.Z, v.Z);
         }
-        var groupCenterInChunk = centerSum / localCoords.Count;
 
-        // 2. Создаем НОВЫЙ список координат, относительных к этому центру.
+        // 2. Создаем список координат относительно опорной точки (теперь они всегда корректные и >= 0)
         var relativeCoords = new List<Vector3i>(localCoords.Count);
         foreach (var coord in localCoords)
         {
-            var relativePos = new BepuVector3(coord.X, coord.Y, coord.Z) - groupCenterInChunk;
-            relativeCoords.Add(new Vector3i(
-                (int)Math.Round(relativePos.X),
-                (int)Math.Round(relativePos.Y),
-                (int)Math.Round(relativePos.Z)
-            ));
+            relativeCoords.Add(coord - min);
         }
 
-        // 3. Рассчитываем правильную МИРОВУЮ позицию для центра нового объекта.
-        //    Мировой_ориентир_чанка + смещение_центра_группы_внутри_чанка
-        // --- ВОТ ИСПРАВЛЕНИЕ ОШИБКИ ---
-        var newWorldPosition = (originChunk.Position * Chunk.ChunkSize).ToSystemNumerics() + groupCenterInChunk;
+        // 3. Вычисляем мировую позицию нашей опорной точки
+        // Позиция чанка + локальная позиция первого вокселя
+        var chunkWorldPos = (originChunk.Position * Chunk.ChunkSize).ToSystemNumerics();
+        var originWorldPos = chunkWorldPos + new BepuVector3(min.X, min.Y, min.Z);
 
-        // 4. Создаем физическое тело, используя НОВЫЕ ОТНОСИТЕЛЬНЫЕ координаты.
         try
         {
-            // VoxelObject теперь тоже должен хранить относительные координаты.
-            var newObject = new VoxelObject(relativeCoords, material, this);
-            var handle = PhysicsWorld.CreateVoxelObjectBody(relativeCoords, material, newWorldPosition, out var centerOfMass);
+            // 4. Создаем тело. PhysicsWorld вернет нам localCenterOfMass (смещение центра тяжести относительно нашей опорной точки)
+            // ВАЖНО: Мы передаем originWorldPos как предварительную позицию, но Bepu уточнит её внутри
+            var handle = PhysicsWorld.CreateVoxelObjectBody(relativeCoords, material, originWorldPos, out var localCenterOfMass);
 
             if (!PhysicsWorld.Simulation.Bodies.BodyExists(handle)) return;
 
-            newObject.InitializePhysics(handle, centerOfMass.ToOpenTK());
+            // 5. Корректируем позицию тела! 
+            // Физическое тело создается в (originWorldPos). 
+            // Но его центр масс смещен на localCenterOfMass.
+            // PhysicsWorld.CreateVoxelObjectBody внутри делает: new RigidPose(initialPosition)
+            // Нам нужно, чтобы визуальный объект знал, где его центр.
+
+            // Примечание: Твой PhysicsWorld.CreateVoxelObjectBody уже принимает initialPosition.
+            // Но так как localCenterOfMass вычисляется внутри CompoundBuilder, 
+            // Bepu автоматически считает позицию тела как Центр Масс.
+
+            // Поэтому нам нужно сместить само тело в точку, где находится реальный центр масс.
+            var realBodyPosition = originWorldPos + localCenterOfMass;
+
+            // Обновляем позицию тела в симуляции
+            var bodyRef = PhysicsWorld.Simulation.Bodies.GetBodyReference(handle);
+            bodyRef.Pose.Position = realBodyPosition;
+
+            // 6. Создаем VoxelObject
+            var newObject = new VoxelObject(relativeCoords, material, this);
+            newObject.InitializePhysics(handle, localCenterOfMass.ToOpenTK());
             newObject.BuildMesh();
             _voxelObjectsToAdd.Enqueue(newObject);
             RegisterVoxelObjectBody(handle, newObject);
@@ -700,6 +786,8 @@ public class WorldManager : IDisposable
         return result;
     }
 
+    // Файл: World/WorldManager.cs
+
     private void DestroyDynamicVoxelAt(VoxelObject targetObject, BepuVector3 worldHitLocation, BepuVector3 worldHitNormal)
     {
         if (!PhysicsWorld.Simulation.Bodies.BodyExists(targetObject.BodyHandle))
@@ -707,40 +795,85 @@ public class WorldManager : IDisposable
             QueueForRemoval(targetObject);
             return;
         }
+
+        // 1. Получаем позицию и ориентацию тела
         var pose = PhysicsWorld.GetPose(targetObject.BodyHandle);
         var invOrientation = System.Numerics.Quaternion.Inverse(pose.Orientation);
-        var localHitPoint = BepuVector3.Transform(worldHitLocation - pose.Position, invOrientation) + targetObject.LocalCenterOfMass.ToSystemNumerics();
+
+        // 2. Переводим точку попадания и нормаль в ЛОКАЛЬНОЕ пространство тела (относительно Центра Масс)
+        var localHitPointRelToCoM = BepuVector3.Transform(worldHitLocation - pose.Position, invOrientation);
         var localNormal = BepuVector3.Transform(worldHitNormal, invOrientation);
-        var voxelToRemove = new Vector3i((int)Math.Floor(localHitPoint.X), (int)Math.Floor(localHitPoint.Y), (int)Math.Floor(localHitPoint.Z));
-        if (localNormal.X < -0.9f) voxelToRemove.X--;
-        if (localNormal.Y < -0.9f) voxelToRemove.Y--;
-        if (localNormal.Z < -0.9f) voxelToRemove.Z--;
-        if (!targetObject.VoxelCoordinates.Contains(voxelToRemove)) return;
+
+        // 3. Переводим из "пространства Центра Масс" в "пространство Воксельной Сетки"
+        // (Возвращаем смещение, которое мы получили при создании тела)
+        var gridSpacePoint = localHitPointRelToCoM + targetObject.LocalCenterOfMass.ToSystemNumerics();
+
+        // 4. ГЛАВНОЕ ИСПРАВЛЕНИЕ:
+        // Сдвигаем точку попадания немного "вглубь" объекта против нормали.
+        // Это гарантирует, что при попадании в грань мы окажемся ВНУТРИ нужного блока,
+        // и ошибки округления (0.999 vs 1.001) перестанут мешать.
+        var pointInsideVoxel = gridSpacePoint - localNormal * 0.05f;
+
+        // 5. Теперь можно безопасно округлять вниз
+        var voxelToRemove = new Vector3i(
+            (int)Math.Floor(pointInsideVoxel.X),
+            (int)Math.Floor(pointInsideVoxel.Y),
+            (int)Math.Floor(pointInsideVoxel.Z)
+        );
+
+        // --- Дальше старая логика проверки и разделения островов ---
+
+        if (!targetObject.VoxelCoordinates.Contains(voxelToRemove))
+        {
+            // Для отладки можно раскомментировать:
+            // Console.WriteLine($"Missed voxel! Hit: {gridSpacePoint}, Inside: {pointInsideVoxel}, Calc: {voxelToRemove}");
+            return;
+        }
+
         var remainingVoxels = new List<Vector3i>(targetObject.VoxelCoordinates);
         remainingVoxels.Remove(voxelToRemove);
+
         if (remainingVoxels.Count == 0)
         {
             QueueForRemoval(targetObject);
             return;
         }
+
         var newVoxelIslands = FindConnectedVoxelIslands(remainingVoxels);
         if (newVoxelIslands.Count == 1)
         {
+            // Если остров остался один - просто обновляем текущее тело
             targetObject.VoxelCoordinates.Remove(voxelToRemove);
             targetObject.RebuildMeshAndPhysics(PhysicsWorld);
         }
         else
         {
             var originalMaterial = targetObject.Material;
-            var originalPose = pose;
+            var originalPose = pose; // Позиция и поворот текущего (ломаемого) объекта
+
             foreach (var island in newVoxelIslands)
             {
-                var localIslandCenter = BepuVector3.Zero;
-                foreach (var voxel in island) localIslandCenter += new BepuVector3(voxel.X, voxel.Y, voxel.Z);
-                localIslandCenter /= island.Count;
-                var offsetFromOldCoM = localIslandCenter - targetObject.LocalCenterOfMass.ToSystemNumerics();
+                // 1. Считаем геометрический центр острова в СТАРЫХ локальных координатах
+                var islandCenterSum = BepuVector3.Zero;
+                foreach (var voxel in island) islandCenterSum += new BepuVector3(voxel.X, voxel.Y, voxel.Z);
+                var islandCenter = islandCenterSum / island.Count;
+
+                // 2. Считаем, где этот центр находится в МИРЕ
+                // (Смещение центра острова от Центра Масс старого объекта)
+                // targetObject.LocalCenterOfMass хранит центр масс старого объекта в его координатах.
+
+                // Вектор от CoM старого объекта до центра нового острова
+                var offsetFromOldCoM = islandCenter - targetObject.LocalCenterOfMass.ToSystemNumerics();
+
+                // Вращаем этот вектор согласно повороту старого объекта
                 var rotatedOffset = BepuVector3.Transform(offsetFromOldCoM, originalPose.Orientation);
+
+                // Получаем абсолютную мировую позицию, где должен появиться центр нового острова
                 var newWorldPosition = originalPose.Position + rotatedOffset;
+
+                // 3. Спавним!
+                // Метод CreateDetachedVoxelObject внутри себя сам нормализует координаты (сдвинет к 0,0,0)
+                // и создаст физическое тело с центром масс примерно в newWorldPosition.
                 CreateDetachedVoxelObject(island, originalMaterial, newWorldPosition);
             }
             QueueForRemoval(targetObject);

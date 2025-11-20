@@ -15,6 +15,7 @@ public class Game : GameWindow
     private PhysicsWorld _physicsWorld;
     private WorldManager _worldManager;
     private PlayerController _playerController;
+    private Crosshair _crosshair;
 
     private bool _isInitialized = false;
 
@@ -80,6 +81,10 @@ public class Game : GameWindow
 
         //Debug overlay
         _debugOverlay = new DebugOverlay(Size.X, Size.Y);
+
+        // Добавляем инициализацию прицела
+        _crosshair = new Crosshair(Size.X, Size.Y);
+
         _isInitialized = true;
 
         Console.WriteLine("[Game] Initialization complete.");
@@ -163,19 +168,21 @@ public class Game : GameWindow
     protected override void OnRenderFrame(FrameEventArgs e)
     {
         base.OnRenderFrame(e);
-
         if (!_isInitialized) return;
 
         GL.Clear(ClearBufferMask.ColorBufferBit | ClearBufferMask.DepthBufferBit);
 
+        // 1. Рендерим 3D мир
         _worldManager.Render(_shader, _camera.GetViewMatrix(), _camera.GetProjectionMatrix());
 
-        // --- НОВЫЙ КОД ДЛЯ РЕНДЕРИНГА ОВЕРЛЕЯ ---
+        // 2. Рендерим прицел (всегда по центру)
+        _crosshair.Render();
+
+        // 3. Рендерим DebugOverlay (если включен)
         if (_showDebugOverlay)
         {
             _debugOverlay.Render(_debugLines);
         }
-        // --------------------------------------
 
         SwapBuffers();
     }
@@ -188,6 +195,8 @@ public class Game : GameWindow
 
         // --- ОБНОВЛЯЕМ РАЗМЕР ДЛЯ ОВЕРЛЕЯ ---
         _debugOverlay?.UpdateScreenSize(Size.X, Size.Y);
+
+        _crosshair?.UpdateSize(Size.X, Size.Y);
     }
 
     protected override void OnUnload()
@@ -200,6 +209,7 @@ public class Game : GameWindow
         _physicsWorld?.Dispose();
         _shader?.Dispose();
         _debugOverlay?.Dispose();
+        _crosshair?.Dispose();
 
         Console.WriteLine("[Game] Resources released.");
     }

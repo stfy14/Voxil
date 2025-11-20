@@ -1,233 +1,252 @@
-﻿// /World/Meshing/VoxelMeshBuilder.cs - REFACTORED
+﻿// /World/Meshing/VoxelMeshBuilder.cs - FAST ARRAY VERSION
 using OpenTK.Mathematics;
+using System;
 using System.Collections.Generic;
 
-/// <summary>
-/// Специализированный класс для создания мешей с правильным AO и culling'ом граней
-/// </summary>
 public static class VoxelMeshBuilder
 {
-    /// <summary>
-    /// Генерирует меш для набора вокселей с учётом видимости граней и AO
-    /// </summary>
-    /// <param name="voxels">Словарь локальных координат и материалов вокселей</param>
-    /// <param name="vertices">Выходной список вершин</param>
-    /// <param name="colors">Выходной список цветов</param>
-    /// <param name="aoValues">Выходной список значений ambient occlusion</param>
-    /// <param name="isVoxelSolid">Функция проверки, является ли воксель твёрдым (для AO и culling)</param>
     public static void GenerateMesh(
         IDictionary<Vector3i, MaterialType> voxels,
-        // Меняем 'out List<float>' на 'List<float>'
         List<float> vertices,
         List<float> colors,
         List<float> aoValues,
-        System.Func<Vector3i, bool> isVoxelSolid = null)
+        Func<Vector3i, bool> isVoxelSolid = null)
     {
         if (voxels.Count == 0) return;
 
-        // Если функция не передана, используем только локальный словарь
-        isVoxelSolid ??= pos => voxels.ContainsKey(pos);
+        // --- ЭТАП 1: Подготовка данных (Оптимизация) ---
 
-        foreach (var pair in voxels)
+        // 1. Находим границы
+        var min = new Vector3i(int.MaxValue);
+        var max = new Vector3i(int.MinValue);
+
+        foreach (var v in voxels.Keys)
         {
-            var coord = pair.Key;
-            var material = pair.Value;
-            var blockColor = MaterialRegistry.GetColor(material);
+            if (v.X < min.X) min.X = v.X;
+            if (v.Y < min.Y) min.Y = v.Y;
+            if (v.Z < min.Z) min.Z = v.Z;
+            if (v.X > max.X) max.X = v.X;
+            if (v.Y > max.Y) max.Y = v.Y;
+            if (v.Z > max.Z) max.Z = v.Z;
+        }
 
-            // Проходим по всем 6 граням куба
-            for (int faceIndex = 0; faceIndex < 6; faceIndex++)
+        // Размеры объема с учетом паддинга (1 блок воздуха вокруг)
+        // +1 для инклюзивности max, +2 для паддинга с двух сторон
+        int sizeX = (max.X - min.X) + 3;
+        int sizeY = (max.Y - min.Y) + 3;
+        int sizeZ = (max.Z - min.Z) + 3;
+
+        // Создаем быстрый плоский массив (симуляция 3D)
+        // Это намного быстрее словаря
+        var volume = new MaterialType?[sizeX * sizeY * sizeZ];
+
+        // Заполняем массив данными из словаря
+        // Индекс [1, 1, 1] в массиве соответствует min в мире
+        foreach (var kvp in voxels)
+        {
+            int lx = kvp.Key.X - min.X + 1;
+            int ly = kvp.Key.Y - min.Y + 1;
+            int lz = kvp.Key.Z - min.Z + 1;
+
+            volume[lx + sizeX * (ly + sizeY * lz)] = kvp.Value;
+        }
+
+        // Вспомогательная функция для чтения из быстрого массива
+        // Возвращает null, если пусто
+        MaterialType? GetMat(int x, int y, int z)
+        {
+            return volume[x + sizeX * (y + sizeY * z)];
+        }
+
+        // --- ЭТАП 2: Алгоритм Greedy Meshing (без словаря) ---
+
+        // Размеры массива по осям для цикла
+        int[] dims = { sizeX, sizeY, sizeZ };
+
+        // Проходим по 3 осям (Dimensions)
+        for (int d = 0; d < 3; d++)
+        {
+            int u = (d + 1) % 3;
+            int v = (d + 2) % 3;
+
+            // Вектора для навигации внутри массива
+            int[] x = { 0, 0, 0 };
+            int[] q = { 0, 0, 0 };
+            q[d] = 1;
+
+            int uSize = dims[u];
+            int vSize = dims[v];
+            var mask = new MaterialType?[uSize * vSize];
+
+            // Проходим по главной оси (Depth) внутри границ массива
+            // (от 0 до dims[d]-2, так как мы сравниваем x и x+1)
+            for (x[d] = 0; x[d] < dims[d] - 1; x[d]++)
             {
-                Vector3i neighborPos = coord + FaceDirections[faceIndex];
-
-                // ОПТИМИЗАЦИЯ: Рендерим грань только если сосед не твёрдый
-                if (!isVoxelSolid(neighborPos))
+                // Два прохода: Back Face и Front Face
+                for (int faceDir = 0; faceDir < 2; faceDir++)
                 {
-                    AddFace(vertices, colors, aoValues, coord, (Face)faceIndex, blockColor, isVoxelSolid);
+                    bool lookPositive = (faceDir == 1);
+
+                    // A. Заполняем маску (БЕЗ TryGetValue, просто массив)
+                    for (int j = 0; j < vSize; j++)
+                    {
+                        for (int i = 0; i < uSize; i++)
+                        {
+                            x[u] = i;
+                            x[v] = j;
+
+                            // Читаем напрямую из массива volume
+                            // current = x
+                            // next = x + q
+                            MaterialType? matCurr = GetMat(x[0], x[1], x[2]);
+                            MaterialType? matNext = GetMat(x[0] + q[0], x[1] + q[1], x[2] + q[2]);
+
+                            bool hasCurrent = matCurr.HasValue;
+                            bool hasNext = matNext.HasValue;
+
+                            MaterialType? faceMat = null;
+
+                            if (lookPositive)
+                            {
+                                // Front Face: Current есть, Next нет
+                                if (hasCurrent && !hasNext) faceMat = matCurr;
+                            }
+                            else
+                            {
+                                // Back Face: Current нет, Next есть
+                                if (!hasCurrent && hasNext) faceMat = matNext;
+                            }
+
+                            mask[i + j * uSize] = faceMat;
+                        }
+                    }
+
+                    // B. Greedy Meshing (тот же самый надежный алгоритм)
+                    for (int j = 0; j < vSize; j++)
+                    {
+                        for (int i = 0; i < uSize;)
+                        {
+                            int index = i + j * uSize;
+                            if (mask[index] != null)
+                            {
+                                var material = mask[index].Value;
+                                int width = 1;
+                                int height = 1;
+
+                                // Ширина
+                                while (i + width < uSize && mask[index + width] == material)
+                                {
+                                    width++;
+                                }
+
+                                // Высота
+                                bool done = false;
+                                while (j + height < vSize)
+                                {
+                                    for (int k = 0; k < width; k++)
+                                    {
+                                        if (mask[(i + k) + (j + height) * uSize] != material)
+                                        {
+                                            done = true;
+                                            break;
+                                        }
+                                    }
+                                    if (done) break;
+                                    height++;
+                                }
+
+                                // C. Генерация Квада (Конвертация обратно в мировые координаты)
+                                // Наши x[] сейчас в локальных координатах массива (с учетом паддинга +1)
+                                // Нужно вернуть их в мировые: world = local - 1 + min
+
+                                Vector3i worldPos = new Vector3i();
+                                worldPos[d] = x[d] - 1 + min[d];
+                                worldPos[u] = i - 1 + min[u]; // i соответствует x[u]
+                                worldPos[v] = j - 1 + min[v]; // j соответствует x[v]
+
+                                AddQuad(vertices, colors, aoValues,
+                                        worldPos,
+                                        width, height,
+                                        d, u, v,
+                                        lookPositive,
+                                        material);
+
+                                // Очистка
+                                for (int l = 0; l < height; l++)
+                                {
+                                    for (int k = 0; k < width; k++)
+                                    {
+                                        mask[(i + k) + (j + l) * uSize] = null;
+                                    }
+                                }
+
+                                i += width;
+                            }
+                            else
+                            {
+                                i++;
+                            }
+                        }
+                    }
                 }
             }
         }
     }
 
-    #region Face and Mesh Generation
-
-    private enum Face { Top, Bottom, Right, Left, Front, Back }
-
-    private static readonly Vector3i[] FaceDirections = {
-        new(0, 1, 0),   // Top
-        new(0, -1, 0),  // Bottom
-        new(1, 0, 0),   // Right
-        new(-1, 0, 0),  // Left
-        new(0, 0, 1),   // Front
-        new(0, 0, -1)   // Back
-    };
-
-    // Вершины куба (центр в 0,0,0, размер 1x1x1)
-    private static readonly Vector3[] VoxelCorners = {
-        new(-0.5f, -0.5f,  0.5f), // 0
-        new( 0.5f, -0.5f,  0.5f), // 1
-        new( 0.5f,  0.5f,  0.5f), // 2
-        new(-0.5f,  0.5f,  0.5f), // 3
-        new(-0.5f, -0.5f, -0.5f), // 4
-        new( 0.5f, -0.5f, -0.5f), // 5
-        new( 0.5f,  0.5f, -0.5f), // 6
-        new(-0.5f,  0.5f, -0.5f)  // 7
-    };
-
-    // Индексы вершин для каждой грани (порядок важен для правильной ориентации нормалей)
-    private static readonly int[][] FaceCornerIndices = {
-        new[] { 3, 2, 6, 7 }, // Top
-        new[] { 0, 4, 5, 1 }, // Bottom
-        new[] { 1, 5, 6, 2 }, // Right
-        new[] { 4, 0, 3, 7 }, // Left
-        new[] { 0, 1, 2, 3 }, // Front
-        new[] { 5, 4, 7, 6 }  // Back
-    };
-
-    // Соседи для расчёта AO: для каждой грани, для каждой из 4 вершин - 3 соседа (side1, side2, corner)
-    private static readonly Vector3i[][] AONeighbors = {
-        // Top face (Y+)
-        new Vector3i[] {
-            // Вершина 0 (3): -X, +Z, corner
-            new(-1, 1, 0), new(0, 1, 1), new(-1, 1, 1),
-            // Вершина 1 (2): +X, +Z, corner
-            new(1, 1, 0), new(0, 1, 1), new(1, 1, 1),
-            // Вершина 2 (6): +X, -Z, corner
-            new(1, 1, 0), new(0, 1, -1), new(1, 1, -1),
-            // Вершина 3 (7): -X, -Z, corner
-            new(-1, 1, 0), new(0, 1, -1), new(-1, 1, -1)
-        },
-        // Bottom face (Y-)
-        new Vector3i[] {
-            new(-1, -1, 0), new(0, -1, 1), new(-1, -1, 1),
-            new(-1, -1, 0), new(0, -1, -1), new(-1, -1, -1),
-            new(1, -1, 0), new(0, -1, -1), new(1, -1, -1),
-            new(1, -1, 0), new(0, -1, 1), new(1, -1, 1)
-        },
-        // Right face (X+)
-        new Vector3i[] {
-            new(1, -1, 0), new(1, 0, 1), new(1, -1, 1),
-            new(1, -1, 0), new(1, 0, -1), new(1, -1, -1),
-            new(1, 1, 0), new(1, 0, -1), new(1, 1, -1),
-            new(1, 1, 0), new(1, 0, 1), new(1, 1, 1)
-        },
-        // Left face (X-)
-        new Vector3i[] {
-            new(-1, -1, 0), new(-1, 0, -1), new(-1, -1, -1),
-            new(-1, -1, 0), new(-1, 0, 1), new(-1, -1, 1),
-            new(-1, 1, 0), new(-1, 0, 1), new(-1, 1, 1),
-            new(-1, 1, 0), new(-1, 0, -1), new(-1, 1, -1)
-        },
-        // Front face (Z+)
-        new Vector3i[] {
-            new(-1, 0, 1), new(0, -1, 1), new(-1, -1, 1),
-            new(1, 0, 1), new(0, -1, 1), new(1, -1, 1),
-            new(1, 0, 1), new(0, 1, 1), new(1, 1, 1),
-            new(-1, 0, 1), new(0, 1, 1), new(-1, 1, 1)
-        },
-        // Back face (Z-)
-        new Vector3i[] {
-            new(1, 0, -1), new(0, -1, -1), new(1, -1, -1),
-            new(-1, 0, -1), new(0, -1, -1), new(-1, -1, -1),
-            new(-1, 0, -1), new(0, 1, -1), new(-1, 1, -1),
-            new(1, 0, -1), new(0, 1, -1), new(1, 1, -1)
-        }
-    };
-
-    private static void AddFace(
-        List<float> vertices,
-        List<float> colors,
-        List<float> aoValues,
-        Vector3i localPos,
-        Face face,
-        (float r, float g, float b) color,
-        System.Func<Vector3i, bool> isVoxelSolid)
+    private static void AddQuad(
+        List<float> vertices, List<float> colors, List<float> aoValues,
+        Vector3i start, int width, int height,
+        int dAxis, int uAxis, int vAxis,
+        bool isPositiveFace,
+        MaterialType material)
     {
-        int faceIndex = (int)face;
-        var cornerIndices = FaceCornerIndices[faceIndex];
-        var aoNeighbors = AONeighbors[faceIndex];
+        var color = MaterialRegistry.GetColor(material);
 
-        // Вычисляем AO для каждой из 4 вершин грани
-        float[] cornerAO = new float[4];
-        for (int i = 0; i < 4; i++)
+        var du = new Vector3(0, 0, 0); du[uAxis] = width;
+        var dv = new Vector3(0, 0, 0); dv[vAxis] = height;
+
+        Vector3 v0 = new Vector3(start.X, start.Y, start.Z);
+
+        // Сдвиг плоскости на границу вокселя
+        v0[dAxis] += 1.0f;
+
+        Vector3 v1 = v0 + du;
+        Vector3 v2 = v0 + du + dv;
+        Vector3 v3 = v0 + dv;
+
+        // AO пока 1.0
+        float ao = 1.0f;
+
+        if (isPositiveFace)
         {
-            int offset = i * 3;
-            cornerAO[i] = CalculateVertexAO(
-                localPos + aoNeighbors[offset],     // side1
-                localPos + aoNeighbors[offset + 1], // side2
-                localPos + aoNeighbors[offset + 2], // corner
-                isVoxelSolid
-            );
+            AddVertex(vertices, colors, aoValues, v0, color, ao);
+            AddVertex(vertices, colors, aoValues, v1, color, ao);
+            AddVertex(vertices, colors, aoValues, v2, color, ao);
+
+            AddVertex(vertices, colors, aoValues, v0, color, ao);
+            AddVertex(vertices, colors, aoValues, v2, color, ao);
+            AddVertex(vertices, colors, aoValues, v3, color, ao);
         }
+        else
+        {
+            AddVertex(vertices, colors, aoValues, v0, color, ao);
+            AddVertex(vertices, colors, aoValues, v3, color, ao);
+            AddVertex(vertices, colors, aoValues, v2, color, ao);
 
-        // Добавляем два треугольника для квада (правильная ориентация для предотвращения flickering)
-        // ВАЖНО: Порядок вершин должен быть против часовой стрелки (CCW) для front face
-        AddTriangle(vertices, colors, aoValues, localPos, cornerIndices, cornerAO, color, 0, 1, 2);
-        AddTriangle(vertices, colors, aoValues, localPos, cornerIndices, cornerAO, color, 0, 2, 3);
+            AddVertex(vertices, colors, aoValues, v0, color, ao);
+            AddVertex(vertices, colors, aoValues, v2, color, ao);
+            AddVertex(vertices, colors, aoValues, v1, color, ao);
+        }
     }
 
-    private static void AddTriangle(
-        List<float> vertices,
-        List<float> colors,
-        List<float> aoValues,
-        Vector3i localPos,
-        int[] cornerIndices,
-        float[] cornerAO,
-        (float r, float g, float b) color,
-        int idx0, int idx1, int idx2)
+    private static void AddVertex(List<float> vertices, List<float> colors, List<float> aoValues, Vector3 pos, (float r, float g, float b) color, float ao)
     {
-        AddVertex(vertices, colors, aoValues, localPos + VoxelCorners[cornerIndices[idx0]], color, cornerAO[idx0]);
-        AddVertex(vertices, colors, aoValues, localPos + VoxelCorners[cornerIndices[idx1]], color, cornerAO[idx1]);
-        AddVertex(vertices, colors, aoValues, localPos + VoxelCorners[cornerIndices[idx2]], color, cornerAO[idx2]);
-    }
-
-    /// <summary>
-    /// Вычисляет ambient occlusion для вершины на основе окружающих блоков
-    /// </summary>
-    private static float CalculateVertexAO(
-        Vector3i side1,
-        Vector3i side2,
-        Vector3i corner,
-        System.Func<Vector3i, bool> isVoxelSolid)
-    {
-        bool s1 = isVoxelSolid(side1);
-        bool s2 = isVoxelSolid(side2);
-        bool c = isVoxelSolid(corner);
-
-        // Если оба соседа твёрдые - максимальное затенение
-        if (s1 && s2)
-            return 0.6f;
-
-        // Иначе затенение зависит от количества заблокированных соседей
-        int blocked = (s1 ? 1 : 0) + (s2 ? 1 : 0) + (c ? 1 : 0);
-
-        // Формула AO: чем больше заблокировано - тем темнее
-        return 1.0f - (blocked * 0.10f);
-    }
-
-    private static void AddVertex(
-    List<float> vertices,
-    List<float> colors,
-    List<float> aoValues,
-    Vector3 pos,
-    (float r, float g, float b) color,
-    float ao)
-    {
-        // --- OPTIMIZATION ---
-        // Было: vertices.AddRange(new[] { pos.X + 0.5f, pos.Y + 0.5f, pos.Z + 0.5f });
-        // Стало:
-        vertices.Add(pos.X + 0.5f);
-        vertices.Add(pos.Y + 0.5f);
-        vertices.Add(pos.Z + 0.5f);
-
-        // Было: colors.AddRange(new[] { color.r, color.g, color.b });
-        // Стало:
+        vertices.Add(pos.X);
+        vertices.Add(pos.Y);
+        vertices.Add(pos.Z);
         colors.Add(color.r);
         colors.Add(color.g);
         colors.Add(color.b);
-
         aoValues.Add(ao);
     }
-
-
-    #endregion
 }

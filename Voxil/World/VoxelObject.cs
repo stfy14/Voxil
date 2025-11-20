@@ -78,30 +78,51 @@ public class VoxelObject : IDisposable
             return;
         }
 
+        // 1. Сохраняем СТАРЫЙ центр масс перед обновлением
+        var oldCoM = LocalCenterOfMass;
+
+        // 2. Генерируем новый меш
         var voxelsDict = new Dictionary<Vector3i, MaterialType>();
         foreach (var coord in VoxelCoordinates)
         {
             voxelsDict[coord] = Material;
         }
 
-        // --- ИЗМЕНЕНИЯ ЗДЕСЬ ---
-        // 1. Создаем списки ПЕРЕД вызовом метода
         var vertices = new List<float>();
         var colors = new List<float>();
         var aoValues = new List<float>();
 
-        // 2. Вызываем метод, передавая ему списки БЕЗ ключевого слова out
-        VoxelMeshBuilder.GenerateMesh(voxelsDict,
-            vertices, colors, aoValues,
-            localPos => voxelsDict.ContainsKey(localPos));
-        // -------------------------
+        VoxelMeshBuilder.GenerateMesh(voxelsDict, vertices, colors, aoValues, localPos => voxelsDict.ContainsKey(localPos));
 
         _renderer?.UpdateMesh(vertices, colors, aoValues);
 
         try
         {
-            var newHandle = physicsWorld.UpdateVoxelObjectBody(BodyHandle, VoxelCoordinates, Material, out var newCenterOfMass);
-            LocalCenterOfMass = newCenterOfMass.ToOpenTK();
+            // 3. Обновляем физику и получаем НОВЫЙ центр масс
+            var newHandle = physicsWorld.UpdateVoxelObjectBody(BodyHandle, VoxelCoordinates, Material, out var newCenterOfMassBepu);
+            var newCoM = newCenterOfMassBepu.ToOpenTK();
+
+            // 4. --- ГЛАВНОЕ ИСПРАВЛЕНИЕ ---
+            // Рассчитываем, насколько сдвинулся центр масс в локальных координатах
+            var shiftLocal = newCoM - oldCoM;
+
+            // Получаем текущую ориентацию тела
+            var bodyRef = physicsWorld.Simulation.Bodies.GetBodyReference(BodyHandle);
+            var orientation = bodyRef.Pose.Orientation;
+            var tkOrientation = new Quaternion(orientation.X, orientation.Y, orientation.Z, orientation.W);
+
+            // Переводим сдвиг в мировые координаты (учитываем поворот объекта)
+            var shiftWorld = Vector3.Transform(shiftLocal, tkOrientation);
+
+            // Сдвигаем САМО ТЕЛО на этот вектор.
+            // Это компенсирует изменение формы, и блоки останутся на месте визуально и физически.
+            bodyRef.Pose.Position += shiftWorld.ToSystemNumerics();
+
+            // Если тело спало, разбудим его, чтобы физика подхватила изменения
+            bodyRef.Awake = true;
+
+            // 5. Сохраняем новые данные
+            LocalCenterOfMass = newCoM;
             BodyHandle = newHandle;
         }
         catch (Exception ex)
@@ -114,7 +135,12 @@ public class VoxelObject : IDisposable
     {
         if (_isDisposed || _renderer == null) return;
 
-        Matrix4 model = Matrix4.CreateTranslation(-LocalCenterOfMass) *
+        // Сначала сдвигаем меш НАЗАД на величину центра масс (-LocalCenterOfMass).
+        // Это совмещает визуальный центр масс с точкой (0,0,0).
+        // Затем вращаем.
+        // Затем переносим в мировую позицию тела.
+
+        Matrix4 model = Matrix4.CreateTranslation(-LocalCenterOfMass) * // <--- Самое важное
                         Matrix4.CreateFromQuaternion(Rotation) *
                         Matrix4.CreateTranslation(Position);
 

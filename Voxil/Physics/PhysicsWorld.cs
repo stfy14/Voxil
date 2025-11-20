@@ -149,7 +149,7 @@ public class PhysicsWorld : IDisposable
                 float voxelMass = MaterialRegistry.Get(materialType).MassPerVoxel;
                 foreach (var coord in voxelCoordinates)
                 {
-                    var pose = new RigidPose(new Vector3(coord.X, coord.Y, coord.Z));
+                    var pose = new RigidPose(new Vector3(coord.X + 0.5f, coord.Y + 0.5f, coord.Z + 0.5f));
                     compoundBuilder.Add(boxShape, pose, voxelMass);
                 }
 
@@ -178,7 +178,7 @@ public class PhysicsWorld : IDisposable
                     new RigidPose(initialPosition),
                     inertia,
                     new CollidableDescription(compoundShapeIndex, 0.1f),
-                    new BodyActivityDescription(1.0f)
+                    new BodyActivityDescription(0.01f)
                 );
                 return Simulation.Bodies.Add(bodyDescription);
             }
@@ -215,7 +215,7 @@ public class PhysicsWorld : IDisposable
                 float voxelMass = MaterialRegistry.Get(materialType).MassPerVoxel;
                 foreach (var coord in voxelCoordinates)
                 {
-                    var pose = new RigidPose(new Vector3(coord.X, coord.Y, coord.Z));
+                    var pose = new RigidPose(new Vector3(coord.X + 0.5f, coord.Y + 0.5f, coord.Z + 0.5f));
                     compoundBuilder.Add(boxShape, pose, voxelMass);
                 }
 
