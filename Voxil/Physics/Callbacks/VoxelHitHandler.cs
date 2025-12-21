@@ -18,13 +18,17 @@ public struct VoxelHitHandler : IRayHitHandler
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public bool AllowTest(CollidableReference collidable)
     {
-        // Не проверяем столкновение с игроком
+        // Не проверяем столкновение с самим игроком
         if (collidable.Mobility == CollidableMobility.Dynamic && collidable.BodyHandle == PlayerBodyHandle)
         {
             return false;
         }
-        // Пропускаем "спящие" тела, если не хотим их будить
-        return collidable.Mobility == CollidableMobility.Static || Simulation.Bodies.GetBodyReference(collidable.BodyHandle).Awake;
+
+        // --- УДАЛЯЕМ ПРОВЕРКУ НА "СПЯЩИЕ" ТЕЛА ---
+        // Старый код: return collidable.Mobility == CollidableMobility.Static || Simulation.Bodies.GetBodyReference(collidable.BodyHandle).Awake;
+
+        // Новый код: просто разрешаем тест для всех остальных объектов.
+        return true;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

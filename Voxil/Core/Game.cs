@@ -27,6 +27,7 @@ public class Game : GameWindow
 
         GL.ClearColor(0.1f, 0.3f, 0.5f, 1.0f);
         GL.Enable(EnableCap.DepthTest);
+        GL.Enable(EnableCap.CullFace);
         GL.CullFace(TriangleFace.Back);
 
         try
@@ -40,24 +41,33 @@ public class Game : GameWindow
             return;
         }
 
-        // 1. Создаем физический мир. Simulation создается внутри конструктора.
+        // 1. Создаем физический мир
         _physicsWorld = new PhysicsWorld();
 
-        // 2. Создаем менеджер мира.
-        _worldManager = new WorldManager(_physicsWorld);
+        // 2. ИСПРАВЛЕНИЕ: Безопасная стартовая позиция - на уровне земли + небольшой запас
+        var startPosition = new System.Numerics.Vector3(8f, 35f, 8f); // Снизили с 55 до 35
 
-        // 3. Определяем стартовую позицию.
-        var startPosition = new System.Numerics.Vector3(8f, 55f, 8f);
-
-        // 4. Создаем камеру и игрока. Конструктор PlayerController теперь работает без ошибок.
+        // 3. Создаем камеру и ИГРОКА
         _camera = new Camera(VectorExtensions.ToOpenTK(startPosition), Size.X / (float)Size.Y);
         _playerController = new PlayerController(_physicsWorld, _camera, startPosition);
 
-        // 5. Сообщаем физическому миру, какой BodyHandle у игрока,
-        //    чтобы он записал его в общее состояние PlayerState.
+        Console.WriteLine($"[Game] PlayerController.BodyHandle = {_playerController.BodyHandle.Value}");
+
+        // 4. Сообщаем физике о BodyHandle игрока
         _physicsWorld.SetPlayerHandle(_playerController.BodyHandle);
 
-        // 6. Создаем менеджер ввода.
+        // 5. Создаем WorldManager, передавая ему ссылку на игрока
+        _worldManager = new WorldManager(_physicsWorld, _playerController);
+
+        // 6. КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Принудительно генерируем стартовые чанки ДО первого кадра
+        Console.WriteLine("[Game] Форсируем генерацию стартовых чанков...");
+        for (int i = 0; i < 100; i++) // Обрабатываем достаточно чанков
+        {
+            _worldManager.Update(0.016f); // Симулируем кадр для обработки очереди
+        }
+        Console.WriteLine("[Game] Стартовые чанки сгенерированы.");
+
+        // 7. Создаем менеджер ввода
         _input = new InputManager();
 
         CursorState = CursorState.Grabbed;
@@ -77,9 +87,8 @@ public class Game : GameWindow
         }
 
         _playerController.Update(_input, deltaTime);
-        _physicsWorld.SetPlayerGoalVelocity(_playerController.DesiredHorizontalVelocity);
         _physicsWorld.Update(deltaTime);
-        _worldManager.Update(deltaTime); // ИСПРАВЛЕНО: передаем deltaTime
+        _worldManager.Update(deltaTime);
 
         if (_input.IsMouseButtonPressed(MouseButton.Left))
         {
@@ -88,7 +97,7 @@ public class Game : GameWindow
 
             var hitHandler = new VoxelHitHandler
             {
-                PlayerBodyHandle = _playerController.BodyHandle,
+                PlayerBodyHandle = _physicsWorld.GetPlayerState().BodyHandle,
                 Simulation = _physicsWorld.Simulation
             };
 

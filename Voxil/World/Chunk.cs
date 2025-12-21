@@ -1,29 +1,29 @@
 ﻿// /World/Chunk.cs
 using BepuPhysics;
+using BepuPhysics.Collidables;
 using OpenTK.Mathematics;
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using BepuVector3 = System.Numerics.Vector3;
 
 public class Chunk : IDisposable
 {
     public const int ChunkSize = 16;
     public Vector3i Position { get; }
     public WorldManager WorldManager { get; }
+    public MaterialType Material { get; private set; } = MaterialType.Dirt;
 
-    private readonly HashSet<Vector3i> _voxels = new();
+    public HashSet<Vector3i> Voxels = new();
     private VoxelObjectRenderer _renderer;
-
     private StaticHandle _staticHandle;
-    private bool _physicsBodyInitialized = false;
+    private bool _hasStaticBody = false;
+    public bool _isLoaded = false; //ИСПРАВИТЬ ПОТОМ НА PRIVATE
 
-    private readonly List<VoxelObject> _voxelObjects = new();
+    private readonly List<VoxelObject> _voxelObjects = new List<VoxelObject>();
 
-    // НОВОЕ: Отложенная перестройка физики
     private bool _needsPhysicsRebuild = false;
     private float _physicsRebuildTimer = 0f;
-    private const float PhysicsRebuildDelay = 0.1f; // 100ms задержка
+    private const float PhysicsRebuildDelay = 0.1f;
 
     public Chunk(Vector3i position, WorldManager worldManager)
     {
@@ -33,76 +33,121 @@ public class Chunk : IDisposable
 
     public void Generate(IWorldGenerator generator)
     {
-        generator.GenerateChunk(this, _voxels);
-        Rebuild();
+        generator.GenerateChunk(this, Voxels);
+        Load();
     }
 
-    public void Rebuild()
+    public void Load()
     {
-        BuildMesh(); // Меш обновляем сразу
-        // Физику помечаем для отложенного обновления
+        if (_isLoaded) return;
+        BuildMesh();
         _needsPhysicsRebuild = true;
         _physicsRebuildTimer = PhysicsRebuildDelay;
+        _isLoaded = true;
     }
+
+    public void Unload()
+    {
+        if (!_isLoaded) return;
+
+        _renderer?.Dispose();
+        _renderer = null;
+
+        if (_hasStaticBody)
+        {
+            var staticRef = WorldManager.PhysicsWorld.Simulation.Statics.GetStaticReference(_staticHandle);
+            var shapeIndex = staticRef.Shape;
+
+            WorldManager.PhysicsWorld.Simulation.Statics.Remove(_staticHandle);
+
+            WorldManager.PhysicsWorld.Simulation.Shapes.Remove(shapeIndex);
+
+            _hasStaticBody = false;
+            _staticHandle = default;
+        }
+
+        _isLoaded = false;
+    }
+
+    public bool RemoveVoxelAndUpdate(Vector3i localPosition)
+    {
+        if (Voxels.Remove(localPosition))
+        {
+            if (_isLoaded)
+            {
+                BuildMesh();
+                _needsPhysicsRebuild = true;
+                _physicsRebuildTimer = PhysicsRebuildDelay;
+            }
+            return true;
+        }
+        return false;
+    }
+
+    // ДОБАВЬТЕ этот новый метод. Он просто удаляет воксель из данных, НЕ обновляя меш.
+    // Он будет использоваться для удаления больших групп.
+    public bool RemoveVoxelAt(Vector3i localPosition)
+    {
+        return Voxels.Remove(localPosition);
+    }
+
+    // ДОБАВЬТЕ этот метод для завершения пакетного удаления.
+    public void FinalizeGroupRemoval()
+    {
+        if (_isLoaded)
+        {
+            BuildMesh();
+            _needsPhysicsRebuild = true;
+            _physicsRebuildTimer = PhysicsRebuildDelay;
+        }
+    }
+
+    public void AddVoxelObject(VoxelObject obj) => _voxelObjects.Add(obj);
+    public void RemoveVoxelObject(VoxelObject obj) => _voxelObjects.Remove(obj);
 
     private void BuildMesh()
     {
-        VoxelMeshBuilder.GenerateMesh(_voxels, MaterialType.Dirt,
-            out var vertices, out var colors, out var aoValues);
-
+        VoxelMeshBuilder.GenerateMesh(Voxels, MaterialType.Dirt, out var vertices, out var colors, out var aoValues);
         if (_renderer == null)
             _renderer = new VoxelObjectRenderer(vertices, colors, aoValues);
         else
             _renderer.UpdateMesh(vertices, colors, aoValues);
     }
 
-    private void InitializePhysics()
+    private void RebuildPhysics()
     {
-        var physicsWorld = WorldManager.PhysicsWorld;
-
-        if (_physicsBodyInitialized)
+        if (_hasStaticBody)
         {
-            physicsWorld.Simulation.Statics.Remove(_staticHandle);
+            var staticRef = WorldManager.PhysicsWorld.Simulation.Statics.GetStaticReference(_staticHandle);
+            var oldShapeIndex = staticRef.Shape;
+
+            WorldManager.PhysicsWorld.Simulation.Statics.Remove(_staticHandle);
+            WorldManager.PhysicsWorld.Simulation.Shapes.Remove(oldShapeIndex);
+
+            _hasStaticBody = false;
         }
 
-        var worldPosition = (Position * ChunkSize).ToSystemNumerics();
-
-        if (_voxels.Count > 0)
+        if (Voxels.Count > 0)
         {
-            _staticHandle = physicsWorld.CreateStaticVoxelBody(worldPosition, _voxels.ToList());
+            var worldPosition = (Position * ChunkSize).ToSystemNumerics();
+            _staticHandle = WorldManager.PhysicsWorld.CreateStaticVoxelBody(worldPosition, Voxels.ToList());
+            _hasStaticBody = true;
             WorldManager.RegisterChunkStatic(_staticHandle, this);
-            _physicsBodyInitialized = true;
-        }
-        else
-        {
-            _physicsBodyInitialized = false;
         }
 
         _needsPhysicsRebuild = false;
     }
 
-    public bool RemoveVoxelAt(Vector3i localPosition)
-    {
-        if (_voxels.Remove(localPosition))
-        {
-            Rebuild(); // Пометит для отложенного обновления
-            return true;
-        }
-        return false;
-    }
-
-    public void AddVoxelObject(VoxelObject obj) => _voxelObjects.Add(obj);
-    public void RemoveVoxelObject(VoxelObject obj) => _voxelObjects.Remove(obj);
-
     public void Update(float deltaTime)
     {
-        // НОВОЕ: Отложенное обновление физики
+        if (!_isLoaded) return;
+
         if (_needsPhysicsRebuild)
         {
             _physicsRebuildTimer -= deltaTime;
             if (_physicsRebuildTimer <= 0f)
             {
-                InitializePhysics();
+                RebuildPhysics();
             }
         }
 
@@ -115,12 +160,10 @@ public class Chunk : IDisposable
 
     public void Render(Shader shader, Matrix4 view, Matrix4 projection)
     {
-        if (_renderer != null)
-        {
-            var worldPosition = Position * ChunkSize;
-            Matrix4 model = Matrix4.CreateTranslation(worldPosition.X, worldPosition.Y, worldPosition.Z);
-            _renderer.Render(shader, model, view, projection);
-        }
+        if (!_isLoaded || _renderer == null) return;
+        var worldPosition = Position * ChunkSize;
+        Matrix4 model = Matrix4.CreateTranslation(worldPosition.X, worldPosition.Y, worldPosition.Z);
+        _renderer.Render(shader, model, view, projection);
 
         foreach (var voxelObject in _voxelObjects)
         {
@@ -131,15 +174,12 @@ public class Chunk : IDisposable
     public void Dispose()
     {
         foreach (var obj in new List<VoxelObject>(_voxelObjects))
+        {
             WorldManager.QueueForRemoval(obj);
+        }
         _voxelObjects.Clear();
 
-        if (_physicsBodyInitialized)
-        {
-            WorldManager.PhysicsWorld.Simulation.Statics.Remove(_staticHandle);
-            _physicsBodyInitialized = false;
-        }
-
-        _renderer?.Dispose();
+        Unload();
+        Voxels.Clear();
     }
 }
