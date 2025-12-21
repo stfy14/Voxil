@@ -1,30 +1,27 @@
-﻿// /Core/Game.cs - REFACTORED
-using BepuPhysics;
+﻿using BepuPhysics;
 using OpenTK.Graphics.OpenGL4;
 using OpenTK.Mathematics;
 using OpenTK.Windowing.Common;
 using OpenTK.Windowing.Desktop;
 using OpenTK.Windowing.GraphicsLibraryFramework;
 using System;
+using System.Collections.Generic;
 
 public class Game : GameWindow
 {
-    private Shader _shader;
     private Camera _camera;
     private InputManager _input;
     private PhysicsWorld _physicsWorld;
     private WorldManager _worldManager;
     private PlayerController _playerController;
-    private Crosshair _crosshair;
-
-    private bool _isInitialized = false;
-
-    // --- НОВЫЕ ПОЛЯ ДЛЯ ОТЛАДКИ ---
+    private GpuRaycastingRenderer _renderer;
+    
     private DebugOverlay _debugOverlay;
+    private Crosshair _crosshair;
     private bool _showDebugOverlay = true;
     private float _debugUpdateTimer = 0f;
     private List<string> _debugLines = new List<string>();
-    // -----------------------------
+    private bool _isInitialized = false;
 
     public Game(GameWindowSettings gameWindowSettings, NativeWindowSettings nativeWindowSettings)
         : base(gameWindowSettings, nativeWindowSettings)
@@ -35,59 +32,52 @@ public class Game : GameWindow
     {
         base.OnLoad();
 
-        GL.ClearColor(0.53f, 0.81f, 0.92f, 1.0f); // Небесно-голубой
+        GL.ClearColor(0.53f, 0.81f, 0.92f, 1.0f);
         GL.Enable(EnableCap.DepthTest);
-        GL.Enable(EnableCap.CullFace);
-        GL.CullFace(TriangleFace.Back);
+        GL.Disable(EnableCap.CullFace);
 
-        try
-        {
-            _shader = new Shader("Shaders/shader.vert", "Shaders/shader.frag");
-            Console.WriteLine("[Game] Shaders loaded successfully.");
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"[Game] ERROR loading shaders: {ex.Message}");
-            Close();
-            return;
-        }
-
-        // === ПРАВИЛЬНАЯ ПОСЛЕДОВАТЕЛЬНОСТЬ ИНИЦИАЛИЗАЦИИ ===
-
-        // 1. Создаём физический мир
         _physicsWorld = new PhysicsWorld();
 
-        // Ставим игрока на 3 блока выше найденной земли
         var startPosition = new System.Numerics.Vector3(8, 50, 8);
-
-        // 3. Создаём камеру с новой позицией
         _camera = new Camera(VectorExtensions.ToOpenTK(startPosition), Size.X / (float)Size.Y);
-
-        // 4. Создаём контроллер игрока
         _playerController = new PlayerController(_physicsWorld, _camera, startPosition);
-        Console.WriteLine($"[Game] PlayerController created with BodyHandle: {_playerController.BodyHandle.Value}");
-
-        // 5. Регистрируем игрока в физическом мире
         _physicsWorld.SetPlayerHandle(_playerController.BodyHandle);
-
-        // 6. Создаём менеджер мира (начнётся генерация чанков)
         _worldManager = new WorldManager(_physicsWorld, _playerController);
 
-        // 7. Создаём менеджер ввода
         _input = new InputManager();
-
         CursorState = CursorState.Grabbed;
-        _isInitialized = true;
 
-        //Debug overlay
         _debugOverlay = new DebugOverlay(Size.X, Size.Y);
-
-        // Добавляем инициализацию прицела
         _crosshair = new Crosshair(Size.X, Size.Y);
 
-        _isInitialized = true;
+        _renderer = new GpuRaycastingRenderer(_worldManager);
+        _renderer.Load();
+        _renderer.OnResize(Size.X, Size.Y);
 
-        Console.WriteLine("[Game] Initialization complete.");
+        // --- ПОДПИСКИ НА СОБЫТИЯ ---
+        
+        // Загрузка нового чанка
+        _worldManager.OnChunkLoaded += (chunk) => _renderer.NotifyChunkLoaded(chunk);
+        
+        // Модификация чанка (разрушение блоков) - используем ту же логику загрузки/перезаливки
+        _worldManager.OnChunkModified += (chunk) => _renderer.NotifyChunkLoaded(chunk);
+        
+        // Визуальное разрушение (мгновенная очистка вокселя в GPU до полной перезаливки)
+        _worldManager.OnVoxelFastDestroyed += (pos) => 
+        {
+            // Находим чанк и просим рендер обновить его
+            var chunk = _worldManager.GetAllChunks().GetValueOrDefault(GetChunkPos(pos));
+            if(chunk != null) _renderer.NotifyChunkLoaded(chunk);
+        };
+        
+        // Выгрузка чанка
+        _worldManager.OnChunkUnloaded += (pos) => _renderer.UnloadChunk(pos);
+
+        // Первая инициализация
+        _renderer.UploadAllVisibleChunks();
+
+        _isInitialized = true;
+        Console.WriteLine("[Game] Initialized (Pure GPU Raycasting).");
     }
 
     protected override void OnUpdateFrame(FrameEventArgs e)
@@ -96,52 +86,73 @@ public class Game : GameWindow
         if (!_isInitialized) return;
         float deltaTime = (float)e.Time;
 
-        // 1. Ввод
         _input.Update(KeyboardState, MouseState);
+
         if (_input.IsExitPressed())
         {
             Close();
             return;
         }
 
-        // --- НОВЫЙ КОД ДЛЯ УПРАВЛЕНИЯ ОВЕРЛЕЕМ ---
         if (_input.IsKeyPressed(Keys.F3))
         {
-            _showDebugOverlay = !_showDebugOverlay;
+            PerformanceMonitor.IsEnabled = !PerformanceMonitor.IsEnabled;
+            _showDebugOverlay = PerformanceMonitor.IsEnabled;
+            if (!PerformanceMonitor.IsEnabled) _debugLines.Clear();
         }
 
-        // Обновляем данные для оверлея раз в секунду
-        _debugUpdateTimer += deltaTime;
-        if (_debugUpdateTimer >= 0.2f)
+        // --- УПРАВЛЕНИЕ НАСТРОЙКАМИ (HOTKEYS) ---
+        
+        // 1. Render Distance (O / P)
+        if (_input.IsKeyPressed(Keys.O)) 
+            GameSettings.RenderDistance = Math.Max(4, GameSettings.RenderDistance - 4);
+        if (_input.IsKeyPressed(Keys.P)) 
+            GameSettings.RenderDistance = Math.Min(128, GameSettings.RenderDistance + 4);
+
+        // 2. Generation Threads (K / L)
+        if (_input.IsKeyPressed(Keys.K))
         {
-            _debugUpdateTimer = 0f;
-            var averages = PerformanceMonitor.GetAveragesAndReset();
-            _debugLines.Clear();
-            _debugLines.Add("--- Avg Thread Times (ms/task) ---");
-            _debugLines.Add($"Generation: {averages[ThreadType.Generation]:F2}");
-            _debugLines.Add($"Meshing:    {averages[ThreadType.Meshing]:F2}");
-            _debugLines.Add($"Physics:    {averages[ThreadType.Physics]:F2}");
-            _debugLines.Add($"Detachment: {averages[ThreadType.Detachment]:F2}");
+            GameSettings.GenerationThreads = Math.Max(1, GameSettings.GenerationThreads - 1);
+            _worldManager.SetGenerationThreadCount(GameSettings.GenerationThreads);
+        }
+        if (_input.IsKeyPressed(Keys.L))
+        {
+            GameSettings.GenerationThreads = Math.Min(16, GameSettings.GenerationThreads + 1);
+            _worldManager.SetGenerationThreadCount(GameSettings.GenerationThreads);
         }
 
-        // 2. Логика игрока
+        // 3. Physics Threads (N / M)
+        if (_input.IsKeyPressed(Keys.N))
+        {
+            GameSettings.PhysicsThreads = Math.Max(1, GameSettings.PhysicsThreads - 1);
+            _physicsWorld.SetThreadCount(GameSettings.PhysicsThreads);
+        }
+        if (_input.IsKeyPressed(Keys.M))
+        {
+            GameSettings.PhysicsThreads = Math.Min(16, GameSettings.PhysicsThreads + 1);
+            _physicsWorld.SetThreadCount(GameSettings.PhysicsThreads);
+        }
+
+        // 4. GPU Upload Speed (U / I)
+        if (_input.IsKeyPressed(Keys.U))
+            GameSettings.GpuUploadSpeed = Math.Max(1, GameSettings.GpuUploadSpeed - 1);
+        if (_input.IsKeyPressed(Keys.I))
+            GameSettings.GpuUploadSpeed = Math.Min(200, GameSettings.GpuUploadSpeed + 1);
+
+
+        // --- UPDATE LOGIC ---
         _playerController.Update(_input, deltaTime);
-
-        // 3. Обновление мира (БЕЗ обновления позиций динамических объектов)
         _worldManager.Update(deltaTime);
-
-        // 4. ШАГ ФИЗИЧЕСКОЙ СИМУЛЯЦИИ
         _physicsWorld.Update(deltaTime);
-
-        // 5. --- НОВЫЙ ШАГ ---
-        // ОБНОВЛЯЕМ ВИДИМЫЕ ПОЗИЦИИ из нового состояния физики
         _worldManager.ProcessVoxelObjects();
+        _renderer.Update(deltaTime);
 
-        // 6. Обработка разрушения (если есть)
         if (_input.IsMouseButtonPressed(MouseButton.Left))
         {
             ProcessBlockDestruction();
         }
+        
+        UpdateDebugStats(deltaTime);
     }
 
     private void ProcessBlockDestruction()
@@ -155,7 +166,6 @@ public class Game : GameWindow
             Simulation = _physicsWorld.Simulation
         };
 
-        // ИСПРАВЛЕНИЕ v2.5: Добавлен аргумент _physicsWorld.Simulation.BufferPool
         _physicsWorld.Simulation.RayCast(cameraPosition, lookDirection, 100f, _physicsWorld.Simulation.BufferPool, ref hitHandler);
 
         if (hitHandler.Hit)
@@ -165,6 +175,39 @@ public class Game : GameWindow
         }
     }
 
+    private void UpdateDebugStats(float deltaTime)
+    {
+        if (!PerformanceMonitor.IsEnabled) return;
+
+        _debugUpdateTimer += deltaTime;
+        if (_debugUpdateTimer >= 0.2f)
+        {
+            _debugUpdateTimer = 0f;
+            var averages = PerformanceMonitor.GetDataAndReset();
+            
+            _debugLines.Clear();
+            _debugLines.Add($"FPS: {1.0f / deltaTime:F0}");
+            _debugLines.Add($"Pos: {_camera.Position.X:F0} {_camera.Position.Y:F0} {_camera.Position.Z:F0}");
+            
+            _debugLines.Add("--- Settings ---");
+            _debugLines.Add($"[O/P] Dist:   {GameSettings.RenderDistance} chunks");
+            _debugLines.Add($"[K/L] Gen Th: {GameSettings.GenerationThreads}");
+            _debugLines.Add($"[N/M] Phys Th:{GameSettings.PhysicsThreads}");
+            _debugLines.Add($"[U/I] GPU Up: {GameSettings.GpuUploadSpeed}/frame");
+
+            _debugLines.Add("--- Perf ---");
+            if (averages != null)
+            {
+                foreach(var kvp in averages) _debugLines.Add($"{kvp.Key}: {kvp.Value}");
+            }
+        }
+    }
+    
+    private Vector3i GetChunkPos(Vector3i worldPos) => new Vector3i(
+        (int)Math.Floor(worldPos.X / 16f), 
+        (int)Math.Floor(worldPos.Y / 16f), 
+        (int)Math.Floor(worldPos.Z / 16f));
+
     protected override void OnRenderFrame(FrameEventArgs e)
     {
         base.OnRenderFrame(e);
@@ -172,17 +215,9 @@ public class Game : GameWindow
 
         GL.Clear(ClearBufferMask.ColorBufferBit | ClearBufferMask.DepthBufferBit);
 
-        // 1. Рендерим 3D мир
-        _worldManager.Render(_shader, _camera.GetViewMatrix(), _camera.GetProjectionMatrix());
-
-        // 2. Рендерим прицел (всегда по центру)
+        _renderer.Render(_camera);
         _crosshair.Render();
-
-        // 3. Рендерим DebugOverlay (если включен)
-        if (_showDebugOverlay)
-        {
-            _debugOverlay.Render(_debugLines);
-        }
+        if (_showDebugOverlay) _debugOverlay.Render(_debugLines);
 
         SwapBuffers();
     }
@@ -192,25 +227,18 @@ public class Game : GameWindow
         base.OnResize(e);
         GL.Viewport(0, 0, Size.X, Size.Y);
         _camera?.UpdateAspectRatio(Size.X / (float)Size.Y);
-
-        // --- ОБНОВЛЯЕМ РАЗМЕР ДЛЯ ОВЕРЛЕЯ ---
+        _renderer?.OnResize(Size.X, Size.Y);
         _debugOverlay?.UpdateScreenSize(Size.X, Size.Y);
-
         _crosshair?.UpdateSize(Size.X, Size.Y);
     }
 
     protected override void OnUnload()
     {
         base.OnUnload();
-
-        Console.WriteLine("[Game] Unloading...");
-
+        _renderer?.Dispose();
         _worldManager?.Dispose();
         _physicsWorld?.Dispose();
-        _shader?.Dispose();
         _debugOverlay?.Dispose();
         _crosshair?.Dispose();
-
-        Console.WriteLine("[Game] Resources released.");
     }
 }

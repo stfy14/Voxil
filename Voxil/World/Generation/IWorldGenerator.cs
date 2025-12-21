@@ -1,9 +1,6 @@
-﻿// /World/Generation/IWorldGenerator.cs
-using OpenTK.Mathematics;
-using System.Collections.Generic;
-
+﻿// World/Generation/IWorldGenerator.cs
 public interface IWorldGenerator
 {
-    // ИЗМЕНЕНО: теперь генератор заполняет данными переданный чанк
-    void GenerateChunk(Vector3i chunkPosition, Dictionary<Vector3i, MaterialType> voxels);
+    // Теперь принимаем массив, а не Dictionary
+    void GenerateChunk(OpenTK.Mathematics.Vector3i chunkPosition, MaterialType[] voxels);
 }

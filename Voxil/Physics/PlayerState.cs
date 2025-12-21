@@ -8,8 +8,9 @@ public class PlayerState
     public Vector2 GoalVelocity;
     public bool IsOnGround;
     public float RayT;
+    
+    // --- НОВОЕ ПОЛЕ ---
+    public bool IsFlying; // Флаг: если true, физика не вмешивается в скорость
 
-    // --- ИЗМЕНЕНИЕ ---
-    // Храним текущий набор настроек
     public CharacterControllerSettings Settings;
 }

@@ -42,10 +42,10 @@ public static class MaterialRegistry
             case MaterialType.Dirt:
             case MaterialType.Stone:
             case MaterialType.Wood:
+            case MaterialType.Water:
                 return true; // Это твердые блоки, с которыми мы сталкиваемся
 
             case MaterialType.Air:
-            case MaterialType.Water:
             default:
                 return false; // Это "проходимые" блоки
         }

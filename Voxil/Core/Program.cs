@@ -1,20 +1,27 @@
-﻿// /Core/Program.cs
+﻿using OpenTK.Mathematics;
+using OpenTK.Windowing.Common;
 using OpenTK.Windowing.Desktop;
-using OpenTK.Mathematics;
 using System;
+using System.Runtime;
 
 public static class Program
 {
     private static void Main()
     {
-        Console.WriteLine("=== Voxil ===");
-        Console.WriteLine("Запуск приложения...\n");
+        // Оптимизация памяти
+        GCSettings.LatencyMode = GCLatencyMode.SustainedLowLatency;
+        
+        Console.WriteLine("=== Voxil GPU ===");
+        Console.WriteLine($"GC Mode: {GCSettings.LatencyMode}");
+        Console.WriteLine("Starting...");
 
         var nativeWindowSettings = new NativeWindowSettings()
         {
             ClientSize = new Vector2i(1280, 720),
-            Title = "Voxil [Refactored]",
-            APIVersion = new Version(3, 3),
+            Title = "Voxil [GPU Raycasting]",
+            APIVersion = new Version(4, 5),
+            Profile = ContextProfile.Core,
+            Vsync = VSyncMode.Off 
         };
 
         try
@@ -24,10 +31,10 @@ public static class Program
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"\n[КРИТИЧЕСКАЯ ОШИБКА] {ex.Message}");
+            Console.WriteLine($"\n[FATAL ERROR] {ex.Message}");
             Console.WriteLine($"Stack trace:\n{ex.StackTrace}");
         }
 
-        Console.WriteLine("\nПриложение завершено.");
+        Console.WriteLine("\nApp terminated.");
     }
 }
