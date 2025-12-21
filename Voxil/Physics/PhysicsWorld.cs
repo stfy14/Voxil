@@ -67,17 +67,18 @@ public class PhysicsWorld : IDisposable
 
     public StaticHandle AddStaticChunkBody(
         BepuVector3 chunkWorldPosition, 
-        List<VoxelCollider> colliders)
+        VoxelCollider[] colliders, 
+        int count) 
     {
         lock (_simLock)
         {
-            if (colliders.Count == 0) return new StaticHandle();
+            if (count == 0) return new StaticHandle();
 
-            _bufferPool.Take<CompoundChild>(colliders.Count, out var children);
+            _bufferPool.Take<CompoundChild>(count, out var children);
 
-            for (int i = 0; i < colliders.Count; i++)
+            for (int i = 0; i < count; i++)
             {
-                var c = colliders[i];
+                var c = colliders[i]; // Работаем как с обычным массивом
                 var boxShape = new Box(c.HalfSize.X * 2, c.HalfSize.Y * 2, c.HalfSize.Z * 2);
                 var boxIndex = Simulation.Shapes.Add(boxShape);
 
@@ -89,7 +90,7 @@ public class PhysicsWorld : IDisposable
                 };
             }
 
-            var childrenSlice = children.Slice(0, colliders.Count);
+            var childrenSlice = children.Slice(0, count);
             var compoundShape = new Compound(childrenSlice);
             var compoundIndex = Simulation.Shapes.Add(compoundShape);
 

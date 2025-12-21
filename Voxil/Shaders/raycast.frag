@@ -11,7 +11,7 @@ uniform int uBoundMinX, uBoundMinY, uBoundMinZ;
 uniform int uBoundMaxX, uBoundMaxY, uBoundMaxZ;
 
 const int CHUNK_SIZE = 16;
-const ivec3 PAGE_TABLE_SIZE = ivec3(128, 16, 128);
+const ivec3 PAGE_TABLE_SIZE = ivec3(512, 16, 512);
 
 layout(binding = 0, r32i) uniform iimage3D uPageTable;
 

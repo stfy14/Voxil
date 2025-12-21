@@ -61,19 +61,33 @@ public class Chunk : IDisposable
     public void SetDataFromArray(MaterialType[] sourceArray)
     {
         if (_isDisposed) return;
+        
+        // Входим в блокировку записи
         _lock.EnterWriteLock();
         try
         {
-            // Конвертируем и копируем
-            // (В идеале генератор сразу должен работать с byte[], но пока конвертируем тут)
+            // БЫЛО (Медленно, цикл по каждому элементу):
+            /*
             for(int i=0; i < Volume; i++)
             {
                 Voxels[i] = (byte)sourceArray[i];
             }
+            */
+
+            // СТАЛО (Моментально, копирование блока памяти):
+            // Buffer.BlockCopy копирует байты, игнорируя типы.
+            // Так как MaterialType - это byte, это абсолютно безопасно и очень быстро.
+            Buffer.BlockCopy(sourceArray, 0, Voxels, 0, Volume);
             
             // Пересчитываем SolidCount
+            // (К сожалению, тут цикл нужен, но он работает с локальным массивом, это быстрее)
+            // ОПТИМИЗАЦИЯ: Можно считать SolidCount еще на этапе генерации, 
+            // но пока оставим тут, это не узкое место.
             SolidCount = 0;
-            for(int i=0; i<Volume; i++) if (Voxels[i] != 0) SolidCount++;
+            for(int i=0; i < Volume; i++) 
+            {
+                if (Voxels[i] != 0) SolidCount++;
+            }
             
             IsLoaded = true;
         }

@@ -63,7 +63,12 @@ public class Game : GameWindow
         _worldManager.OnChunkModified += (chunk) => _renderer.NotifyChunkLoaded(chunk);
         
         // Визуальное разрушение (мгновенная очистка вокселя в GPU до полной перезаливки)
-        /*_worldManager.OnVoxelFastDestroyed += (pos) => _renderer.DestroyVoxelFast(pos);*/
+        _worldManager.OnVoxelFastDestroyed += (pos) => 
+        {
+            // Находим чанк и просим рендер обновить его
+            var chunk = _worldManager.GetAllChunks().GetValueOrDefault(GetChunkPos(pos));
+            if(chunk != null) _renderer.NotifyChunkLoaded(chunk);
+        };
         
         // Выгрузка чанка
         _worldManager.OnChunkUnloaded += (pos) => _renderer.UnloadChunk(pos);
@@ -102,7 +107,7 @@ public class Game : GameWindow
         if (_input.IsKeyPressed(Keys.O)) 
             GameSettings.RenderDistance = Math.Max(4, GameSettings.RenderDistance - 4);
         if (_input.IsKeyPressed(Keys.P)) 
-            GameSettings.RenderDistance = Math.Min(64, GameSettings.RenderDistance + 4);
+            GameSettings.RenderDistance = Math.Min(128, GameSettings.RenderDistance + 4);
 
         // 2. Generation Threads (K / L)
         if (_input.IsKeyPressed(Keys.K))
@@ -132,7 +137,7 @@ public class Game : GameWindow
         if (_input.IsKeyPressed(Keys.U))
             GameSettings.GpuUploadSpeed = Math.Max(1, GameSettings.GpuUploadSpeed - 1);
         if (_input.IsKeyPressed(Keys.I))
-            GameSettings.GpuUploadSpeed = Math.Min(50, GameSettings.GpuUploadSpeed + 1);
+            GameSettings.GpuUploadSpeed = Math.Min(200, GameSettings.GpuUploadSpeed + 1);
 
 
         // --- UPDATE LOGIC ---
@@ -197,6 +202,11 @@ public class Game : GameWindow
             }
         }
     }
+    
+    private Vector3i GetChunkPos(Vector3i worldPos) => new Vector3i(
+        (int)Math.Floor(worldPos.X / 16f), 
+        (int)Math.Floor(worldPos.Y / 16f), 
+        (int)Math.Floor(worldPos.Z / 16f));
 
     protected override void OnRenderFrame(FrameEventArgs e)
     {

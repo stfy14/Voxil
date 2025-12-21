@@ -24,9 +24,9 @@ public class GpuRaycastingRenderer : IDisposable
     
     // Размер таблицы страниц (СТЕПЕНИ ДВОЙКИ!)
     // 128x16x128 позволяет держать активную зону 2048x256x2048 блоков.
-    private const int PT_X = 128;
-    private const int PT_Y = 16;
-    private const int PT_Z = 128;
+    private const int PT_X = 512; 
+    private const int PT_Y = 16;  
+    private const int PT_Z = 512;
     
     // Битовые маски для быстрого взятия остатка (аналог % 128)
     private const int MASK_X = PT_X - 1;
@@ -383,13 +383,13 @@ public class GpuRaycastingRenderer : IDisposable
     {
         if (chunk != null && chunk.IsLoaded)
         {
-            // Если чанк уже загружен - игнорируем (или можно добавить логику перезаливки)
-            if (_loadedChunks.ContainsKey(chunk.Position)) return;
-
             if (_queuedChunkPositions.Add(chunk.Position)) 
+            {
                 _chunksToUpload.Enqueue(chunk);
+            }
         }
     }
+
     
     public void UnloadChunk(Vector3i chunkPos) => _chunksToUnload.Enqueue(chunkPos);
     

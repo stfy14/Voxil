@@ -12,7 +12,7 @@ public enum ThreadType
 public static class PerformanceMonitor
 {
     // Глобальный рубильник. Volatile гарантирует, что потоки увидят изменение сразу.
-    public static volatile bool IsEnabled = false;
+    public static volatile bool IsEnabled = true;
 
     // Храним тики (long), так как Interlocked работает с ними быстро
     private static long _genTicks; private static int _genCount;

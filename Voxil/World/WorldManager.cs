@@ -12,14 +12,54 @@ using System.Buffers;
 using BepuVector3 = System.Numerics.Vector3;
 
 #region Task Structures
-public class ChunkGenerationTask { public Vector3i Position; public int Priority; }
-public class ChunkGenerationResult 
-{ 
-    public Vector3i Position; 
-    public MaterialType[] Voxels; // СТАЛО: Массив
+public readonly struct ChunkGenerationTask
+{
+    public readonly Vector3i Position;
+    public readonly int Priority;
+
+    public ChunkGenerationTask(Vector3i pos, int priority)
+    {
+        Position = pos;
+        Priority = priority;
+    }
 }
-public class PhysicsBuildTask { public Chunk ChunkToProcess; }
-public class PhysicsBuildResult { public Chunk TargetChunk; public List<VoxelCollider> Colliders; }
+public readonly struct ChunkGenerationResult
+{
+    public readonly Vector3i Position;
+    public readonly MaterialType[] Voxels;
+
+    // Конструктор обязателен!
+    public ChunkGenerationResult(Vector3i pos, MaterialType[] voxels)
+    {
+        Position = pos;
+        Voxels = voxels;
+    }
+}
+public readonly struct PhysicsBuildTask
+{
+    public readonly Chunk ChunkToProcess;
+    
+    // Проверка на "пустоту" структуры (аналог null)
+    public bool IsValid => ChunkToProcess != null;
+
+    public PhysicsBuildTask(Chunk chunk)
+    {
+        ChunkToProcess = chunk;
+    }
+}
+public readonly struct PhysicsBuildResult
+{
+    public readonly Chunk TargetChunk;
+    public readonly PhysicsBuildResultData Data;
+    public readonly bool IsValid;
+
+    public PhysicsBuildResult(Chunk chunk, PhysicsBuildResultData data)
+    {
+        TargetChunk = chunk;
+        Data = data;
+        IsValid = chunk != null;
+    }
+}
 public class DetachmentCheckTask { public Chunk Chunk; public Vector3i RemovedVoxelLocalPos; }
 #endregion
 
@@ -63,11 +103,22 @@ public class WorldManager : IDisposable
     private readonly HashSet<Vector3i> _activeChunkPositions = new();
     
     private Vector3i _lastPlayerChunkPosition = new(int.MaxValue);
+    
+    private OpenTK.Mathematics.Vector3 _lastChunkUpdatePos = new(float.MaxValue);
+    private bool _forceUpdate = false; 
 
     // --- АСИНХРОННОСТЬ ---
     private volatile bool _isChunkUpdateRunning = false;
     private readonly ConcurrentQueue<List<ChunkGenerationTask>> _incomingChunksToLoad = new();
     private readonly ConcurrentQueue<List<Vector3i>> _incomingChunksToUnload = new();
+    
+    // --- ОПТИМИЗАЦИЯ GC: Переиспользуемые коллекции ---
+    // Выносим коллекции из CalculateChunksBackground в поля класса.
+    // Инициализируем их один раз в конструкторе.
+    private readonly HashSet<Vector3i> _requiredChunksSet;
+    private readonly List<ChunkGenerationTask> _chunksToLoadList;
+    private readonly List<Vector3i> _chunksToUnloadList;
+    private readonly List<Vector3i> _sortedLoadPositions; // Для сортировки тоже нужен буфер
 
     // --- СОБЫТИЯ ---
     public event Action<Chunk> OnChunkLoaded;     
@@ -88,6 +139,13 @@ public class WorldManager : IDisposable
         PhysicsWorld = physicsWorld;
         _playerController = playerController;
         _generator = new PerlinGenerator(12345);
+
+        // --- Инициализация переиспользуемых коллекций ---
+        // Выделяем память один раз при старте с запасом
+        _requiredChunksSet = new HashSet<Vector3i>(50000); 
+        _chunksToLoadList = new List<ChunkGenerationTask>(10000);
+        _chunksToUnloadList = new List<Vector3i>(10000);
+        _sortedLoadPositions = new List<Vector3i>(50000);
 
         SetGenerationThreadCount(GameSettings.GenerationThreads);
 
@@ -131,23 +189,27 @@ public class WorldManager : IDisposable
         {
             try
             {
+                // Берем задачу из очереди (структура)
                 if (_generationQueue.TryTake(out var task, 100, token))
                 {
+                    // --- ЗАМЕР НАЧАЛСЯ ---
                     if (PerformanceMonitor.IsEnabled) stopwatch.Restart();
 
-                    // --- ОПТИМИЗАЦИЯ: Rent вместо new ---
-                    var voxels = ArrayPool<MaterialType>.Shared.Rent(Chunk.Volume);
+                    // Арендуем массив
+                    var voxels = System.Buffers.ArrayPool<MaterialType>.Shared.Rent(Chunk.Volume);
                     
-                    // Генератор сам делает Array.Fill внутри, так что чистить не обязательно, 
-                    // но PerlinGenerator должен гарантированно перезаписывать данные.
-                    // PerlinGenerator в вашем коде делает Array.Fill, так что всё ок.
-                    
+                    // Генерируем
                     _generator.GenerateChunk(task.Position, voxels);
 
-                    if (PerformanceMonitor.IsEnabled) { /* ... */ }
+                    // --- ЗАМЕР ЗАКОНЧИЛСЯ ---
+                    if (PerformanceMonitor.IsEnabled)
+                    {
+                        stopwatch.Stop();
+                        PerformanceMonitor.Record(ThreadType.Generation, stopwatch.ElapsedTicks);
+                    }
 
-                    _generatedChunksQueue.Enqueue(new ChunkGenerationResult 
-                        { Position = task.Position, Voxels = voxels });
+                    // Отправляем результат (структура)
+                    _generatedChunksQueue.Enqueue(new ChunkGenerationResult(task.Position, voxels));
                 }
             }
             catch (OperationCanceledException) { break; }
@@ -158,7 +220,7 @@ public class WorldManager : IDisposable
     public void RebuildPhysics(Chunk chunk)
     {
         if (chunk == null || !chunk.IsLoaded) return;
-        _urgentPhysicsQueue.Enqueue(new PhysicsBuildTask { ChunkToProcess = chunk });
+        _urgentPhysicsQueue.Enqueue(new PhysicsBuildTask(chunk));
     }
 
     private void PhysicsBuilderThreadLoop()
@@ -167,44 +229,35 @@ public class WorldManager : IDisposable
         {
             try
             {
-                PhysicsBuildTask task = null;
+                // Структуры не могут быть null, используем default
+                PhysicsBuildTask task = default;
                 bool gotTask = false;
 
                 if (_urgentPhysicsQueue.TryDequeue(out task)) gotTask = true;
                 else if (_physicsBuildQueue.TryTake(out task, 10)) gotTask = true;
 
-                if (gotTask && task != null)
+                // Проверяем IsValid вместо null
+                if (gotTask && task.IsValid)
                 {
                     if (task.ChunkToProcess == null || !task.ChunkToProcess.IsLoaded) continue;
 
-                    // --- ОПТИМИЗАЦИЯ: Rent ---
-                    var rawVoxels = ArrayPool<MaterialType>.Shared.Rent(Chunk.Volume);
+                    var rawVoxels = System.Buffers.ArrayPool<MaterialType>.Shared.Rent(Chunk.Volume);
                     
+                    // ... (копирование данных) ...
                     var src = task.ChunkToProcess.GetVoxelsUnsafe();
-
                     var rwLock = task.ChunkToProcess.GetLock();
                     rwLock.EnterReadLock();
                     try 
                     { 
-                        // Копируем byte[] -> MaterialType[]
-                        // Придется делать цикл, т.к. типы разные, Array.Copy не сработает напрямую байт в енум
-                        for(int i=0; i < Chunk.Volume; i++)
-                        {
-                            rawVoxels[i] = (MaterialType)src[i];
-                        }
+                        Buffer.BlockCopy(src, 0, rawVoxels, 0, Chunk.Volume);
                     }
                     finally { rwLock.ExitReadLock(); }
 
-                    var colliders = VoxelPhysicsBuilder.GenerateColliders(rawVoxels, task.ChunkToProcess.Position);
+                    var resultData = VoxelPhysicsBuilder.GenerateColliders(rawVoxels, task.ChunkToProcess.Position);
+                    
+                    System.Buffers.ArrayPool<MaterialType>.Shared.Return(rawVoxels);
 
-                    // --- ВОЗВРАТ ---
-                    ArrayPool<MaterialType>.Shared.Return(rawVoxels);
-
-                    _physicsResultQueue.Enqueue(new PhysicsBuildResult
-                    {
-                        TargetChunk = task.ChunkToProcess,
-                        Colliders = colliders
-                    });
+                    _physicsResultQueue.Enqueue(new PhysicsBuildResult(task.ChunkToProcess, resultData));
                 }
             }
             catch (Exception ex) { Console.WriteLine($"[PhysicsBuilderThread] Error: {ex.Message}"); }
@@ -244,13 +297,25 @@ public class WorldManager : IDisposable
         ApplyChunkUpdates();
         if (_isChunkUpdateRunning) return;
 
-        var playerPos = PhysicsWorld.Simulation.Bodies.GetBodyReference(_playerController.BodyHandle).Pose.Position;
+        // Получаем позицию игрока
+        var playerPos = GetPlayerPosition(); // Или берем из физики напрямую
+
+        // ОПТИМИЗАЦИЯ: Проверяем, сдвинулся ли игрок достаточно далеко
+        // 32.0f = 2 чанка (16 * 2). Обновляем список задач только если прошли это расстояние.
+        float distSq = (playerPos - _lastChunkUpdatePos).LengthSquared;
+        if (distSq < (Chunk.ChunkSize * 2.0f) * (Chunk.ChunkSize * 2.0f) && !_forceUpdate) 
+        {
+            return; 
+        }
+
+        // Обновляем позицию последнего апдейта
+        _lastChunkUpdatePos = playerPos;
+        _forceUpdate = false;
+
+        // Логика расчета центра чанка
         var pX = (int)Math.Floor(playerPos.X / Chunk.ChunkSize);
         var pZ = (int)Math.Floor(playerPos.Z / Chunk.ChunkSize);
         var currentCenter = new Vector3i(pX, 0, pZ);
-
-        if (currentCenter == _lastPlayerChunkPosition) return;
-        _lastPlayerChunkPosition = currentCenter;
 
         _isChunkUpdateRunning = true;
 
@@ -267,48 +332,54 @@ public class WorldManager : IDisposable
         });
     }
 
-    private void CalculateChunksBackground(Vector3i center, HashSet<Vector3i> activeSnapshot, int viewDist, int height)
+private void CalculateChunksBackground(Vector3i center, HashSet<Vector3i> activeSnapshot, int viewDist, int height)
     {
-        var toLoad = new List<ChunkGenerationTask>();
-        var toUnload = new List<Vector3i>();
-        var requiredSet = new HashSet<Vector3i>();
+        // Вместо создания 'new' - чистим существующие
+        _chunksToLoadList.Clear();
+        _chunksToUnloadList.Clear();
+        _requiredChunksSet.Clear();
+        _sortedLoadPositions.Clear();
 
         int viewDistSq = viewDist * viewDist;
         
+        // 1. Заполняем _requiredChunksSet (вместо локальной переменной)
         for (int x = -viewDist; x <= viewDist; x++)
         {
             for (int z = -viewDist; z <= viewDist; z++)
             {
                 if (x*x + z*z > viewDistSq) continue;
-                for (int y = 0; y < height; y++) requiredSet.Add(new Vector3i(center.X + x, y, center.Z + z));
+                for (int y = 0; y < height; y++) _requiredChunksSet.Add(new Vector3i(center.X + x, y, center.Z + z));
             }
         }
 
-        foreach (var pos in activeSnapshot) if (!requiredSet.Contains(pos)) toUnload.Add(pos);
+        // 2. Ищем, что выгрузить
+        foreach (var pos in activeSnapshot) if (!_requiredChunksSet.Contains(pos)) _chunksToUnloadList.Add(pos);
 
-        var loadPositions = new List<Vector3i>();
-        foreach (var pos in requiredSet) if (!activeSnapshot.Contains(pos)) loadPositions.Add(pos);
+        // 3. Ищем, что загрузить (используем _sortedLoadPositions как временный буфер)
+        foreach (var pos in _requiredChunksSet) if (!activeSnapshot.Contains(pos)) _sortedLoadPositions.Add(pos);
 
-        loadPositions.Sort((a, b) => 
+        // 4. Сортируем
+        _sortedLoadPositions.Sort((a, b) => 
         {
             int dxA = a.X - center.X; int dzA = a.Z - center.Z;
             int distA = dxA*dxA + dzA*dzA;
             int dxB = b.X - center.X; int dzB = b.Z - center.Z;
             int distB = dxB*dxB + dzB*dzB;
-            int pA = distA * 1000 + Math.Abs(a.Y);
-            int pB = distB * 1000 + Math.Abs(b.Y);
-            return pA.CompareTo(pB);
+            // Упростим приоритет для ясности
+            return distA.CompareTo(distB);
         });
 
-        foreach(var pos in loadPositions)
+        // 5. Формируем финальный список задач на загрузку
+        foreach(var pos in _sortedLoadPositions)
         {
             int dx = pos.X - center.X; int dz = pos.Z - center.Z;
-            int priority = dx*dx + dz*dz + Math.Abs(pos.Y);
-            toLoad.Add(new ChunkGenerationTask { Position = pos, Priority = priority });
+            int priority = dx*dx + dz*dz;
+            _chunksToLoadList.Add(new ChunkGenerationTask(pos, priority));
         }
 
-        if (toUnload.Count > 0) _incomingChunksToUnload.Enqueue(toUnload);
-        if (toLoad.Count > 0) _incomingChunksToLoad.Enqueue(toLoad);
+        // 6. Передаем в очереди (копируем, чтобы не было гонки потоков)
+        if (_chunksToUnloadList.Count > 0) _incomingChunksToUnload.Enqueue(new List<Vector3i>(_chunksToUnloadList));
+        if (_chunksToLoadList.Count > 0) _incomingChunksToLoad.Enqueue(new List<ChunkGenerationTask>(_chunksToLoadList));
     }
 
     private void ApplyChunkUpdates()
@@ -334,60 +405,98 @@ public class WorldManager : IDisposable
 
     private void ProcessGeneratedChunks()
     {
-        int processed = 0;
-        while (processed < 20 && _generatedChunksQueue.TryDequeue(out var result))
+        // БЮДЖЕТ ВРЕМЕНИ: 1.5 мс.
+        // Если не успели обработать все чанки из очереди - откладываем на следующий кадр.
+        // Это спасет от лагов при телепортации или быстром полете.
+        long startTime = Stopwatch.GetTimestamp();
+        long maxTicks = (long)(0.0015 * Stopwatch.Frequency); 
+
+        // Обрабатываем, пока есть задачи И есть время
+        while (_generatedChunksQueue.TryDequeue(out var result))
         {
-            _chunksInProgress.Remove(result.Position);
-            
-            // Если чанк больше не нужен (игрок ушел), всё равно надо вернуть массив!
+            // 1. Проверка актуальности (без блокировки)
+            // Если чанк уже не нужен игроку - просто возвращаем массив в пул
             if (!_activeChunkPositions.Contains(result.Position)) 
             {
-                ArrayPool<MaterialType>.Shared.Return(result.Voxels);
-                continue;
+                 System.Buffers.ArrayPool<MaterialType>.Shared.Return(result.Voxels);
+                 continue;
             }
 
+            Chunk chunkToAdd = null;
+            bool added = false;
+
+            // 2. Создаем чанк (ТЯЖЕЛАЯ ОПЕРАЦИЯ - делаем ДО блокировки, если возможно)
+            // Но Chunk требует ссылку на WorldManager, так что ок.
+            
+            // 3. БЛОКИРОВКА (Минимальная по времени)
             lock (_chunksLock)
             {
-                if (_chunks.ContainsKey(result.Position)) 
+                // Двойная проверка внутри лока
+                if (!_chunks.ContainsKey(result.Position))
                 {
-                    ArrayPool<MaterialType>.Shared.Return(result.Voxels);
-                    continue;
+                    chunkToAdd = new Chunk(result.Position, this);
+                    // Копируем данные (быстро, через Buffer.BlockCopy)
+                    chunkToAdd.SetDataFromArray(result.Voxels);
+                    
+                    _chunks[result.Position] = chunkToAdd;
+                    added = true;
                 }
-                
-                var chunk = new Chunk(result.Position, this);
-                chunk.SetDataFromArray(result.Voxels); // Копирует данные во внутренний byte[] чанка
-                _chunks[result.Position] = chunk;
+            }
 
-                _physicsBuildQueue.Add(new PhysicsBuildTask { ChunkToProcess = chunk });
-                OnChunkLoaded?.Invoke(chunk);
+            // 4. Пост-обработка (БЕЗ БЛОКИРОВКИ)
+            if (added && chunkToAdd != null)
+            {
+                // Сначала уведомляем рендер, чтобы игрок СРАЗУ увидел чанк
+                OnChunkLoaded?.Invoke(chunkToAdd);
+
+                // Потом ставим в очередь на физику (пусть считается в фоне)
+                _physicsBuildQueue.Add(new PhysicsBuildTask(chunkToAdd));
             }
             
-            // --- ВОЗВРАЩАЕМ МАССИВ В ПУЛ ---
-            ArrayPool<MaterialType>.Shared.Return(result.Voxels);
-            
-            processed++;
+            // 5. Возвращаем массив (обязательно!)
+            System.Buffers.ArrayPool<MaterialType>.Shared.Return(result.Voxels);
+
+            // Проверка времени
+            if (Stopwatch.GetTimestamp() - startTime > maxTicks) break;
         }
     }
 
     private void ProcessPhysicsResults()
     {
+        // БЮДЖЕТ ВРЕМЕНИ: 1.0 мс.
+        // Вставка статики в BepuPhysics - это перестроение дерева (BVH). 
+        // Это дорогая операция. Нельзя вставлять 20 тел за кадр, иначе будет микрофриз.
         long startTime = Stopwatch.GetTimestamp();
-        long maxTicks = (long)(0.003 * Stopwatch.Frequency); 
+        long maxTicks = (long)(0.001 * Stopwatch.Frequency); 
 
         while (_physicsResultQueue.TryDequeue(out var result))
         {
-            if (result.TargetChunk == null || !result.TargetChunk.IsLoaded) continue;
+            // Проверка валидности структуры
+            if (!result.IsValid) continue;
 
-            StaticHandle handle = default;
-            if (result.Colliders != null && result.Colliders.Count > 0)
+            // Используем using для гарантированного возврата массива коллайдеров
+            using (result.Data) 
             {
-                handle = PhysicsWorld.AddStaticChunkBody(
-                    (result.TargetChunk.Position * Chunk.ChunkSize).ToSystemNumerics(),
-                    result.Colliders
-                );
-            }
-            result.TargetChunk.OnPhysicsRebuilt(handle);
+                // Если чанк выгрузили, пока считалась физика - пропускаем
+                if (result.TargetChunk == null || !result.TargetChunk.IsLoaded) continue;
 
+                StaticHandle handle = default;
+                
+                // Вставка в мир физики (Main Thread)
+                if (result.Data.Count > 0)
+                {
+                    handle = PhysicsWorld.AddStaticChunkBody(
+                        (result.TargetChunk.Position * Chunk.ChunkSize).ToSystemNumerics(),
+                        result.Data.CollidersArray,
+                        result.Data.Count
+                    );
+                }
+                
+                // Привязываем хендл к чанку
+                result.TargetChunk.OnPhysicsRebuilt(handle);
+            }
+
+            // Если время вышло - прерываемся, остальное доделаем в следующем кадре
             if (Stopwatch.GetTimestamp() - startTime > maxTicks) break;
         }
     }
