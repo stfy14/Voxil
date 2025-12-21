@@ -3,6 +3,7 @@ using OpenTK.Mathematics;
 using System;
 using System.Collections.Generic;
 using System.Threading;
+using System.Buffers;
 
 public class Chunk : IDisposable
 {
@@ -13,7 +14,7 @@ public class Chunk : IDisposable
     public WorldManager WorldManager { get; }
 
     // ОПТИМИЗАЦИЯ: Используем byte вместо Enum/int. Экономия RAM в 4-8 раз.
-    public byte[] Voxels = new byte[Volume];
+    public byte[] Voxels; 
     
     public int SolidCount { get; private set; } = 0;
     private readonly ReaderWriterLockSlim _lock = new ReaderWriterLockSlim();
@@ -26,6 +27,13 @@ public class Chunk : IDisposable
     {
         Position = position;
         WorldManager = worldManager;
+        
+        // --- ОПТИМИЗАЦИЯ 2: Аренда массива ---
+        // Берем массив из пула. Он может быть "грязным" (содержать данные старых чанков).
+        Voxels = ArrayPool<byte>.Shared.Rent(Volume);
+        
+        // Обязательно чистим его нулями
+        Array.Clear(Voxels, 0, Volume);
     }
 
     public void SetDataFromGenerator(Dictionary<Vector3i, MaterialType> voxelsDict)
@@ -142,6 +150,11 @@ public class Chunk : IDisposable
         IsLoaded = false;
         ClearPhysics();
         _lock.Dispose();
-        Voxels = null; 
+        
+        if (Voxels != null)
+        {
+            ArrayPool<byte>.Shared.Return(Voxels);
+            Voxels = null;
+        }
     }
 }

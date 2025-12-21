@@ -8,6 +8,7 @@ using System.Diagnostics;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Buffers;
 using BepuVector3 = System.Numerics.Vector3;
 
 #region Task Structures
@@ -134,17 +135,16 @@ public class WorldManager : IDisposable
                 {
                     if (PerformanceMonitor.IsEnabled) stopwatch.Restart();
 
-                    // ОПТИМИЗАЦИЯ: Создаем массив, а не словарь
-                    var voxels = new MaterialType[Chunk.Volume];
+                    // --- ОПТИМИЗАЦИЯ: Rent вместо new ---
+                    var voxels = ArrayPool<MaterialType>.Shared.Rent(Chunk.Volume);
                     
-                    // Передаем массив в генератор
+                    // Генератор сам делает Array.Fill внутри, так что чистить не обязательно, 
+                    // но PerlinGenerator должен гарантированно перезаписывать данные.
+                    // PerlinGenerator в вашем коде делает Array.Fill, так что всё ок.
+                    
                     _generator.GenerateChunk(task.Position, voxels);
 
-                    if (PerformanceMonitor.IsEnabled)
-                    {
-                        stopwatch.Stop();
-                        PerformanceMonitor.Record(ThreadType.Generation, stopwatch.ElapsedTicks);
-                    }
+                    if (PerformanceMonitor.IsEnabled) { /* ... */ }
 
                     _generatedChunksQueue.Enqueue(new ChunkGenerationResult 
                         { Position = task.Position, Voxels = voxels });
@@ -177,15 +177,28 @@ public class WorldManager : IDisposable
                 {
                     if (task.ChunkToProcess == null || !task.ChunkToProcess.IsLoaded) continue;
 
-                    var rawVoxels = new MaterialType[Chunk.Volume];
+                    // --- ОПТИМИЗАЦИЯ: Rent ---
+                    var rawVoxels = ArrayPool<MaterialType>.Shared.Rent(Chunk.Volume);
+                    
                     var src = task.ChunkToProcess.GetVoxelsUnsafe();
 
                     var rwLock = task.ChunkToProcess.GetLock();
                     rwLock.EnterReadLock();
-                    try { Array.Copy(src, rawVoxels, Chunk.Volume); }
+                    try 
+                    { 
+                        // Копируем byte[] -> MaterialType[]
+                        // Придется делать цикл, т.к. типы разные, Array.Copy не сработает напрямую байт в енум
+                        for(int i=0; i < Chunk.Volume; i++)
+                        {
+                            rawVoxels[i] = (MaterialType)src[i];
+                        }
+                    }
                     finally { rwLock.ExitReadLock(); }
 
                     var colliders = VoxelPhysicsBuilder.GenerateColliders(rawVoxels, task.ChunkToProcess.Position);
+
+                    // --- ВОЗВРАТ ---
+                    ArrayPool<MaterialType>.Shared.Return(rawVoxels);
 
                     _physicsResultQueue.Enqueue(new PhysicsBuildResult
                     {
@@ -325,23 +338,33 @@ public class WorldManager : IDisposable
         while (processed < 20 && _generatedChunksQueue.TryDequeue(out var result))
         {
             _chunksInProgress.Remove(result.Position);
-            if (!_activeChunkPositions.Contains(result.Position)) continue;
+            
+            // Если чанк больше не нужен (игрок ушел), всё равно надо вернуть массив!
+            if (!_activeChunkPositions.Contains(result.Position)) 
+            {
+                ArrayPool<MaterialType>.Shared.Return(result.Voxels);
+                continue;
+            }
 
             lock (_chunksLock)
             {
-                if (_chunks.ContainsKey(result.Position)) continue;
+                if (_chunks.ContainsKey(result.Position)) 
+                {
+                    ArrayPool<MaterialType>.Shared.Return(result.Voxels);
+                    continue;
+                }
                 
                 var chunk = new Chunk(result.Position, this);
-                
-                // --- ИЗМЕНЕНИЕ: В Chunk.cs нужен метод SetDataFromArray ---
-                // Мы добавим его ниже, или изменим SetDataFromGenerator
-                chunk.SetDataFromArray(result.Voxels);
-                
+                chunk.SetDataFromArray(result.Voxels); // Копирует данные во внутренний byte[] чанка
                 _chunks[result.Position] = chunk;
 
                 _physicsBuildQueue.Add(new PhysicsBuildTask { ChunkToProcess = chunk });
                 OnChunkLoaded?.Invoke(chunk);
             }
+            
+            // --- ВОЗВРАЩАЕМ МАССИВ В ПУЛ ---
+            ArrayPool<MaterialType>.Shared.Return(result.Voxels);
+            
             processed++;
         }
     }
