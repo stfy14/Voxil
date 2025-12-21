@@ -1,9 +1,8 @@
-﻿// /Graphics/Shader.cs
-using OpenTK.Graphics.OpenGL4;
+﻿using OpenTK.Graphics.OpenGL4;
 using OpenTK.Mathematics;
 using System;
-using System.IO;
 using System.Collections.Generic;
+using System.IO;
 
 public class Shader : IDisposable
 {
@@ -11,8 +10,14 @@ public class Shader : IDisposable
     private readonly Dictionary<string, int> _uniformLocations = new();
     private bool _disposed;
 
+    // Новое поле для хранения имени (пути)
+    private readonly string _name;
+
     public Shader(string vertexPath, string fragmentPath)
     {
+        // Сохраняем имя для дебага
+        _name = $"{vertexPath} + {fragmentPath}";
+
         if (!File.Exists(vertexPath))
             throw new FileNotFoundException($"Вершинный шейдер не найден: {vertexPath}");
 
@@ -33,7 +38,23 @@ public class Shader : IDisposable
         GL.DeleteShader(fragmentShader);
 
         CacheUniformLocations();
-        Console.WriteLine($"[Shader] Шейдерная программа создана успешно (ID: {Handle})");
+        Console.WriteLine($"[Shader] Шейдер загружен: {_name} (ID: {Handle})");
+    }
+
+    // Дополнительный конструктор для кода из строки (как в DebugOverlay/Crosshair)
+    public Shader(string vertexSource, string fragmentSource, bool isSourceCode)
+    {
+        _name = "Generated/Internal"; // Имя для внутренних шейдеров
+
+        int vertexShader = CompileShader(ShaderType.VertexShader, vertexSource, "Internal Vert");
+        int fragmentShader = CompileShader(ShaderType.FragmentShader, fragmentSource, "Internal Frag");
+
+        Handle = LinkProgram(vertexShader, fragmentShader);
+
+        GL.DetachShader(Handle, vertexShader);
+        GL.DetachShader(Handle, fragmentShader);
+        GL.DeleteShader(vertexShader);
+        GL.DeleteShader(fragmentShader);
     }
 
     private int CompileShader(ShaderType type, string source, string path)
@@ -63,7 +84,7 @@ public class Shader : IDisposable
         if (success == 0)
         {
             string infoLog = GL.GetProgramInfoLog(program);
-            throw new Exception($"Ошибка линковки шейдерной программы:\n{infoLog}");
+            throw new Exception($"Ошибка линковки шейдера [{_name}]:\n{infoLog}");
         }
         return program;
     }
@@ -77,7 +98,6 @@ public class Shader : IDisposable
             int location = GL.GetUniformLocation(Handle, name);
             _uniformLocations[name] = location;
         }
-        Console.WriteLine($"[Shader] Кешировано {uniformCount} uniform-переменных");
     }
 
     public void Use()
@@ -95,8 +115,12 @@ public class Shader : IDisposable
         location = GL.GetUniformLocation(Handle, name);
         if (location == -1)
         {
-            Console.WriteLine($"[Shader] Предупреждение: uniform '{name}' не найден");
+            // --- ОБНОВЛЕННЫЙ ВЫВОД ОШИБКИ ---
+            // Теперь пишет конкретный файл шейдера
+            Console.WriteLine($"[Shader Warning] Uniform '{name}' не найден (или вырезан компилятором) в шейдере: [{_name}]");
         }
+
+        // Кэшируем даже -1, чтобы не спамить в консоль каждый кадр
         _uniformLocations[name] = location;
         return location;
     }
@@ -111,6 +135,12 @@ public class Shader : IDisposable
     {
         int location = GetUniformLocation(name);
         if (location != -1) GL.Uniform3(location, vector);
+    }
+
+    public void SetVector4(string name, Vector4 vector)
+    {
+        int location = GetUniformLocation(name);
+        if (location != -1) GL.Uniform4(location, vector);
     }
 
     public void SetFloat(string name, float value)
@@ -131,14 +161,5 @@ public class Shader : IDisposable
         GL.DeleteProgram(Handle);
         _disposed = true;
         GC.SuppressFinalize(this);
-        Console.WriteLine($"[Shader] Программа {Handle} удалена");
-    }
-
-    ~Shader()
-    {
-        if (!_disposed)
-        {
-            Console.WriteLine($"[ПРЕДУПРЕЖДЕНИЕ] Shader {Handle} не был корректно освобождён!");
-        }
     }
 }

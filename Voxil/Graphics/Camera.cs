@@ -15,7 +15,7 @@ public class Camera
     private float _fov = 70.0f;
     private float _aspectRatio;
     private const float NearPlane = 0.01f;
-    private const float FarPlane = 500.0f;
+    private const float FarPlane = 8000.0f;
 
     public Vector3 Position => _position;
     public Vector3 Front => _front;

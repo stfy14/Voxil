@@ -1,33 +1,28 @@
 ﻿// /Physics/CharacterControllerSettings.cs
 using System.Numerics;
 
-// Перечисление для удобного выбора пресета
 public enum ControllerPreset
 {
     Normal,
-    DebugLevitate
+    DebugLevitate,
+    Spectator // <--- Добавили
 }
 
-// Структура, хранящая ВСЕ настраиваемые параметры
 public struct CharacterControllerSettings
 {
-    // Движение
     public float WalkSpeed;
     public float SprintSpeed;
     public float JumpVelocity;
     public float MovementDamping;
     public float MovementAcceleration;
 
-    // Парение (Hover)
     public float HoverHeight;
     public float SpringFrequency;
     public float SpringDamping;
 
-    // Физика
     public Vector3 Gravity;
 }
 
-// Статический класс с готовыми пресетами
 public static class ControllerSettingsPresets
 {
     public static readonly CharacterControllerSettings Normal = new CharacterControllerSettings
@@ -35,9 +30,8 @@ public static class ControllerSettingsPresets
         WalkSpeed = 4.3f,
         SprintSpeed = 5.6f,
         JumpVelocity = 7.0f,
-        // --- ИЗМЕНЕНИЯ ЗДЕСЬ ---
-        MovementDamping = 0.0001f,      // Очень сильное торможение (близкое к нулю)
-        MovementAcceleration = 100f,   // Более плавное, но мощное ускорение
+        MovementDamping = 0.0001f, 
+        MovementAcceleration = 100f,   
 
         HoverHeight = 0.05f,
         SpringFrequency = 30f,
@@ -50,13 +44,27 @@ public static class ControllerSettingsPresets
         WalkSpeed = 5f,
         SprintSpeed = 8f,
         JumpVelocity = 8.0f,
-        // --- И ИЗМЕНЕНИЯ ЗДЕСЬ ---
         MovementDamping = 0.0001f,
-        MovementAcceleration = 80f, // Чуть менее резкое для левитации
+        MovementAcceleration = 80f, 
 
         HoverHeight = 0.2f,
-        SpringFrequency = 25f, // Было 50f. Уменьшаем жесткость вдвое.
-        SpringDamping = 8f,    // Было 15f. Снижаем демпфирование под новую жесткость.
+        SpringFrequency = 25f, 
+        SpringDamping = 8f,    
         Gravity = new Vector3(0, -15, 0)
+    };
+
+    // --- ДОБАВЛЕНО: Режим полета ---
+    public static readonly CharacterControllerSettings Spectator = new CharacterControllerSettings
+    {
+        WalkSpeed = 30.0f,       // Очень быстро
+        SprintSpeed = 60.0f,     // Сверхзвуковая скорость для проверки чанков
+        JumpVelocity = 0.0f,     // Не используется
+        MovementDamping = 10.0f, // Мгновенная остановка
+        MovementAcceleration = 200f,
+        
+        HoverHeight = 0.0f,
+        SpringFrequency = 0f,
+        SpringDamping = 0f,
+        Gravity = Vector3.Zero   // Гравитация отключена
     };
 }
