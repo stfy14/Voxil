@@ -1,52 +1,48 @@
-﻿// /Physics/Callbacks/VoxelHitHandler.cs (новое имя файла)
+﻿// /Physics/VoxelHitHandler.cs - ИСПРАВЛЕН ДЛЯ BEPU v2.5
 using BepuPhysics;
 using BepuPhysics.Collidables;
+using BepuPhysics.CollisionDetection;
 using BepuPhysics.Trees;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 
 public struct VoxelHitHandler : IRayHitHandler
 {
+    public BodyHandle PlayerBodyHandle;
+    public Simulation Simulation;
+
     public bool Hit;
     public float T;
     public Vector3 Normal;
-    public CollidableReference Collidable; // Храним общую ссылку, а не только BodyHandle
-
-    public BodyHandle PlayerBodyHandle;
-    public Simulation Simulation; // Нужна ссылка на симуляцию для проверки
+    public CollidableReference Collidable;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public bool AllowTest(CollidableReference collidable)
     {
-        // Не проверяем столкновение с самим игроком
-        if (collidable.Mobility == CollidableMobility.Dynamic && collidable.BodyHandle == PlayerBodyHandle)
+        if (collidable.Mobility == CollidableMobility.Dynamic)
         {
-            return false;
+            return collidable.BodyHandle.Value != PlayerBodyHandle.Value;
         }
-
-        // --- УДАЛЯЕМ ПРОВЕРКУ НА "СПЯЩИЕ" ТЕЛА ---
-        // Старый код: return collidable.Mobility == CollidableMobility.Static || Simulation.Bodies.GetBodyReference(collidable.BodyHandle).Awake;
-
-        // Новый код: просто разрешаем тест для всех остальных объектов.
         return true;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public bool AllowTest(CollidableReference collidable, int childIndex)
     {
-        return true; // Проверки на уровне дочерних объектов оставляем
+        return AllowTest(collidable);
     }
 
+    // ИСПРАВЛЕНИЕ v2.5: Сигнатура метода изменена (убраны 'in' у normal и collidable)
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void OnRayHit(in RayData ray, ref float maximumT, float t, in Vector3 normal, CollidableReference collidable, int childIndex)
+    public void OnRayHit(in RayData ray, ref float maximumT, float t, Vector3 normal, CollidableReference collidable, int childIndex)
     {
         if (t < maximumT)
         {
-            maximumT = t;
+            Hit = true;
             T = t;
             Normal = normal;
-            Hit = true;
             Collidable = collidable;
+            maximumT = t;
         }
     }
 }

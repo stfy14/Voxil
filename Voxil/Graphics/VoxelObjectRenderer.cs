@@ -37,30 +37,30 @@ public class VoxelObjectRenderer : IDisposable
 
     public void UpdateMesh(List<float> vertices, List<float> colors, List<float> aoValues)
     {
-        // Если старых ресурсов не было, создаем их
+        _vertexCount = vertices.Count / 3;
+
+        if (_vertexCount == 0)
+        {
+            CleanupGpuResources();
+            return;
+        }
+
+        // КРИТИЧЕСКОЕ ИЗМЕНЕНИЕ: Если ресурсов еще нет, создаем их
         if (_vertexArrayObject == 0)
         {
             UploadMeshToGpu(vertices, colors, aoValues);
             return;
         }
 
-        _vertexCount = vertices.Count / 3;
-        if (_vertexCount == 0)
-        {
-            // Если вершин не осталось, можно очистить ресурсы
-            CleanupGpuResources();
-            return;
-        }
-
-        // Перезаписываем данные в существующих буферах
+        // ВАЖНО: Перезаписываем данные В СУЩЕСТВУЮЩИХ буферах, НЕ создавая новые
         GL.BindBuffer(BufferTarget.ArrayBuffer, _vertexBufferObject);
-        GL.BufferData(BufferTarget.ArrayBuffer, vertices.Count * sizeof(float), vertices.ToArray(), BufferUsageHint.StaticDraw);
+        GL.BufferData(BufferTarget.ArrayBuffer, vertices.Count * sizeof(float), vertices.ToArray(), BufferUsageHint.DynamicDraw); // БЫЛО StaticDraw
 
         GL.BindBuffer(BufferTarget.ArrayBuffer, _colorBufferObject);
-        GL.BufferData(BufferTarget.ArrayBuffer, colors.Count * sizeof(float), colors.ToArray(), BufferUsageHint.StaticDraw);
+        GL.BufferData(BufferTarget.ArrayBuffer, colors.Count * sizeof(float), colors.ToArray(), BufferUsageHint.DynamicDraw);
 
         GL.BindBuffer(BufferTarget.ArrayBuffer, _aoBufferObject);
-        GL.BufferData(BufferTarget.ArrayBuffer, aoValues.Count * sizeof(float), aoValues.ToArray(), BufferUsageHint.StaticDraw);
+        GL.BufferData(BufferTarget.ArrayBuffer, aoValues.Count * sizeof(float), aoValues.ToArray(), BufferUsageHint.DynamicDraw);
 
         GL.BindBuffer(BufferTarget.ArrayBuffer, 0);
     }

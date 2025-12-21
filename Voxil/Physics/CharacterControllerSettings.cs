@@ -35,9 +35,11 @@ public static class ControllerSettingsPresets
         WalkSpeed = 4.3f,
         SprintSpeed = 5.6f,
         JumpVelocity = 7.0f,
-        MovementDamping = 0.92f,
-        MovementAcceleration = 300f,
-        HoverHeight = 0.05f, // <-- Очень низкое парение, почти незаметное
+        // --- ИЗМЕНЕНИЯ ЗДЕСЬ ---
+        MovementDamping = 0.0001f,      // Очень сильное торможение (близкое к нулю)
+        MovementAcceleration = 100f,   // Более плавное, но мощное ускорение
+
+        HoverHeight = 0.05f,
         SpringFrequency = 30f,
         SpringDamping = 10f,
         Gravity = new Vector3(0, -20, 0)
@@ -48,11 +50,13 @@ public static class ControllerSettingsPresets
         WalkSpeed = 5f,
         SprintSpeed = 8f,
         JumpVelocity = 8.0f,
-        MovementDamping = 0.92f,
-        MovementAcceleration = 200f,
-        HoverHeight = 0.2f, // <-- Высокое парение, чтобы было хорошо видно
-        SpringFrequency = 50f,
-        SpringDamping = 15f,
+        // --- И ИЗМЕНЕНИЯ ЗДЕСЬ ---
+        MovementDamping = 0.0001f,
+        MovementAcceleration = 80f, // Чуть менее резкое для левитации
+
+        HoverHeight = 0.2f,
+        SpringFrequency = 25f, // Было 50f. Уменьшаем жесткость вдвое.
+        SpringDamping = 8f,    // Было 15f. Снижаем демпфирование под новую жесткость.
         Gravity = new Vector3(0, -15, 0)
     };
 }
