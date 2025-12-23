@@ -185,35 +185,47 @@ public class PhysicsWorld : IDisposable
     }
 
     public BodyHandle UpdateVoxelObjectBody(
-        BodyHandle handle,
+        BodyHandle oldHandle,
         IList<Vector3i> voxelCoordinates,
         MaterialType material,
         out BepuVector3 localCenterOfMass)
     {
         localCenterOfMass = BepuVector3.Zero;
-        
+
         lock (_simLock)
         {
             if (_isDisposed) return new BodyHandle();
 
-            if (!Simulation.Bodies.BodyExists(handle))
+            // 1. Сначала читаем данные старого тела
+            RigidPose oldPose = new RigidPose(BepuVector3.Zero);
+            BodyVelocity oldVel = new BodyVelocity();
+            bool hasOldBody = false;
+
+            if (Simulation.Bodies.BodyExists(oldHandle))
             {
-                return CreateVoxelObjectBody(voxelCoordinates, material, BepuVector3.Zero, out localCenterOfMass);
+                var bodyRef = Simulation.Bodies.GetBodyReference(oldHandle);
+                oldPose = bodyRef.Pose;
+                oldVel = bodyRef.Velocity;
+                hasOldBody = true;
+
+                // 2. Удаляем старое тело
+                RemoveBody(oldHandle);
             }
 
-            var bodyRef = Simulation.Bodies.GetBodyReference(handle);
-            var velocity = bodyRef.Velocity;
-            var pose = bodyRef.Pose;
+            // 3. Создаем новое тело
+            // ВАЖНО: Мы создаем его в 0,0,0, чтобы получить инерцию, а потом телепортируем
+            var newHandle = CreateVoxelObjectBody(voxelCoordinates, material, hasOldBody ? oldPose.Position : BepuVector3.Zero, out localCenterOfMass);
 
-            RemoveBody(handle);
-
-            var newHandle = CreateVoxelObjectBody(voxelCoordinates, material, pose.Position, out localCenterOfMass);
-
-            if (Simulation.Bodies.BodyExists(newHandle))
+            // 4. Применяем состояние
+            if (Simulation.Bodies.BodyExists(newHandle) && hasOldBody)
             {
                 var newBodyRef = Simulation.Bodies.GetBodyReference(newHandle);
-                newBodyRef.Velocity = velocity;
-                newBodyRef.Pose.Orientation = pose.Orientation;
+                newBodyRef.Velocity = oldVel;
+                newBodyRef.Pose.Orientation = oldPose.Orientation;
+                // Позицию не трогаем, она уже задана в Create с учетом нового центра масс (если Create это делает)
+                // Но CreateVoxelObjectBody в твоем коде ставит тело в initialPosition.
+                // А геометрия внутри смещена на -CoM.
+                // Значит визуально воксели останутся там же, где были (относительно initialPosition).
             }
 
             return newHandle;

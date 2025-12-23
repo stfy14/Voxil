@@ -8,56 +8,57 @@ public class Shader : IDisposable
 {
     public readonly int Handle;
     private readonly Dictionary<string, int> _uniformLocations = new();
+    private readonly string _name; // Имя для дебага
     private bool _disposed;
 
-    // Новое поле для хранения имени (пути)
-    private readonly string _name;
-
+    // --- 1. Конструктор для Vertex + Fragment (ПУТИ К ФАЙЛАМ) ---
     public Shader(string vertexPath, string fragmentPath)
+        : this(LoadSource(vertexPath), LoadSource(fragmentPath), $"{vertexPath}+{fragmentPath}")
     {
-        // Сохраняем имя для дебага
-        _name = $"{vertexPath} + {fragmentPath}";
+    }
 
-        if (!File.Exists(vertexPath))
-            throw new FileNotFoundException($"Вершинный шейдер не найден: {vertexPath}");
+    // --- 2. Конструктор для Vertex + Fragment (ИСХОДНЫЙ КОД) ---
+    // isSourceCode - просто флаг для сигнатуры, чтобы отличаться от первого конструктора
+    public Shader(string vertexSource, string fragmentSource, bool isSourceCode)
+        : this(vertexSource, fragmentSource, "Generated/Internal")
+    {
+    }
 
-        if (!File.Exists(fragmentPath))
-            throw new FileNotFoundException($"Фрагментный шейдер не найден: {fragmentPath}");
+    // --- 3. Конструктор для Compute Shader (ПУТЬ К ФАЙЛУ) ---
+    public Shader(string computePath)
+    {
+        _name = computePath;
+        string source = LoadSource(computePath);
 
-        string vertexSource = File.ReadAllText(vertexPath);
-        string fragmentSource = File.ReadAllText(fragmentPath);
-
-        int vertexShader = CompileShader(ShaderType.VertexShader, vertexSource, vertexPath);
-        int fragmentShader = CompileShader(ShaderType.FragmentShader, fragmentSource, fragmentPath);
-
-        Handle = LinkProgram(vertexShader, fragmentShader);
-
-        GL.DetachShader(Handle, vertexShader);
-        GL.DetachShader(Handle, fragmentShader);
-        GL.DeleteShader(vertexShader);
-        GL.DeleteShader(fragmentShader);
+        int cs = CompileShader(ShaderType.ComputeShader, source);
+        Handle = LinkProgram(cs); // Линкуем один шейдер
 
         CacheUniformLocations();
-        Console.WriteLine($"[Shader] Шейдер загружен: {_name} (ID: {Handle})");
     }
 
-    // Дополнительный конструктор для кода из строки (как в DebugOverlay/Crosshair)
-    public Shader(string vertexSource, string fragmentSource, bool isSourceCode)
+    // --- Приватный мастер-конструктор для стандартной пары Vert+Frag ---
+    private Shader(string vertSource, string fragSource, string name)
     {
-        _name = "Generated/Internal"; // Имя для внутренних шейдеров
+        _name = name;
+        int vs = CompileShader(ShaderType.VertexShader, vertSource);
+        int fs = CompileShader(ShaderType.FragmentShader, fragSource);
 
-        int vertexShader = CompileShader(ShaderType.VertexShader, vertexSource, "Internal Vert");
-        int fragmentShader = CompileShader(ShaderType.FragmentShader, fragmentSource, "Internal Frag");
+        Handle = LinkProgram(vs, fs); // Линкуем два шейдера
 
-        Handle = LinkProgram(vertexShader, fragmentShader);
-
-        GL.DetachShader(Handle, vertexShader);
-        GL.DetachShader(Handle, fragmentShader);
-        GL.DeleteShader(vertexShader);
-        GL.DeleteShader(fragmentShader);
+        CacheUniformLocations();
+        Console.WriteLine($"[Shader] Compiled: {_name} (ID: {Handle})");
     }
 
-    private int CompileShader(ShaderType type, string source, string path)
+    // --- Вспомогательные методы ---
+
+    private static string LoadSource(string path)
+    {
+        if (!File.Exists(path))
+            throw new FileNotFoundException($"Shader file not found: {path}");
+        return File.ReadAllText(path);
+    }
+
+    private int CompileShader(ShaderType type, string source)
     {
         int shader = GL.CreateShader(type);
         GL.ShaderSource(shader, source);
@@ -67,25 +68,42 @@ public class Shader : IDisposable
         if (success == 0)
         {
             string infoLog = GL.GetShaderInfoLog(shader);
-            string shaderTypeName = type == ShaderType.VertexShader ? "вершинного" : "фрагментного";
-            throw new Exception($"Ошибка компиляции {shaderTypeName} шейдера ({path}):\n{infoLog}");
+            // Удаляем шейдер, чтобы не висел в памяти при ошибке
+            GL.DeleteShader(shader);
+            throw new Exception($"Error compiling {type} in '{_name}':\n{infoLog}");
         }
         return shader;
     }
 
-    private int LinkProgram(int vertexShader, int fragmentShader)
+    // Универсальный линковщик: принимает любое кол-во шейдеров
+    private int LinkProgram(params int[] shaders)
     {
         int program = GL.CreateProgram();
-        GL.AttachShader(program, vertexShader);
-        GL.AttachShader(program, fragmentShader);
+
+        // 1. Attach
+        foreach (var shader in shaders) GL.AttachShader(program, shader);
+
+        // 2. Link
         GL.LinkProgram(program);
 
+        // 3. Check Errors
         GL.GetProgram(program, GetProgramParameterName.LinkStatus, out int success);
         if (success == 0)
         {
             string infoLog = GL.GetProgramInfoLog(program);
-            throw new Exception($"Ошибка линковки шейдера [{_name}]:\n{infoLog}");
+            GL.DeleteProgram(program);
+            // Шейдеры удалим ниже, чтобы не было утечек
+            foreach (var shader in shaders) GL.DeleteShader(shader);
+            throw new Exception($"Error linking program '{_name}':\n{infoLog}");
         }
+
+        // 4. Detach & Delete (Clean up immediately)
+        foreach (var shader in shaders)
+        {
+            GL.DetachShader(program, shader);
+            GL.DeleteShader(shader);
+        }
+
         return program;
     }
 
@@ -100,59 +118,41 @@ public class Shader : IDisposable
         }
     }
 
-    public void Use()
+    // --- API для установки Uniforms ---
+
+    public void Use() => GL.UseProgram(Handle);
+
+    private int GetLoc(string name)
     {
-        GL.UseProgram(Handle);
+        if (_uniformLocations.TryGetValue(name, out int loc)) return loc;
+
+        // Пытаемся найти, если не закешировалось (например, массивы структур иногда хитро именуются)
+        loc = GL.GetUniformLocation(Handle, name);
+        _uniformLocations[name] = loc; // Кэшируем даже -1, чтобы не спамить GL вызовами
+
+        if (loc == -1) Console.WriteLine($"[Shader Warning] Uniform '{name}' missing in '{_name}'");
+        return loc;
     }
 
-    private int GetUniformLocation(string name)
+    public void SetMatrix4(string name, Matrix4 data)
     {
-        if (_uniformLocations.TryGetValue(name, out int location))
-        {
-            return location;
-        }
-
-        location = GL.GetUniformLocation(Handle, name);
-        if (location == -1)
-        {
-            // --- ОБНОВЛЕННЫЙ ВЫВОД ОШИБКИ ---
-            // Теперь пишет конкретный файл шейдера
-            Console.WriteLine($"[Shader Warning] Uniform '{name}' не найден (или вырезан компилятором) в шейдере: [{_name}]");
-        }
-
-        // Кэшируем даже -1, чтобы не спамить в консоль каждый кадр
-        _uniformLocations[name] = location;
-        return location;
+        int loc = GetLoc(name); if (loc != -1) GL.UniformMatrix4(loc, false, ref data);
     }
-
-    public void SetMatrix4(string name, Matrix4 matrix)
+    public void SetVector3(string name, Vector3 data)
     {
-        int location = GetUniformLocation(name);
-        if (location != -1) GL.UniformMatrix4(location, false, ref matrix);
+        int loc = GetLoc(name); if (loc != -1) GL.Uniform3(loc, data);
     }
-
-    public void SetVector3(string name, Vector3 vector)
+    public void SetVector4(string name, Vector4 data)
     {
-        int location = GetUniformLocation(name);
-        if (location != -1) GL.Uniform3(location, vector);
+        int loc = GetLoc(name); if (loc != -1) GL.Uniform4(loc, data);
     }
-
-    public void SetVector4(string name, Vector4 vector)
+    public void SetFloat(string name, float data)
     {
-        int location = GetUniformLocation(name);
-        if (location != -1) GL.Uniform4(location, vector);
+        int loc = GetLoc(name); if (loc != -1) GL.Uniform1(loc, data);
     }
-
-    public void SetFloat(string name, float value)
+    public void SetInt(string name, int data)
     {
-        int location = GetUniformLocation(name);
-        if (location != -1) GL.Uniform1(location, value);
-    }
-
-    public void SetInt(string name, int value)
-    {
-        int location = GetUniformLocation(name);
-        if (location != -1) GL.Uniform1(location, value);
+        int loc = GetLoc(name); if (loc != -1) GL.Uniform1(loc, data);
     }
 
     public void Dispose()

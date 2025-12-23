@@ -1,0 +1,51 @@
+#version 450 core
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+struct DynamicObject {
+    mat4 invModel;
+    vec4 color;
+    vec4 boxMin;
+    vec4 boxMax;
+};
+
+layout(std430, binding = 2) buffer DynObjects {
+    DynamicObject dynObjects[];
+};
+
+layout(binding = 0, r16i) uniform iimage3D uObjectGrid;
+
+uniform int uObjectCount;
+uniform vec3 uGridOrigin;
+uniform float uGridStep;
+uniform int uGridSize; 
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= uObjectCount) return;
+
+    DynamicObject obj = dynObjects[idx];
+    
+    mat4 model = inverse(obj.invModel);
+    vec3 centerLocal = (obj.boxMin.xyz + obj.boxMax.xyz) * 0.5;
+    vec3 sizeLocal = (obj.boxMax.xyz - obj.boxMin.xyz);
+    
+    vec3 centerWorld = (model * vec4(centerLocal, 1.0)).xyz;
+    float radius = length(sizeLocal) * 0.5; 
+    
+    vec3 worldMin = centerWorld - vec3(radius);
+    vec3 worldMax = centerWorld + vec3(radius);
+
+    vec3 gridMin = (worldMin - uGridOrigin) / uGridStep;
+    vec3 gridMax = (worldMax - uGridOrigin) / uGridStep;
+
+    ivec3 minI = ivec3(max(vec3(0), floor(gridMin)));
+    ivec3 maxI = ivec3(min(vec3(uGridSize - 1), floor(gridMax)));
+
+    for (int z = minI.z; z <= maxI.z; z++) {
+        for (int y = minI.y; y <= maxI.y; y++) {
+            for (int x = minI.x; x <= maxI.x; x++) {
+                imageStore(uObjectGrid, ivec3(x, y, z), ivec4(idx));
+            }
+        }
+    }
+}

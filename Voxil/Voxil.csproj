@@ -8,6 +8,7 @@
     <AllowUnsafeBlocks>True</AllowUnsafeBlocks>
 	<AllowVeryLargeObjects>true</AllowVeryLargeObjects>
 	<PlatformTarget>x64</PlatformTarget>
+	<StartupObject>Program</StartupObject>
   </PropertyGroup>
 
   <ItemGroup>
@@ -20,6 +21,9 @@
   <ItemGroup>
     <None Update="Assets\RobotoMono-Regular.ttf">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Update="Shaders\grid_update.comp">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </None>
     <None Update="Shaders\raycast.vert">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>

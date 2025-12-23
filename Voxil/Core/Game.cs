@@ -1,4 +1,5 @@
 ﻿using BepuPhysics;
+using BepuPhysics.Collidables;
 using OpenTK.Graphics.OpenGL4;
 using OpenTK.Mathematics;
 using OpenTK.Windowing.Common;
@@ -17,6 +18,8 @@ public class Game : GameWindow
     private GpuRaycastingRenderer _renderer;
     
     private DebugOverlay _debugOverlay;
+    private LineRenderer _lineRenderer;
+    private PhysicsDebugDrawer _physicsDebugger;
     private Crosshair _crosshair;
     private bool _showDebugOverlay = true;
     private float _debugUpdateTimer = 0f;
@@ -48,6 +51,8 @@ public class Game : GameWindow
         CursorState = CursorState.Grabbed;
 
         _debugOverlay = new DebugOverlay(Size.X, Size.Y);
+        _lineRenderer = new LineRenderer();
+        _physicsDebugger = new PhysicsDebugDrawer();
         _crosshair = new Crosshair(Size.X, Size.Y);
 
         _renderer = new GpuRaycastingRenderer(_worldManager);
@@ -202,7 +207,14 @@ public class Game : GameWindow
             }
         }
     }
-    
+
+    private void DrawPhysicsDebug()
+    {
+        // Теперь просто делегируем
+        // Получаем список объектов (или можно передать весь _worldManager и пусть drawer сам берет что надо, но лучше явный список)
+        _physicsDebugger.DrawVoxelObjects(_physicsWorld, _worldManager.GetAllVoxelObjects(), _lineRenderer);
+    }
+
     private Vector3i GetChunkPos(Vector3i worldPos) => new Vector3i(
         (int)Math.Floor(worldPos.X / 16f), 
         (int)Math.Floor(worldPos.Y / 16f), 
@@ -216,6 +228,11 @@ public class Game : GameWindow
         GL.Clear(ClearBufferMask.ColorBufferBit | ClearBufferMask.DepthBufferBit);
 
         _renderer.Render(_camera);
+        if (_showDebugOverlay)
+        {
+            DrawPhysicsDebug();
+            _lineRenderer.Render(_camera);
+        }
         _crosshair.Render();
         if (_showDebugOverlay) _debugOverlay.Render(_debugLines);
 
@@ -239,6 +256,7 @@ public class Game : GameWindow
         _worldManager?.Dispose();
         _physicsWorld?.Dispose();
         _debugOverlay?.Dispose();
+        _lineRenderer.Dispose();
         _crosshair?.Dispose();
     }
 }

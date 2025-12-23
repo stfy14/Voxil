@@ -9,19 +9,19 @@ public class VoxelObject : IDisposable
     public MaterialType Material { get; }
     public BodyHandle BodyHandle { get; private set; }
     public Vector3 LocalCenterOfMass { get; private set; }
-    public WorldManager WorldManager { get; }
     public Vector3 Position { get; private set; }
     public Quaternion Rotation { get; private set; }
     public Vector3 LocalBoundsMin { get; private set; }
     public Vector3 LocalBoundsMax { get; private set; }
+    
+    public event Action<VoxelObject> OnEmpty; 
 
     private bool _isDisposed = false;
 
-    public VoxelObject(List<Vector3i> voxelCoordinates, MaterialType material, WorldManager worldManager)
+    public VoxelObject(List<Vector3i> voxelCoordinates, MaterialType material) // Убрали WorldManager из конструктора
     {
         VoxelCoordinates = voxelCoordinates ?? throw new ArgumentNullException(nameof(voxelCoordinates));
         Material = material;
-        WorldManager = worldManager;
     }
 
     public void InitializePhysics(BodyHandle handle, Vector3 localCenterOfMass)
@@ -90,6 +90,22 @@ public class VoxelObject : IDisposable
         {
             Console.WriteLine($"[VoxelObject] Error updating: {ex.Message}");
         }
+    }
+
+    public bool RemoveVoxel(Vector3i localPos)
+    {
+        int index = VoxelCoordinates.FindIndex(v => v == localPos);
+        if (index != -1)
+        {
+            VoxelCoordinates.RemoveAt(index);
+            if (VoxelCoordinates.Count == 0)
+            {
+                // Вместо WorldManager.QueueForRemoval(this)
+                OnEmpty?.Invoke(this); 
+            }
+            return true;
+        }
+        return false;
     }
 
     public void Dispose()
