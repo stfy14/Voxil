@@ -2,9 +2,9 @@
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
 struct DynamicObject {
-    mat4 invModel;
+    mat4 model; 
     vec4 color;
-    vec4 boxMin;
+    vec4 boxMin; 
     vec4 boxMax;
 };
 
@@ -17,7 +17,7 @@ layout(binding = 0, r16i) uniform iimage3D uObjectGrid;
 uniform int uObjectCount;
 uniform vec3 uGridOrigin;
 uniform float uGridStep;
-uniform int uGridSize; 
+uniform int uGridSize;
 
 void main() {
     uint idx = gl_GlobalInvocationID.x;
@@ -25,26 +25,35 @@ void main() {
 
     DynamicObject obj = dynObjects[idx];
     
-    mat4 model = inverse(obj.invModel);
-    vec3 centerLocal = (obj.boxMin.xyz + obj.boxMax.xyz) * 0.5;
-    vec3 sizeLocal = (obj.boxMax.xyz - obj.boxMin.xyz);
+    vec3 corners[8];
+    corners[0] = vec3(obj.boxMin.x, obj.boxMin.y, obj.boxMin.z);
+    corners[1] = vec3(obj.boxMax.x, obj.boxMin.y, obj.boxMin.z);
+    corners[2] = vec3(obj.boxMin.x, obj.boxMax.y, obj.boxMin.z);
+    corners[3] = vec3(obj.boxMax.x, obj.boxMax.y, obj.boxMin.z);
+    corners[4] = vec3(obj.boxMin.x, obj.boxMin.y, obj.boxMax.z);
+    corners[5] = vec3(obj.boxMax.x, obj.boxMin.y, obj.boxMax.z);
+    corners[6] = vec3(obj.boxMin.x, obj.boxMax.y, obj.boxMax.z);
+    corners[7] = vec3(obj.boxMax.x, obj.boxMax.y, obj.boxMax.z);
+
+    vec3 worldMin = vec3(1e30);
+    vec3 worldMax = vec3(-1e30);
+
+    for(int i=0; i<8; i++) {
+        vec3 worldPos = (obj.model * vec4(corners[i], 1.0)).xyz;
+        worldMin = min(worldMin, worldPos);
+        worldMax = max(worldMax, worldPos);
+    }
     
-    vec3 centerWorld = (model * vec4(centerLocal, 1.0)).xyz;
-    float radius = length(sizeLocal) * 0.5; 
+    vec3 gridMinF = (worldMin - uGridOrigin) / uGridStep;
+    vec3 gridMaxF = (worldMax - uGridOrigin) / uGridStep;
+
+    ivec3 minI = ivec3(max(vec3(0), floor(gridMinF)));
+    ivec3 maxI = ivec3(min(vec3(uGridSize - 1), floor(gridMaxF)));
     
-    vec3 worldMin = centerWorld - vec3(radius);
-    vec3 worldMax = centerWorld + vec3(radius);
-
-    vec3 gridMin = (worldMin - uGridOrigin) / uGridStep;
-    vec3 gridMax = (worldMax - uGridOrigin) / uGridStep;
-
-    ivec3 minI = ivec3(max(vec3(0), floor(gridMin)));
-    ivec3 maxI = ivec3(min(vec3(uGridSize - 1), floor(gridMax)));
-
     for (int z = minI.z; z <= maxI.z; z++) {
         for (int y = minI.y; y <= maxI.y; y++) {
             for (int x = minI.x; x <= maxI.x; x++) {
-                imageStore(uObjectGrid, ivec3(x, y, z), ivec4(idx));
+                imageStore(uObjectGrid, ivec3(x, y, z), ivec4(int(idx), 0, 0, 0));
             }
         }
     }

@@ -165,8 +165,9 @@ public class WorldManager : IDisposable
         {
             for (int z = -viewDist; z <= viewDist; z++)
             {
-                if (x * x + z * z > viewDistSq) continue;
-                for (int y = 0; y < height; y++) _requiredChunksSet.Add(new Vector3i(center.X + x, y, center.Z + z));
+                // УБРАЛИ: if (x * x + z * z > viewDistSq) continue;
+                for (int y = 0; y < height; y++) 
+                    _requiredChunksSet.Add(new Vector3i(center.X + x, y, center.Z + z));
             }
         }
 

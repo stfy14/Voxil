@@ -85,52 +85,49 @@ public class GpuRaycastingRenderer : IDisposable
 
     public void Load()
     {
-        // 1. Основной шейдер рейкастинга (отрисовка мира)
+        // 1. Основной шейдер рейкастинга
         _shader = new Shader("Shaders/raycast.vert", "Shaders/raycast.frag");
 
-        // 2. Compute Shader для обновления сетки объектов (физика/динамика)
-        // Убедись, что файл Shaders/grid_update.comp существует!
+        // 2. Compute Shader для обновления сетки объектов
         _gridComputeShader = new Shader("Shaders/grid_update.comp");
-        // Примечание: Класс Shader может требовать доработки для загрузки .comp файлов.
-        // Обычно это делается через GL.CreateShader(ShaderType.ComputeShader).
-        // Если твой класс Shader принимает только vert/frag, тебе нужно добавить поддержку Compute.
-        // (Ниже я напишу, как это сделать, если у тебя нет поддержки).
 
+        // 3. ИСПРАВЛЕНИЕ: Создаем VAO с dummy VBO
         _quadVao = GL.GenVertexArray();
+        GL.BindVertexArray(_quadVao);
+        
+        // Создаем минимальный VBO (некоторые драйверы требуют хотя бы один buffer)
+        int dummyVbo = GL.GenBuffer();
+        GL.BindBuffer(BufferTarget.ArrayBuffer, dummyVbo);
+        // 4 вершины * vec2 = 32 байта
+        float[] dummyData = new float[8] { -1, -1, 1, -1, -1, 1, 1, 1 };
+        GL.BufferData(BufferTarget.ArrayBuffer, sizeof(float) * 8, dummyData, BufferUsageHint.StaticDraw);
+        
+        GL.BindVertexArray(0);
+        GL.BindBuffer(BufferTarget.ArrayBuffer, 0);
 
-        // --- РЕСУРС 1: Page Table (Статика) ---
-        // 3D Текстура 512x16x512, хранит индексы чанков.
-        // R32I = 32-bit signed integer (int).
+        // 4. Page Table (Статика) - 3D текстура для индексов чанков
         _pageTableTexture = GL.GenTexture();
         GL.BindTexture(TextureTarget.Texture3D, _pageTableTexture);
         GL.TexImage3D(TextureTarget.Texture3D, 0, PixelInternalFormat.R32i,
             PT_X, PT_Y, PT_Z, 0,
             PixelFormat.RedInteger, PixelType.Int, _cpuPageTable);
 
-        // Параметры фильтрации (обязательно Nearest для целочисленных текстур)
         GL.TexParameter(TextureTarget.Texture3D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Nearest);
         GL.TexParameter(TextureTarget.Texture3D, TextureParameterName.TextureMagFilter, (int)TextureMinFilter.Nearest);
-        // ClampToEdge для корректного зацикливания через битовые маски
         GL.TexParameter(TextureTarget.Texture3D, TextureParameterName.TextureWrapS, (int)TextureWrapMode.ClampToEdge);
         GL.TexParameter(TextureTarget.Texture3D, TextureParameterName.TextureWrapT, (int)TextureWrapMode.ClampToEdge);
         GL.TexParameter(TextureTarget.Texture3D, TextureParameterName.TextureWrapR, (int)TextureWrapMode.ClampToEdge);
 
-        // --- РЕСУРС 2: Voxel SSBO (Статика) ---
-        // Хранит упакованные воксели всех загруженных чанков.
+        // 5. Voxel SSBO (Статика) - данные вокселей
         _voxelSsbo = GL.GenBuffer();
         GL.BindBuffer(BufferTarget.ShaderStorageBuffer, _voxelSsbo);
         long totalBytes = (long)_currentCapacity * PackedChunkSizeInInts * sizeof(uint);
         GL.BufferData(BufferTarget.ShaderStorageBuffer, (IntPtr)totalBytes, IntPtr.Zero, BufferUsageHint.DynamicDraw);
-        // Биндим к слоту 1 (binding = 1 в шейдере)
         GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 1, _voxelSsbo);
 
-        // --- РЕСУРС 3: Object Grid (Динамика) ---
-        // 3D Текстура 128^3, хранит ID объектов.
-        // R16I = 16-bit signed integer (short). -1 значит пусто.
+        // 6. Object Grid (Динамика) - 3D сетка ускорения
         _objectGridTexture = GL.GenTexture();
         GL.BindTexture(TextureTarget.Texture3D, _objectGridTexture);
-
-        // Заливаем начальными значениями (-1)
         Array.Fill(_cpuObjectGrid, (short)-1);
         GL.TexImage3D(TextureTarget.Texture3D, 0, PixelInternalFormat.R16i,
             OBJ_GRID_SIZE, OBJ_GRID_SIZE, OBJ_GRID_SIZE, 0,
@@ -138,26 +135,21 @@ public class GpuRaycastingRenderer : IDisposable
 
         GL.TexParameter(TextureTarget.Texture3D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Nearest);
         GL.TexParameter(TextureTarget.Texture3D, TextureParameterName.TextureMagFilter, (int)TextureMinFilter.Nearest);
-        // ClampToBorder вернет заданный цвет границы, если выйдем за пределы сетки
         GL.TexParameter(TextureTarget.Texture3D, TextureParameterName.TextureWrapS, (int)TextureWrapMode.ClampToBorder);
         GL.TexParameter(TextureTarget.Texture3D, TextureParameterName.TextureWrapT, (int)TextureWrapMode.ClampToBorder);
         GL.TexParameter(TextureTarget.Texture3D, TextureParameterName.TextureWrapR, (int)TextureWrapMode.ClampToBorder);
-        // Цвет границы = -1 (нет объекта)
         GL.TexParameterI(TextureTarget.Texture3D, TextureParameterName.TextureBorderColor, new int[] { -1, -1, -1, -1 });
 
-        // --- РЕСУРС 4: Dynamic Objects Data SSBO (Динамика) ---
-        // Хранит матрицы и AABB объектов.
+        // 7. Dynamic Objects SSBO (Динамика) - метаданные объектов
         _dynamicObjectsBuffer = GL.GenBuffer();
         GL.BindBuffer(BufferTarget.ShaderStorageBuffer, _dynamicObjectsBuffer);
-        // Выделяем память под макс. кол-во объектов (например, 1024)
         int maxObjectsBytes = _tempGpuObjectsArray.Length * Marshal.SizeOf<GpuDynamicObject>();
         GL.BufferData(BufferTarget.ShaderStorageBuffer, maxObjectsBytes, IntPtr.Zero, BufferUsageHint.DynamicDraw);
-        // Биндим к слоту 2 (binding = 2 в шейдере)
         GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 2, _dynamicObjectsBuffer);
 
         Console.WriteLine($"[GpuRenderer] Init complete. Voxel VRAM: {totalBytes / 1024 / 1024} MB. Grid Size: {OBJ_GRID_SIZE}^3");
 
-        // Загружаем чанки, которые уже есть в WorldManager
+        // Загружаем начальные чанки
         UploadAllVisibleChunks();
     }
 
@@ -202,130 +194,96 @@ public class GpuRaycastingRenderer : IDisposable
     }
 
 private void UpdateDynamicObjectsAndGrid()
+{
+    var voxelObjects = _worldManager.GetAllVoxelObjects();
+    int count = Math.Min(voxelObjects.Count, _tempGpuObjectsArray.Length);
+
+    // 1. Подготовка данных для SSBO (Матрицы и боксы) - Это быстро, оставляем на CPU
+    for (int i = 0; i < count; i++)
     {
-        // A. Подготовка данных для SSBO
-        var voxelObjects = _worldManager.GetAllVoxelObjects();
-        int count = Math.Min(voxelObjects.Count, _tempGpuObjectsArray.Length);
-
-        for (int i = 0; i < count; i++)
-        {
-            var vo = voxelObjects[i];
-
-            // --- ФИНАЛЬНАЯ МАТРИЦА (Local Voxel -> World) ---
-            // 1. Сдвигаем воксели на -0.5, чтобы их центр был в (0,0,0)
-            // 2. Сдвигаем на -LocalCenterOfMass (уже с учетом -0.5)
-            // 3. Вращаем
-            // 4. Перемещаем в позицию тела
-            // Это можно упростить. Bepu уже сделал всю работу.
-            // Нам нужна матрица, которая переводит из "чистых" воксельных координат [0..1]
-            // в мировые координаты, где находится физика.
-
-            // Физическое тело вращается вокруг своего CoM (желтый крест).
-            // Воксели смещены относительно CoM.
-
-            // Матрица трансформации:
-            // 1. Сначала сдвигаем воксели так, чтобы их CoM попал в (0,0,0)
-            Matrix4 preTranslation = Matrix4.CreateTranslation(-vo.LocalCenterOfMass);
-            // 2. Затем вращаем
-            Matrix4 rotation = Matrix4.CreateFromQuaternion(vo.Rotation);
-            // 3. Затем двигаем в позицию тела в мире
-            Matrix4 postTranslation = Matrix4.CreateTranslation(vo.Position);
-
-            // Итоговая матрица:
-            Matrix4 model = preTranslation * rotation * postTranslation;
-
-            var col = MaterialRegistry.GetColor(vo.Material);
-
-            _tempGpuObjectsArray[i] = new GpuDynamicObject
-            {
-                Model = model,
-                Color = new Vector4(col.r, col.g, col.b, 1.0f),
-
-                // Границы в "чистом" воксельном пространстве (0..1 для одного куба)
-                // vo.LocalBoundsMin/Max УЖЕ СКОМПЕНСИРОВАНЫ в VoxelObject.cs
-                // Там: LocalBoundsMin = worldMin - LocalCenterOfMass;
-                // Значит, они уже относительно CoM. Это не то, что нам нужно.
-                // Нам нужны абсолютные [0..Size].
-
-                // ВАЖНО: Восстанавливаем абсолютные границы
-                BoxMin = new Vector4(vo.LocalBoundsMin + vo.LocalCenterOfMass, 0),
-                BoxMax = new Vector4(vo.LocalBoundsMax + vo.LocalCenterOfMass, 0)
-            };
-        }
-
-        // B. Заливка в SSBO
-        if (count > 0)
-        {
-            GL.BindBuffer(BufferTarget.ShaderStorageBuffer, _dynamicObjectsBuffer);
-            GL.BufferSubData(BufferTarget.ShaderStorageBuffer, IntPtr.Zero, count * Marshal.SizeOf<GpuDynamicObject>(), _tempGpuObjectsArray);
-        }
-
-        // --- B. Растеризация объектов в Сетку (Grid) ---
-        Array.Fill(_cpuObjectGrid, (short)-1);
+        var vo = voxelObjects[i];
         
-        float snap = OBJ_GRID_CELL_SIZE;
-        Vector3 snappedCenter = new Vector3(
-            (float)Math.Floor(_worldManager.GetPlayerPosition().X / snap) * snap,
-            (float)Math.Floor(_worldManager.GetPlayerPosition().Y / snap) * snap,
-            (float)Math.Floor(_worldManager.GetPlayerPosition().Z / snap) * snap
-        );
-        float halfExtent = (OBJ_GRID_SIZE * OBJ_GRID_CELL_SIZE) / 2.0f;
-        Vector3 gridOrigin = snappedCenter - new Vector3(halfExtent);
-        _lastGridOrigin = gridOrigin; // Сохраняем для рендера
+        // Матрица трансформации (Local -> World)
+        // PhysicsWorld сам заботится о центре масс при создании Body, но 
+        // VoxelObject.Position - это позиция физического тела.
+        // VoxelObject.LocalCenterOfMass - смещение.
+        
+        // Трансформация: Сначала сдвиг на -CoM (чтобы вращать вокруг центра), потом Вращение, потом Позиция тела
+        Matrix4 model = Matrix4.CreateTranslation(-vo.LocalCenterOfMass) * 
+                        Matrix4.CreateFromQuaternion(vo.Rotation) * 
+                        Matrix4.CreateTranslation(vo.Position);
 
-        for (int i = 0; i < count; i++)
+        var col = MaterialRegistry.GetColor(vo.Material);
+
+        _tempGpuObjectsArray[i] = new GpuDynamicObject
         {
-            var vo = voxelObjects[i];
+            Model = model,
+            Color = new Vector4(col.r, col.g, col.b, 1.0f),
+            // Эти Bounds уже включают LocalCenterOfMass? 
+            // В VoxelObject: LocalBoundsMin = worldMin - LocalCenterOfMass.
+            // Значит это координаты относительно центра масс (физического центра).
+            // Нам нужно добавить LocalCenterOfMass обратно, если мы хотим "чистые" локальные координаты вокселей?
+            // НЕТ. Матрица 'model' выше уже включает сдвиг на -CoM.
+            // Значит, если мы берем вершину (0,0,0) (начало массива вокселей), 
+            // умножаем на model -> получаем (0 - CoM) * Rot + Pos. Все верно.
             
-            // --- ИСПРАВЛЕНИЕ: ТОЧНЫЙ РАСЧЕТ МИРОВОГО AABB ---
-            Vector3 localMin = vo.LocalBoundsMin - vo.LocalCenterOfMass;
-            Vector3 localMax = vo.LocalBoundsMax - vo.LocalCenterOfMass;
-
-            Vector3[] corners = new Vector3[8] {
-                new Vector3(localMin.X, localMin.Y, localMin.Z), new Vector3(localMax.X, localMin.Y, localMin.Z),
-                new Vector3(localMin.X, localMax.Y, localMin.Z), new Vector3(localMax.X, localMax.Y, localMin.Z),
-                new Vector3(localMin.X, localMin.Y, localMax.Z), new Vector3(localMax.X, localMin.Y, localMax.Z),
-                new Vector3(localMin.X, localMax.Y, localMax.Z), new Vector3(localMax.X, localMax.Y, localMax.Z)
-            };
-
-            Matrix4 transform = Matrix4.CreateFromQuaternion(vo.Rotation) * Matrix4.CreateTranslation(vo.Position);
-
-            Vector3 worldMin = new Vector3(float.MaxValue);
-            Vector3 worldMax = new Vector3(float.MinValue);
-
-            for (int k = 0; k < 8; k++)
-            {
-                Vector3 transformed = Vector3.TransformPosition(corners[k], transform);
-                worldMin = Vector3.ComponentMin(worldMin, transformed);
-                worldMax = Vector3.ComponentMax(worldMax, transformed);
-            }
-            // ---------------------------------------------
-
-            Vector3 gridMinF = (worldMin - gridOrigin) / OBJ_GRID_CELL_SIZE;
-            Vector3 gridMaxF = (worldMax - gridOrigin) / OBJ_GRID_CELL_SIZE;
-
-            int minX = Math.Max(0, (int)Math.Floor(gridMinF.X));
-            int minY = Math.Max(0, (int)Math.Floor(gridMinF.Y));
-            int minZ = Math.Max(0, (int)Math.Floor(gridMinF.Z));
-
-            int maxX = Math.Min(OBJ_GRID_SIZE - 1, (int)Math.Floor(gridMaxF.X));
-            int maxY = Math.Min(OBJ_GRID_SIZE - 1, (int)Math.Floor(gridMaxF.Y));
-            int maxZ = Math.Min(OBJ_GRID_SIZE - 1, (int)Math.Floor(gridMaxF.Z));
-
-            for (int z = minZ; z <= maxZ; z++)
-            for (int y = minY; y <= maxY; y++)
-            for (int x = minX; x <= maxX; x++)
-            {
-                int idx = x + OBJ_GRID_SIZE * (y + OBJ_GRID_SIZE * z);
-                _cpuObjectGrid[idx] = (short)i; 
-            }
-        }
-
-        GL.BindTexture(TextureTarget.Texture3D, _objectGridTexture);
-        GL.TexSubImage3D(TextureTarget.Texture3D, 0, 0, 0, 0, 
-            OBJ_GRID_SIZE, OBJ_GRID_SIZE, OBJ_GRID_SIZE, 
-            PixelFormat.RedInteger, PixelType.Short, _cpuObjectGrid);
+            // Но BoxMin/Max в VoxelObject.cs рассчитаны как "абсолютные" минус CoM.
+            // Значит, чтобы получить AABB в "пространстве вокселей" (где воксели от 0 до Size), 
+            // нам нужно прибавить CoM.
+            BoxMin = new Vector4(vo.LocalBoundsMin + vo.LocalCenterOfMass, 0),
+            BoxMax = new Vector4(vo.LocalBoundsMax + vo.LocalCenterOfMass, 0)
+        };
     }
+
+    // 2. Заливка данных объектов в SSBO
+    if (count > 0)
+    {
+        GL.BindBuffer(BufferTarget.ShaderStorageBuffer, _dynamicObjectsBuffer);
+        GL.BufferSubData(BufferTarget.ShaderStorageBuffer, IntPtr.Zero, count * Marshal.SizeOf<GpuDynamicObject>(), _tempGpuObjectsArray);
+    }
+
+    // 3. COMPUTE SHADER: Обновление сетки
+    // А. Расчет параметров сетки
+    float snap = OBJ_GRID_CELL_SIZE;
+    Vector3 snappedCenter = new Vector3(
+        (float)Math.Floor(_worldManager.GetPlayerPosition().X / snap) * snap,
+        (float)Math.Floor(_worldManager.GetPlayerPosition().Y / snap) * snap,
+        (float)Math.Floor(_worldManager.GetPlayerPosition().Z / snap) * snap
+    );
+    float halfExtent = (OBJ_GRID_SIZE * OBJ_GRID_CELL_SIZE) / 2.0f;
+    Vector3 gridOrigin = snappedCenter - new Vector3(halfExtent);
+    _lastGridOrigin = gridOrigin;
+
+    // Б. Очистка текстуры сетки (-1)
+    // ClearTexImage очищает значением. Нам нужно -1 (0xFFFF для short).
+    // OpenGL ожидает массив.
+    int clearVal = -1; 
+    GL.ClearTexImage(_objectGridTexture, 0, PixelFormat.RedInteger, PixelType.Short, new int[] { clearVal });
+
+    // В. Запуск шейдера
+    if (count > 0)
+    {
+        _gridComputeShader.Use();
+        _gridComputeShader.SetInt("uObjectCount", count);
+        _gridComputeShader.SetVector3("uGridOrigin", gridOrigin);
+        _gridComputeShader.SetFloat("uGridStep", OBJ_GRID_CELL_SIZE);
+        _gridComputeShader.SetInt("uGridSize", OBJ_GRID_SIZE);
+        
+        // Биндим текстуру для записи (Image Load/Store)
+        GL.BindImageTexture(0, _objectGridTexture, 0, true, 0, TextureAccess.WriteOnly, SizedInternalFormat.R16i);
+        
+        // Биндим SSBO объектов (binding = 2)
+        GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 2, _dynamicObjectsBuffer);
+
+        // Считаем кол-во групп
+        int groups = (count + 63) / 64; 
+        GL.DispatchCompute(groups, 1, 1);
+
+        // Г. Барьер памяти
+        // Гарантируем, что Compute Shader закончил писать в текстуру до того, как Fragment Shader начнет её читать
+        GL.MemoryBarrier(MemoryBarrierFlags.TextureFetchBarrierBit | MemoryBarrierFlags.ShaderImageAccessBarrierBit);
+    }
+}
 
     private Vector3 _lastGridOrigin;
 
@@ -340,6 +298,7 @@ private void UpdateDynamicObjectsAndGrid()
         _shader.SetMatrix4("uView", camera.GetViewMatrix());
         _shader.SetMatrix4("uProjection", camera.GetProjectionMatrix());
         _shader.SetFloat("uRenderDistance", _worldManager.GetViewRangeInVoxels());
+        _shader.SetVector3("uSunDir", Vector3.Normalize(new Vector3(0.5f, 0.8f, 0.2f)));
 
         // --- ДОБАВЬ ЭТОТ БЛОК ---
         // Вычисляем и передаем границы загруженной зоны для статики

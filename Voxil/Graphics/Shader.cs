@@ -55,7 +55,26 @@ public class Shader : IDisposable
     {
         if (!File.Exists(path))
             throw new FileNotFoundException($"Shader file not found: {path}");
-        return File.ReadAllText(path);
+    
+        string source = File.ReadAllText(path);
+        return RemoveComments(source);
+    }
+    
+    private static string RemoveComments(string source)
+    {
+        var lines = source.Split('\n');
+        var result = new System.Text.StringBuilder();
+    
+        foreach (var line in lines)
+        {
+            int commentIndex = line.IndexOf("//");
+            if (commentIndex >= 0)
+                result.AppendLine(line.Substring(0, commentIndex));
+            else
+                result.AppendLine(line);
+        }
+    
+        return result.ToString();
     }
 
     private int CompileShader(ShaderType type, string source)
