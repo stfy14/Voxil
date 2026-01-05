@@ -11,4 +11,7 @@
     
     // Кол-во потоков физики (Bepu)
     public static int PhysicsThreads = 1;
+    
+    // Тип воды: true = Procedural (Gerstner), false = Texture
+    public static bool UseProceduralWater = false; 
 }

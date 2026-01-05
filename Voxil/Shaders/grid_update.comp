@@ -2,9 +2,10 @@
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
 struct DynamicObject {
-    mat4 model; 
+    mat4 model;
+    mat4 invModel;
     vec4 color;
-    vec4 boxMin; 
+    vec4 boxMin;
     vec4 boxMax;
 };
 
@@ -12,7 +13,8 @@ layout(std430, binding = 2) buffer DynObjects {
     DynamicObject dynObjects[];
 };
 
-layout(binding = 0, r16i) uniform iimage3D uObjectGrid;
+// ВАЖНО: binding = 1 и r32i (как во Fragment Shader)
+layout(binding = 1, r32i) uniform iimage3D uObjectGrid;
 
 uniform int uObjectCount;
 uniform vec3 uGridOrigin;
@@ -23,8 +25,12 @@ void main() {
     uint idx = gl_GlobalInvocationID.x;
     if (idx >= uObjectCount) return;
 
+    // Мы пишем idx + 1, чтобы 0 оставался "пустотой"
+    int objectIdToWrite = int(idx + 1);
+
     DynamicObject obj = dynObjects[idx];
-    
+
+    // Вычисляем AABB объекта в мировых координатах
     vec3 corners[8];
     corners[0] = vec3(obj.boxMin.x, obj.boxMin.y, obj.boxMin.z);
     corners[1] = vec3(obj.boxMax.x, obj.boxMin.y, obj.boxMin.z);
@@ -43,17 +49,24 @@ void main() {
         worldMin = min(worldMin, worldPos);
         worldMax = max(worldMax, worldPos);
     }
-    
+
+    // Переводим в координаты сетки
     vec3 gridMinF = (worldMin - uGridOrigin) / uGridStep;
     vec3 gridMaxF = (worldMax - uGridOrigin) / uGridStep;
 
+    // Округляем до индексов ячеек
+    // clamp нужен, чтобы не писать за пределы текстуры
     ivec3 minI = ivec3(max(vec3(0), floor(gridMinF)));
     ivec3 maxI = ivec3(min(vec3(uGridSize - 1), floor(gridMaxF)));
-    
+
+    // Заполняем ячейки
     for (int z = minI.z; z <= maxI.z; z++) {
         for (int y = minI.y; y <= maxI.y; y++) {
             for (int x = minI.x; x <= maxI.x; x++) {
-                imageStore(uObjectGrid, ivec3(x, y, z), ivec4(int(idx), 0, 0, 0));
+                // Используем imageAtomicMax, если в одну клетку попадает несколько объектов,
+                // чтобы не было гонки потоков (хотя imageStore тоже сойдет для теста).
+                // Но лучше просто imageStore для скорости сейчас.
+                imageStore(uObjectGrid, ivec3(x, y, z), ivec4(objectIdToWrite, 0, 0, 0));
             }
         }
     }
