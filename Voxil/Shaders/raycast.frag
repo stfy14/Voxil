@@ -95,7 +95,7 @@ void main() {
         float ndotl = max(dot(normal, safeSunDir), 0.0);
         float shadowFactor = 0.0;
         if (ndotl > 0.0) {
-            shadowFactor = CalculateSoftShadow(hitPos, normal, safeSunDir);
+            shadowFactor = CalculateShadow(hitPos, normal, safeSunDir);
         }
 
         vec3 sunLightColor = vec3(1.0, 0.98, 0.95);

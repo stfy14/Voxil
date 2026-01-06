@@ -89,7 +89,7 @@ public GpuRaycastingRenderer(WorldManager worldManager)
 
 public void Load()
 {
-    SetWaterMode(GameSettings.UseProceduralWater); 
+    ReloadShader();
 
     _gridComputeShader = new Shader("Shaders/grid_update.comp");
 
@@ -258,7 +258,7 @@ private void UpdateDynamicObjectsAndGrid()
     }
 }
 
-public void SetWaterMode(bool useProcedural)
+public void ReloadShader()
 {
     // 1. Удаляем старый шейдер
     _shader?.Dispose();
@@ -266,15 +266,29 @@ public void SetWaterMode(bool useProcedural)
     // 2. Формируем список Defines
     var defines = new List<string>();
         
-    if (useProcedural)
+    // Вода
+    if (GameSettings.UseProceduralWater)
     {
         defines.Add("WATER_MODE_PROCEDURAL");
+    }
+
+    // Тени
+    switch (GameSettings.CurrentShadowMode)
+    {
+        case ShadowMode.Hard:
+            defines.Add("SHADOW_MODE_HARD");
+            break;
+        case ShadowMode.Soft:
+            defines.Add("SHADOW_MODE_SOFT");
+            break;
+        // ShadowMode.None - просто не добавляем ничего
     }
 
     // 3. Компилируем
     try 
     {
         _shader = new Shader("Shaders/raycast.vert", "Shaders/raycast.frag", defines);
+        Console.WriteLine($"[Renderer] Shader reloaded. Shadow: {GameSettings.CurrentShadowMode}, Water: {(GameSettings.UseProceduralWater ? "Proc" : "Tex")}");
     }
     catch (Exception ex)
     {
@@ -302,6 +316,8 @@ public void Render(Camera camera)
     
     // --- ПЕРЕДАЕМ ВРЕМЯ В ШЕЙДЕР ---
     _shader.SetFloat("uTime", _totalTime);
+    
+    _shader.SetInt("uSoftShadowSamples", GameSettings.SoftShadowSamples);
 
     Vector3 camPos = camera.Position;
     int camCx = (int)Math.Floor(camPos.X / ChunkSize);

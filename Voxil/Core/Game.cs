@@ -89,6 +89,32 @@ public class Game : GameWindow
             Close();
             return;
         }
+        
+        // J - Переключение режима
+        if (_input.IsKeyPressed(Keys.J))
+        {
+            GameSettings.CurrentShadowMode++;
+            if ((int)GameSettings.CurrentShadowMode > 2) 
+                GameSettings.CurrentShadowMode = ShadowMode.None;
+            _renderer.ReloadShader(); // Перекомпиляция
+            Console.WriteLine($"[Shadow Mode] Set to: {GameSettings.CurrentShadowMode}");
+        }
+
+        // [ - Уменьшить сэмплы
+        if (_input.IsKeyPressed(Keys.LeftBracket))
+        {
+            GameSettings.SoftShadowSamples = Math.Max(2, GameSettings.SoftShadowSamples / 2);
+            Console.WriteLine($"[Soft Shadows] Samples: {GameSettings.SoftShadowSamples}");
+            // Здесь НЕ нужен ReloadShader, так как это Uniform
+        }
+
+        // ] - Увеличить сэмплы
+        if (_input.IsKeyPressed(Keys.RightBracket))
+        {
+            GameSettings.SoftShadowSamples = Math.Min(64, GameSettings.SoftShadowSamples * 2);
+            Console.WriteLine($"[Soft Shadows] Samples: {GameSettings.SoftShadowSamples}");
+            // Здесь НЕ нужен ReloadShader
+        }
 
         // --- ПЕРЕКЛЮЧЕНИЕ ВОДЫ (H) ---
         if (_input.IsKeyPressed(Keys.H))
@@ -96,7 +122,7 @@ public class Game : GameWindow
             GameSettings.UseProceduralWater = !GameSettings.UseProceduralWater;
             
             // Сообщаем рендеру, что настройка изменилась
-            _renderer.SetWaterMode(GameSettings.UseProceduralWater);
+            _renderer.ReloadShader();
             
             Console.WriteLine($"[Water Mode] Set to: {(GameSettings.UseProceduralWater ? "Procedural" : "Texture")}");
         }
