@@ -34,45 +34,130 @@ bool IsSolid(ivec3 pos) {
     return ((packedVoxels[chunkIdx + (idx >> 2)] >> ((idx & 3) * 8)) & 0xFFu) != 0u;
 }
 
-// Главная функция трассировки статики
-bool TraceStaticRay(vec3 ro, vec3 rd, float maxDist, inout float tHit, inout uint matID, inout vec3 normal) {
-    ivec3 mapPos = ivec3(floor(ro)), stepDir = ivec3(sign(rd));
+// Вспомогательная функция (оставляем как есть или добавляем, если нет)
+float GetDistToNextChunkBoundary(vec3 p, vec3 rd) {
+    vec3 nextChunkPos = floor(p / 16.0) * 16.0;
+    if (rd.x > 0.0) nextChunkPos.x += 16.0;
+    if (rd.y > 0.0) nextChunkPos.y += 16.0;
+    if (rd.z > 0.0) nextChunkPos.z += 16.0;
+    vec3 dists = (nextChunkPos - p) / rd;
+    if (abs(rd.x) < 1e-6) dists.x = 1e30;
+    if (abs(rd.y) < 1e-6) dists.y = 1e30;
+    if (abs(rd.z) < 1e-6) dists.z = 1e30;
+    return min(min(dists.x, dists.y), dists.z);
+}
+
+bool TraceStaticRay(
+    vec3 ro,
+    vec3 rd,
+    float maxDist,
+inout float tHit,
+inout uint matID,
+inout vec3 normal
+) {
+    // Инициализация DDA
+    ivec3 mapPos = ivec3(floor(ro));
+    ivec3 stepDir = ivec3(sign(rd));
     vec3 deltaDist = abs(1.0 / rd);
-    vec3 sideDist = (sign(rd) * (vec3(mapPos) - ro) + (0.5 + 0.5 * sign(rd))) * deltaDist;
+
+    vec3 sideDist;
+    sideDist.x = (rd.x > 0.0 ? (float(mapPos.x + 1) - ro.x) : (ro.x - float(mapPos.x))) * deltaDist.x;
+    sideDist.y = (rd.y > 0.0 ? (float(mapPos.y + 1) - ro.y) : (ro.y - float(mapPos.y))) * deltaDist.y;
+    sideDist.z = (rd.z > 0.0 ? (float(mapPos.z + 1) - ro.z) : (ro.z - float(mapPos.z))) * deltaDist.z;
+
     vec3 mask = vec3(0);
-    ivec3 cachedChunkCoord = ivec3(-999999); int cachedChunkIdx = -1;
+
     ivec3 bMin = ivec3(uBoundMinX, uBoundMinY, uBoundMinZ) * 16;
     ivec3 bMax = ivec3(uBoundMaxX, uBoundMaxY, uBoundMaxZ) * 16;
 
-    // --- ИСПОЛЬЗУЕМ ДИНАМИЧЕСКИЙ ЛИМИТ ---
+    // Кэширование чанка
+    ivec3 cachedChunkCoord = ivec3(-999999);
+    int cachedChunkIdx = -1;
+
+    // Основной цикл луча
     for (int i = 0; i < uMaxRaySteps; i++) {
-        mask = (sideDist.x < sideDist.y) ?
-        ((sideDist.x < sideDist.z) ? vec3(1,0,0) : vec3(0,0,1)) :
-        ((sideDist.y < sideDist.z) ? vec3(0,1,0) : vec3(0,0,1));
-        sideDist += mask * deltaDist; mapPos += ivec3(mask) * stepDir;
-        float dist = dot(mask, sideDist - deltaDist);
-
-        // Дополнительная защита break'ом всё равно полезна
-        if (dist > maxDist) break;
-
+        // Проверка выхода за мир
         if (any(lessThan(mapPos, bMin)) || any(greaterThanEqual(mapPos, bMax))) break;
 
-        ivec3 chunkCoord = mapPos >> 4;
+        // Текущая дистанция (для ограничения дальности)
+        // DDA хранит дистанцию до СЛЕДУЮЩЕЙ грани, поэтому вычитаем deltaDist, чтобы получить ТЕКУЩУЮ
+        float currentT = dot(mask, sideDist - deltaDist);
+        if (currentT > maxDist) break;
+
+        // Определяем текущий чанк
+        ivec3 chunkCoord = mapPos >> 4; // Быстрое деление на 16
+
+        // Обновляем кэш страницы, если перешли в новый чанк
         if (chunkCoord != cachedChunkCoord) {
             cachedChunkCoord = chunkCoord;
             cachedChunkIdx = imageLoad(uPageTable, chunkCoord & (PAGE_TABLE_SIZE - 1)).r;
         }
-        if (cachedChunkIdx != -1) {
+
+        // === OPTIMIZATION: BLIND DDA (MACRO STEPPING) ===
+        if (cachedChunkIdx == -1) {
+            // Чанк пустой. Запускаем "слепой" цикл.
+            // Мы просто шагаем по сетке, не читая память, пока не выйдем из этого чанка.
+            // 32 шага достаточно, чтобы пройти любой чанк (16x16x16) насквозь по диагонали.
+            for (int k = 0; k < 32; k++) {
+                // Стандартный шаг DDA
+                mask = (sideDist.x < sideDist.y) ?
+                ((sideDist.x < sideDist.z) ? vec3(1,0,0) : vec3(0,0,1)) :
+                ((sideDist.y < sideDist.z) ? vec3(0,1,0) : vec3(0,0,1));
+
+                sideDist += mask * deltaDist;
+                mapPos += ivec3(mask) * stepDir;
+
+                // Быстрая проверка: вышли ли мы из текущего пустого чанка?
+                // Используем битовую маску ~15 (это то же самое, что floor(x/16)*16)
+                if ((mapPos.x & ~15) != (chunkCoord.x << 4) ||
+                (mapPos.y & ~15) != (chunkCoord.y << 4) ||
+                (mapPos.z & ~15) != (chunkCoord.z << 4)) {
+                    break; // Вышли! Возвращаемся в основной цикл
+                }
+            }
+            // Continue перезапустит основной цикл, обновит chunkCoord и проверит новый чанк
+            continue;
+        }
+
+        // === MICRO STEPPING (Внутри твердого чанка) ===
+        // Если чанк загружен, шагаем и проверяем воксели
+        // Лимит 64 на случай застревания, но обычно выход происходит раньше
+        for (int k = 0; k < 64; k++) {
             ivec3 local = mapPos & 15;
-            int voxelLinear = local.x + 16 * (local.y + 16 * local.z);
-            uint staticMat = (packedVoxels[cachedChunkIdx + (voxelLinear >> 2)] >> ((voxelLinear & 3) * 8)) & 0xFFu;
-            if (staticMat != 0u) {
-                tHit = dist;
-                matID = staticMat;
-                normal = -vec3(stepDir) * mask;
+            int voxelIdx = local.x + 16 * (local.y + 16 * local.z);
+            uint mat = (packedVoxels[cachedChunkIdx + (voxelIdx >> 2)] >> ((voxelIdx & 3) * 8)) & 0xFFu;
+
+            if (mat != 0u) {
+                // ПОПАДАНИЕ!
+                // Нормаль берется из mask. 
+                // Если mask пустой (первый шаг луча), берем обратное направление луча.
+                if (length(mask) < 0.5) normal = -stepDir;
+                else normal = -vec3(stepDir) * mask;
+
+                tHit = dot(mask, sideDist - deltaDist);
+                // Фикс для tHit на самом первом шаге
+                if (tHit < 0.0001) tHit = 0.0;
+
+                matID = mat;
                 return true;
+            }
+
+            // Шаг DDA
+            mask = (sideDist.x < sideDist.y) ?
+            ((sideDist.x < sideDist.z) ? vec3(1,0,0) : vec3(0,0,1)) :
+            ((sideDist.y < sideDist.z) ? vec3(0,1,0) : vec3(0,0,1));
+
+            sideDist += mask * deltaDist;
+            mapPos += ivec3(mask) * stepDir;
+
+            // Если вышли из чанка во время обычного шага
+            if ((mapPos.x >> 4) != chunkCoord.x ||
+            (mapPos.y >> 4) != chunkCoord.y ||
+            (mapPos.z >> 4) != chunkCoord.z) {
+                break;
             }
         }
     }
+
     return false;
 }
