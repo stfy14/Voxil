@@ -2,6 +2,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Threading;
+using System.Diagnostics;
 
 public class AsyncChunkPhysics : IDisposable
 {
@@ -12,6 +13,8 @@ public class AsyncChunkPhysics : IDisposable
 
     private readonly Thread _workerThread;
     private volatile bool _isDisposed;
+    
+    private Stopwatch _stopwatch = new Stopwatch(); 
 
     public AsyncChunkPhysics()
     {
@@ -65,26 +68,27 @@ public class AsyncChunkPhysics : IDisposable
     {
         if (chunk == null || !chunk.IsLoaded) return;
 
-        // Копируем воксели в безопасной среде
-        // Используем ArrayPool для временного буфера сырых данных
+        // ЗАМЕР НАЧАЛО
+        long startTicks = 0;
+        if (PerformanceMonitor.IsEnabled) startTicks = Stopwatch.GetTimestamp();
+
         var rawVoxels = System.Buffers.ArrayPool<MaterialType>.Shared.Rent(Chunk.Volume);
-        
-        // Используем наш новый метод в Chunk.cs, который мы сделали ранее,
-        // ЛИБО (для скорости) копируем напрямую под локом, как было раньше.
-        // Давай сделаем через GetVoxelsCopy(), который мы добавили, но он возвращает новый массив.
-        // Чтобы не аллоцировать лишнее, скопируем вручную тут:
         
         chunk.ReadVoxelsUnsafe((srcBytes) => 
         {
-             // Копируем byte[] в MaterialType[] (каст байт в байт)
-             Buffer.BlockCopy(srcBytes, 0, rawVoxels, 0, Chunk.Volume);
+            Buffer.BlockCopy(srcBytes, 0, rawVoxels, 0, Chunk.Volume);
         });
 
-        // Строим коллайдеры
         var resultData = VoxelPhysicsBuilder.GenerateColliders(rawVoxels, chunk.Position);
         
-        // Возвращаем буфер в пул
         System.Buffers.ArrayPool<MaterialType>.Shared.Return(rawVoxels);
+
+        // ЗАМЕР КОНЕЦ
+        if (PerformanceMonitor.IsEnabled)
+        {
+            long endTicks = Stopwatch.GetTimestamp();
+            PerformanceMonitor.Record(ThreadType.ChunkPhys, endTicks - startTicks);
+        }
 
         _outputQueue.Enqueue(new PhysicsBuildResult(chunk, resultData));
     }

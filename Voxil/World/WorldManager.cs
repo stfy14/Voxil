@@ -149,71 +149,48 @@ private void UpdateVisibleChunks()
     });
 }
 
+// "Математика" видимости. Решает, что добавить, а что удалить.
 private void CalculateChunksBackground(Vector3i center, HashSet<Vector3i> activeSnapshot, int viewDist, int height)
 {
     _chunksToLoadList.Clear();
     _chunksToUnloadList.Clear();
-    
-    // 1. Выгрузка (быстрая проверка)
-    // Вместо пересоздания HashSet просто проверяем дистанцию для активных чанков
-    long maxDistSq = (long)viewDist * viewDist;
-    foreach (var pos in activeSnapshot)
+    _requiredChunksSet.Clear();
+    _sortedLoadPositions.Clear();
+
+    int viewDistSq = viewDist * viewDist;
+
+    for (int x = -viewDist; x <= viewDist; x++)
     {
-        long dx = pos.X - center.X;
-        long dz = pos.Z - center.Z;
-        if (dx * dx + dz * dz > maxDistSq)
+        for (int z = -viewDist; z <= viewDist; z++)
         {
-            _chunksToUnloadList.Add(pos);
+            // УБРАЛИ: if (x * x + z * z > viewDistSq) continue;
+            for (int y = 0; y < height; y++) 
+                _requiredChunksSet.Add(new Vector3i(center.X + x, y, center.Z + z));
         }
     }
 
-    // 2. Загрузка по спирали (Сразу получаем отсортированный порядок!)
-    // Алгоритм спирали: идем кольцами радиуса r от 0 до viewDist
-    
-    // Центральный столб (r=0)
-    TryAddColumn(center.X, center.Z, center, activeSnapshot, height);
+    foreach (var pos in activeSnapshot) if (!_requiredChunksSet.Contains(pos)) _chunksToUnloadList.Add(pos);
+    foreach (var pos in _requiredChunksSet) if (!activeSnapshot.Contains(pos)) _sortedLoadPositions.Add(pos);
 
-    for (int r = 1; r <= viewDist; r++)
+    // Сортируем загрузку от центра к краям
+    _sortedLoadPositions.Sort((a, b) =>
     {
-        // Оптимизация: Если очередь загрузки уже переполнена (например, > 500 задач),
-        // прерываем расчет. Игрок все равно не увидит чанки за 64 блока, пока не загрузятся ближние.
-        if (_chunksToLoadList.Count > 1000) break; 
+        int dxA = a.X - center.X; int dzA = a.Z - center.Z;
+        int distA = dxA * dxA + dzA * dzA;
+        int dxB = b.X - center.X; int dzB = b.Z - center.Z;
+        int distB = dxB * dxB + dzB * dzB;
+        return distA.CompareTo(distB);
+    });
 
-        // Верхняя и нижняя грани кольца
-        for (int x = -r; x <= r; x++)
-        {
-            TryAddColumn(center.X + x, center.Z - r, center, activeSnapshot, height); // Top
-            TryAddColumn(center.X + x, center.Z + r, center, activeSnapshot, height); // Bottom
-        }
-        // Левая и правая грани (исключая углы, они уже добавлены)
-        for (int z = -r + 1; z <= r - 1; z++)
-        {
-            TryAddColumn(center.X - r, center.Z + z, center, activeSnapshot, height); // Left
-            TryAddColumn(center.X + r, center.Z + z, center, activeSnapshot, height); // Right
-        }
+    foreach (var pos in _sortedLoadPositions)
+    {
+        int dx = pos.X - center.X; int dz = pos.Z - center.Z;
+        int priority = dx * dx + dz * dz;
+        _chunksToLoadList.Add(new ChunkGenerationTask(pos, priority));
     }
 
     if (_chunksToUnloadList.Count > 0) _incomingChunksToUnload.Enqueue(new List<Vector3i>(_chunksToUnloadList));
     if (_chunksToLoadList.Count > 0) _incomingChunksToLoad.Enqueue(new List<ChunkGenerationTask>(_chunksToLoadList));
-}
-
-// Хелпер для добавления столба чанков
-private void TryAddColumn(int x, int z, Vector3i center, HashSet<Vector3i> active, int height)
-{
-    // Проверка круга (обрезаем углы квадрата)
-    long dx = x - center.X;
-    long dz = z - center.Z;
-    int distSq = (int)(dx*dx + dz*dz); // priority
-    
-    // Проходим по высоте
-    for (int y = 0; y < height; y++)
-    {
-        var pos = new Vector3i(x, y, z);
-        if (!active.Contains(pos))
-        {
-            _chunksToLoadList.Add(new ChunkGenerationTask(pos, distSq));
-        }
-    }
 }
 
 private void ApplyChunkUpdates()

@@ -4,27 +4,25 @@ using System.Threading;
 
 public enum ThreadType
 {
-    Generation,     // Генерация чанка (в среднем на 1 чанк)
-    Physics,        // Физика (общее время за кадр)
-    GpuRender       // Подготовка данных для GPU
+    Generation,     // Генерация ландшафта (Perlin)
+    Physics,        // Шаг симуляции BepuPhysics (Update)
+    ChunkPhys,      // Построение коллайдеров чанка (Meshing) <--- НОВОЕ
+    GpuRender       // Upload данных в GPU
 }
 
 public static class PerformanceMonitor
 {
-    // Глобальный рубильник. Volatile гарантирует, что потоки увидят изменение сразу.
     public static volatile bool IsEnabled = true;
 
-    // Храним тики (long), так как Interlocked работает с ними быстро
     private static long _genTicks; private static int _genCount;
-    private static long _physTicks; private static int _physCount;
+    private static long _physTicks; private static int _physCount; // Bepu Step
+    private static long _cPhysTicks; private static int _cPhysCount; // Chunk Collider Build
     private static long _gpuTicks; private static int _gpuCount;
 
-    // Частота таймера для перевода в миллисекунды
     private static readonly double _tickFrequency = Stopwatch.Frequency;
 
     public static void Record(ThreadType type, long elapsedTicks)
     {
-        // Если выключено - сразу выходим (хотя проверка должна быть и снаружи)
         if (!IsEnabled) return;
 
         switch (type)
@@ -37,6 +35,10 @@ public static class PerformanceMonitor
                 Interlocked.Add(ref _physTicks, elapsedTicks);
                 Interlocked.Increment(ref _physCount);
                 break;
+            case ThreadType.ChunkPhys: // <--- НОВОЕ
+                Interlocked.Add(ref _cPhysTicks, elapsedTicks);
+                Interlocked.Increment(ref _cPhysCount);
+                break;
             case ThreadType.GpuRender:
                 Interlocked.Add(ref _gpuTicks, elapsedTicks);
                 Interlocked.Increment(ref _gpuCount);
@@ -44,39 +46,46 @@ public static class PerformanceMonitor
         }
     }
 
-    public static Dictionary<string, string> GetDataAndReset()
+    // Теперь принимаем время, прошедшее с прошлого замера
+    public static Dictionary<string, string> GetDataAndReset(double elapsedSeconds)
     {
         if (!IsEnabled) return null;
 
-        // Забираем значения атомарно, обнуляя счетчики
         long genT = Interlocked.Exchange(ref _genTicks, 0);
         int genC = Interlocked.Exchange(ref _genCount, 0);
 
         long physT = Interlocked.Exchange(ref _physTicks, 0);
         int physC = Interlocked.Exchange(ref _physCount, 0);
+        
+        long cPhysT = Interlocked.Exchange(ref _cPhysTicks, 0);
+        int cPhysC = Interlocked.Exchange(ref _cPhysCount, 0);
 
         long gpuT = Interlocked.Exchange(ref _gpuTicks, 0);
         int gpuC = Interlocked.Exchange(ref _gpuCount, 0);
 
-        // Вспомогательная функция перевода
-        string FormatMs(long ticks, int count)
+        // Форматирование: Время выполнения (ms) | CPS (Chunks/Calls per Second)
+        string FormatStat(long ticks, int count, bool showCps)
         {
-            if (count == 0) return "0.0 ms";
-            // Среднее время = Всего тиков / Кол-во вызовов
+            if (count == 0) return "0.0 ms | 0.0/s";
+            
             double avgTicks = (double)ticks / count;
             double ms = (avgTicks / _tickFrequency) * 1000.0;
+            
+            if (showCps && elapsedSeconds > 0.0001)
+            {
+                double cps = (double)count / elapsedSeconds;
+                return $"{ms:F2} ms | {cps:F1}/s";
+            }
+            
             return $"{ms:F2} ms";
         }
-        
-        // Для физики и GPU нас интересует суммарное время за кадр (или за интервал замера),
-        // но так как мы сбрасываем счетчик раз в 0.2с, лучше показывать среднее время одной операции.
-        // Для физики это "шаг симуляции", для GPU это "кадр".
 
         return new Dictionary<string, string>
         {
-            ["Gen (avg/chunk)"] = FormatMs(genT, genC),
-            ["Physics (step)"]  = FormatMs(physT, physC),
-            ["GPU Upload"]      = FormatMs(gpuT, gpuC)
+            ["Gen (Perlin)"]   = FormatStat(genT, genC, true),  // Покажет CPS генерации
+            ["Build (Phys)"]   = FormatStat(cPhysT, cPhysC, true), // Покажет CPS мешинга
+            ["Sim (Bepu)"]     = FormatStat(physT, physC, false), // Просто время шага
+            ["GPU Upload"]     = FormatStat(gpuT, gpuC, true)   // Покажет скорость заливки
         };
     }
 }

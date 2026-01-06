@@ -167,10 +167,12 @@ public class Game : GameWindow
         if (!PerformanceMonitor.IsEnabled) return;
 
         _debugUpdateTimer += deltaTime;
-        if (_debugUpdateTimer >= 0.2f)
+        if (_debugUpdateTimer >= 0.25f)
         {
+            var averages = PerformanceMonitor.GetDataAndReset(_debugUpdateTimer);
+            
+            // Сбрасываем таймер ПОСЛЕ передачи данных
             _debugUpdateTimer = 0f;
-            var averages = PerformanceMonitor.GetDataAndReset();
             
             _debugLines.Clear();
             _debugLines.Add($"FPS: {1.0f / deltaTime:F0}");
@@ -186,10 +188,14 @@ public class Game : GameWindow
             _debugLines.Add($"[N/M] Phys Th:{GameSettings.PhysicsThreads}");
             _debugLines.Add($"[U/I] GPU Up: {GameSettings.GpuUploadSpeed}/frame");
 
-            _debugLines.Add("--- Perf ---");
+            _debugLines.Add("--- Perf (Avg Time | Rate) ---");
             if (averages != null)
             {
-                foreach(var kvp in averages) _debugLines.Add($"{kvp.Key}: {kvp.Value}");
+                foreach(var kvp in averages) 
+                {
+                    // Ключ: Значение
+                    _debugLines.Add($"{kvp.Key}: {kvp.Value}");
+                }
             }
         }
     }
