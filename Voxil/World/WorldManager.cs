@@ -269,21 +269,30 @@ public class WorldManager : IDisposable
 
     public void CreateDetachedObject(List<Vector3i> globalCluster)
     {
+        // Удаляем из мира (в глобальных индексах)
         foreach (var pos in globalCluster) RemoveVoxelGlobal(pos);
 
-        OpenTK.Mathematics.Vector3 min = new OpenTK.Mathematics.Vector3(float.MaxValue);
+        // Находим минимальный индекс (левый нижний угол кластера)
+        OpenTK.Mathematics.Vector3 minIndex = new OpenTK.Mathematics.Vector3(float.MaxValue);
         foreach (var v in globalCluster)
-            min = OpenTK.Mathematics.Vector3.ComponentMin(min, new OpenTK.Mathematics.Vector3(v.X, v.Y, v.Z));
+            minIndex = OpenTK.Mathematics.Vector3.ComponentMin(minIndex, new OpenTK.Mathematics.Vector3(v.X, v.Y, v.Z));
 
+        // Собираем локальные координаты (они остаются индексами, например 0,0,0; 1,0,0...)
         List<Vector3i> localVoxels = new List<Vector3i>();
+        Vector3i minIdxInt = new Vector3i((int)minIndex.X, (int)minIndex.Y, (int)minIndex.Z);
+        
         foreach (var v in globalCluster)
-            localVoxels.Add(v - new Vector3i((int)min.X, (int)min.Y, (int)min.Z));
+            localVoxels.Add(v - minIdxInt);
+
+        // ВАЖНО: Переводим минимальный индекс в МИРОВУЮ ПОЗИЦИЮ (МЕТРЫ)
+        // Если minIndex = (100, 10, 100), а воксель 0.125, то позиция = (12.5, 1.25, 12.5)
+        System.Numerics.Vector3 worldPos = (minIndex * Constants.VoxelSize).ToSystemNumerics();
 
         _objectsCreationQueue.Enqueue(new VoxelObjectCreationData
         {
             Voxels = localVoxels,
-            Material = MaterialType.Stone,
-            WorldPosition = min.ToSystemNumerics()
+            Material = MaterialType.Stone, // Можно доработать, чтобы брать материал из чанка
+            WorldPosition = worldPos
         });
     }
 
@@ -338,75 +347,194 @@ public class WorldManager : IDisposable
 
     public void DestroyVoxelAt(CollidableReference collidable, BepuVector3 worldHitLocation, BepuVector3 worldHitNormal)
     {
-        var pointInside = worldHitLocation - worldHitNormal * 0.05f;
-        
-        // ВАЖНО: Тут логика для вокселей 0.25м сложнее.
-        // Пока оставляем как есть, но физика разрушений будет баговать, пока не перепишем рейкаст под микро-воксели.
-        Vector3i globalPos = new Vector3i(
-            (int)Math.Floor(pointInside.X),
-            (int)Math.Floor(pointInside.Y),
-            (int)Math.Floor(pointInside.Z));
+        var pointInside = worldHitLocation - worldHitNormal * (Constants.VoxelSize * 0.5f);
 
         if (collidable.Mobility == CollidableMobility.Static)
         {
-            if (RemoveVoxelGlobal(globalPos))
+            // ... (старый код для статики / террейна) ...
+            Vector3i globalVoxelIndex = new Vector3i(
+                (int)Math.Floor(pointInside.X / Constants.VoxelSize),
+                (int)Math.Floor(pointInside.Y / Constants.VoxelSize),
+                (int)Math.Floor(pointInside.Z / Constants.VoxelSize));
+
+            if (RemoveVoxelGlobal(globalVoxelIndex))
             {
-                NotifyVoxelFastDestroyed(globalPos);
-                _integritySystem.QueueCheck(globalPos);
+                NotifyVoxelFastDestroyed(globalVoxelIndex);
+                _integritySystem.QueueCheck(globalVoxelIndex);
             }
         }
         else if (collidable.Mobility == CollidableMobility.Dynamic &&
                  _bodyToVoxelObjectMap.TryGetValue(collidable.BodyHandle, out var voxelObj))
         {
+            // === ДИНАМИКА ===
+            
             Matrix4 model = Matrix4.CreateTranslation(-voxelObj.LocalCenterOfMass) *
                             Matrix4.CreateFromQuaternion(voxelObj.Rotation) *
                             Matrix4.CreateTranslation(voxelObj.Position);
             Matrix4 invModel = Matrix4.Invert(model);
 
-            Vector4 localHit4 = new Vector4(pointInside.ToOpenTK(), 1.0f) * invModel;
-            Vector3i localVoxel = new Vector3i(
-                (int)Math.Floor(localHit4.X),
-                (int)Math.Floor(localHit4.Y),
-                (int)Math.Floor(localHit4.Z));
+            Vector4 localHitMeters = new Vector4(pointInside.ToOpenTK(), 1.0f) * invModel;
 
-            if (voxelObj.RemoveVoxel(localVoxel))
+            Vector3i localVoxelIndex = new Vector3i(
+                (int)Math.Floor(localHitMeters.X / Constants.VoxelSize),
+                (int)Math.Floor(localHitMeters.Y / Constants.VoxelSize),
+                (int)Math.Floor(localHitMeters.Z / Constants.VoxelSize));
+
+            // 1. Удаляем воксель
+            if (voxelObj.RemoveVoxel(localVoxelIndex))
             {
-                voxelObj.RebuildMeshAndPhysics(PhysicsWorld);
+                // Если объект стал пустым - выходим, OnEmpty его удалит
+                if (voxelObj.VoxelCoordinates.Count == 0) return;
+
+                // 2. Проверяем целостность (кластеризация)
+                var clusters = voxelObj.GetConnectedClusters();
+
+                if (clusters.Count == 1)
+                {
+                    // Обычный случай: просто перестраиваем текущий объект
+                    voxelObj.RebuildMeshAndPhysics(PhysicsWorld);
+                }
+                else
+                {
+                    // СЛУЧАЙ РАЗДЕЛЕНИЯ: Объект распался на части!
+                    // Оставляем самый большой кластер в текущем объекте, остальные отделяем.
+                    
+                    // Сортируем: самый большой первый
+                    clusters.Sort((a, b) => b.Count.CompareTo(a.Count));
+                    var mainCluster = clusters[0];
+
+                    // Удаляем лишние воксели из текущего объекта (оставляем только главный кластер)
+                    // Используем HashSet для скорости
+                    var mainSet = new HashSet<Vector3i>(mainCluster);
+                    voxelObj.VoxelCoordinates.RemoveAll(v => !mainSet.Contains(v));
+                    
+                    // Перестраиваем главный объект
+                    voxelObj.RebuildMeshAndPhysics(PhysicsWorld);
+
+                    // Создаем новые объекты для остальных кластеров
+                    for (int i = 1; i < clusters.Count; i++)
+                    {
+                        SpawnSplitCluster(clusters[i], voxelObj);
+                    }
+                }
             }
         }
     }
-
-    private bool RemoveVoxelGlobal(Vector3i globalPos)
+    
+    private void SpawnSplitCluster(List<Vector3i> localClusterVoxels, VoxelObject parentObj)
     {
-        Vector3i chunkPos = GetChunkPosFromGlobal(globalPos);
+        // 1. Берем первый воксель как "Якорь" (Anchor)
+        Vector3i anchorIdx = localClusterVoxels[0];
+        
+        // 2. Нормализуем координаты нового кластера относительно якоря
+        // (чтобы координаты начинались с 0,0,0)
+        List<Vector3i> newLocalVoxels = new List<Vector3i>();
+        foreach(var v in localClusterVoxels)
+        {
+            newLocalVoxels.Add(v - anchorIdx);
+        }
+
+        // 3. Предсказываем Центр Масс (CoM) нового объекта
+        // CoM - это среднее арифметическое центров всех вокселей
+        System.Numerics.Vector3 calculatedLocalCoM = System.Numerics.Vector3.Zero;
+        foreach (var v in newLocalVoxels)
+        {
+            // Центр вокселя = (idx + 0.5) * size
+            calculatedLocalCoM += (v.ToSystemNumerics() + new System.Numerics.Vector3(0.5f)) * Constants.VoxelSize;
+        }
+        if (newLocalVoxels.Count > 0)
+            calculatedLocalCoM /= newLocalVoxels.Count;
+
+        // 4. Вычисляем МИРОВУЮ позицию якоря (где он был в старом объекте)
+        // Pos = BodyPos + Rot * (LocalPos - OldCoM)
+        
+        // Локальная позиция якоря в РОДИТЕЛЕ (в метрах)
+        System.Numerics.Vector3 anchorPosInParent = (anchorIdx.ToSystemNumerics() + new System.Numerics.Vector3(0.5f)) * Constants.VoxelSize;
+        // Смещаем на центр масс родителя (так хранятся данные в VoxelObject)
+        anchorPosInParent -= parentObj.LocalCenterOfMass.ToSystemNumerics();
+        
+        // Переводим в мир
+        System.Numerics.Vector3 anchorWorldPos = parentObj.Position.ToSystemNumerics() + 
+            System.Numerics.Vector3.Transform(anchorPosInParent, parentObj.Rotation.ToSystemNumerics());
+
+        // 5. Вычисляем, где должен быть ЦЕНТР ТЕЛА нового объекта
+        // Мы знаем: VisualPos = BodyPos + Rot * (LocalVoxPos - NewCoM)
+        // Для якоря (LocalVoxPos = 0.5*Size) мы хотим VisualPos == anchorWorldPos.
+        // anchorWorldPos = BodyPos + Rot * ( (0.5*size) - NewCoM )
+        // BodyPos = anchorWorldPos - Rot * ( (0.5*size) - NewCoM )
+        
+        // Позиция якоря в локальной системе НОВОГО объекта (просто половина вокселя)
+        System.Numerics.Vector3 anchorInNewLocal = new System.Numerics.Vector3(0.5f) * Constants.VoxelSize;
+        
+        // Вектор от центра тела до якоря
+        System.Numerics.Vector3 offset = anchorInNewLocal - calculatedLocalCoM;
+        
+        // Поворачиваем этот вектор (новый объект наследует вращение родителя)
+        System.Numerics.Vector3 rotatedOffset = System.Numerics.Vector3.Transform(offset, parentObj.Rotation.ToSystemNumerics());
+        
+        // Итоговая позиция тела
+        System.Numerics.Vector3 finalSpawnPos = anchorWorldPos - rotatedOffset;
+
+        // Создаем
+        _objectsCreationQueue.Enqueue(new VoxelObjectCreationData
+        {
+            Voxels = newLocalVoxels,
+            Material = parentObj.Material,
+            WorldPosition = finalSpawnPos
+        });
+    }
+
+    private bool RemoveVoxelGlobal(Vector3i globalVoxelIndex)
+    {
+        Vector3i chunkPos = GetChunkPosFromVoxelIndex(globalVoxelIndex);
+        
         if (_chunks.TryGetValue(chunkPos, out var chunk) && chunk.IsLoaded)
         {
-            // Здесь координаты нужно переводить аккуратно, пока оставим старую логику, но с новыми константами
-            Vector3i localPos = globalPos - (chunkPos * Constants.ChunkSizeWorld);
-            return chunk.RemoveVoxelAndUpdate(localPos);
+            // Переводим Глобальный Индекс -> Локальный Индекс внутри чанка (0..127)
+            // Используем ChunkResolution (128)
+            int res = Constants.ChunkResolution;
+            
+            // Правильный математический остаток (на случай отрицательных координат)
+            int lx = globalVoxelIndex.X % res; if(lx < 0) lx += res;
+            int ly = globalVoxelIndex.Y % res; if(ly < 0) ly += res;
+            int lz = globalVoxelIndex.Z % res; if(lz < 0) lz += res;
+            
+            return chunk.RemoveVoxelAndUpdate(new Vector3i(lx, ly, lz));
         }
         return false;
     }
 
-    private Vector3i GetChunkPosFromGlobal(Vector3i p) => new Vector3i(
-        (int)Math.Floor((float)p.X / Constants.ChunkSizeWorld),
-        (int)Math.Floor((float)p.Y / Constants.ChunkSizeWorld),
-        (int)Math.Floor((float)p.Z / Constants.ChunkSizeWorld));
+    // Хелпер: Получить позицию чанка по ГЛОБАЛЬНОМУ ИНДЕКСУ вокселя
+    private Vector3i GetChunkPosFromVoxelIndex(Vector3i voxelIndex) => new Vector3i(
+        (int)Math.Floor((float)voxelIndex.X / Constants.ChunkResolution),
+        (int)Math.Floor((float)voxelIndex.Y / Constants.ChunkResolution),
+        (int)Math.Floor((float)voxelIndex.Z / Constants.ChunkResolution));
 
-    public bool IsVoxelSolidGlobal(Vector3i globalPos)
+    // Для других нужд (если где-то еще используется позиция в метрах)
+    private Vector3i GetChunkPosFromWorldMeters(OpenTK.Mathematics.Vector3 p) => new Vector3i(
+        (int)Math.Floor(p.X / Constants.ChunkSizeWorld),
+        (int)Math.Floor(p.Y / Constants.ChunkSizeWorld),
+        (int)Math.Floor(p.Z / Constants.ChunkSizeWorld));
+
+    // Проверка твердости (также обновлена на индексы)
+    public bool IsVoxelSolidGlobal(Vector3i globalVoxelIndex)
     {
-        var chunkPos = GetChunkPosFromGlobal(globalPos);
+        Vector3i chunkPos = GetChunkPosFromVoxelIndex(globalVoxelIndex);
         if (_chunks.TryGetValue(chunkPos, out var chunk) && chunk.IsLoaded)
         {
-            var local = globalPos - chunkPos * Constants.ChunkSizeWorld;
-            return chunk.IsVoxelSolidAt(local);
+            int res = Constants.ChunkResolution;
+            int lx = globalVoxelIndex.X % res; if (lx < 0) lx += res;
+            int ly = globalVoxelIndex.Y % res; if (ly < 0) ly += res;
+            int lz = globalVoxelIndex.Z % res; if (lz < 0) lz += res;
+            
+            return chunk.IsVoxelSolidAt(new Vector3i(lx, ly, lz));
         }
         return false;
     }
 
-    public bool IsChunkLoadedAt(Vector3i globalPos)
+    public bool IsChunkLoadedAt(Vector3i globalVoxelIndex)
     {
-        var chunkPos = GetChunkPosFromGlobal(globalPos);
+        Vector3i chunkPos = GetChunkPosFromVoxelIndex(globalVoxelIndex);
         return _chunks.ContainsKey(chunkPos) && _chunks[chunkPos].IsLoaded;
     }
 
@@ -454,5 +582,17 @@ public class WorldManager : IDisposable
         
         foreach(var vo in _voxelObjects) vo.Dispose();
         _voxelObjects.Clear();
+    }
+    
+    public void SpawnTestVoxel(System.Numerics.Vector3 position, MaterialType material)
+    {
+        var voxels = new List<Vector3i> { new Vector3i(0, 0, 0) };
+        
+        _objectsCreationQueue.Enqueue(new VoxelObjectCreationData
+        {
+            Voxels = voxels,
+            Material = material,
+            WorldPosition = position
+        });
     }
 }

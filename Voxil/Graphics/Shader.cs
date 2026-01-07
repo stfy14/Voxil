@@ -16,19 +16,13 @@ public class Shader : IDisposable
     public Shader(string vertexPath, string fragmentPath, List<string> defines = null)
     {
         _name = $"{vertexPath}+{fragmentPath}";
-
-        // 1. Загружаем исходники (с обработкой #include и удалением комментариев)
         string vsSource = LoadSource(vertexPath);
         string fsSource = LoadSource(fragmentPath);
 
-        // 2. Внедряем #define
-        if (defines != null && defines.Count > 0)
-        {
-            vsSource = InjectDefines(vsSource, defines);
-            fsSource = InjectDefines(fsSource, defines);
-        }
+        // ВАЖНО: Вызываем InjectDefines ВСЕГДА, чтобы вставить константы из Constants.cs
+        vsSource = InjectDefines(vsSource, defines);
+        fsSource = InjectDefines(fsSource, defines);
 
-        // 3. Компилируем
         int vs = CompileShader(ShaderType.VertexShader, vsSource);
         int fs = CompileShader(ShaderType.FragmentShader, fsSource);
 
@@ -44,8 +38,8 @@ public class Shader : IDisposable
         _name = computePath;
         string source = LoadSource(computePath);
 
-        if (defines != null && defines.Count > 0)
-            source = InjectDefines(source, defines);
+        // ВАЖНО: Вызываем InjectDefines ВСЕГДА
+        source = InjectDefines(source, defines);
 
         int cs = CompileShader(ShaderType.ComputeShader, source);
         Handle = LinkProgram(cs);
@@ -156,24 +150,42 @@ public class Shader : IDisposable
         return sb.ToString();
     }
 
-    private static string InjectDefines(string source, List<string> defines)
+    private static string InjectDefines(string source, List<string> extraDefines)
     {
+        // 1. Получаем наши глобальные константы из C#
+        string globalDefines = ShaderDefines.GetGlslDefines();
+
+        // 2. Собираем дополнительные дефайны (Shadows, Water и т.д.)
+        var sb = new System.Text.StringBuilder();
+        sb.Append(globalDefines); // Сначала вставляем глобальные настройки
+        
+        if (extraDefines != null)
+        {
+            foreach (var def in extraDefines)
+            {
+                sb.AppendLine($"#define {def}");
+            }
+        }
+        
+        string injectionBlock = sb.ToString();
+
+        // 3. Вставляем всё это ПОСЛЕ #version
         int versionIndex = source.IndexOf("#version");
         int insertIndex = 0;
 
         if (versionIndex != -1)
         {
+            // Ищем конец строки с версией
             int endOfLine = source.IndexOf('\n', versionIndex);
             insertIndex = endOfLine + 1;
         }
-
-        var sb = new StringBuilder();
-        foreach (var def in defines)
+        else
         {
-            sb.AppendLine($"#define {def}");
+            // Если #version нет (странно, но бывает в инклюдах), вставляем в начало
+            insertIndex = 0;
         }
 
-        return source.Insert(insertIndex, sb.ToString());
+        return source.Insert(insertIndex, injectionBlock);
     }
 
     // --- COMPILE & LINK ---

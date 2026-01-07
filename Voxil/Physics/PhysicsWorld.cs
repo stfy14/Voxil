@@ -147,12 +147,20 @@ public class PhysicsWorld : IDisposable
 
             using (var compoundBuilder = new CompoundBuilder(_bufferPool, Simulation.Shapes, voxelCoordinates.Count))
             {
-                var boxShape = new Box(1f, 1f, 1f);
+                // ВАЖНО: Размер бокса теперь равен размеру вокселя!
+                float s = Constants.VoxelSize;
+                var boxShape = new Box(s, s, s);
+                
                 float voxelMass = MaterialRegistry.Get(material).MassPerVoxel;
 
                 foreach (var coord in voxelCoordinates)
                 {
-                    var pos = new BepuVector3(coord.X + 0.5f, coord.Y + 0.5f, coord.Z + 0.5f);
+                    // ВАЖНО: Позиция внутри компаунда тоже умножается на размер вокселя
+                    var pos = new BepuVector3(
+                        (coord.X + 0.5f) * s, 
+                        (coord.Y + 0.5f) * s, 
+                        (coord.Z + 0.5f) * s);
+                        
                     compoundBuilder.Add(boxShape, new RigidPose(pos), voxelMass);
                 }
 
@@ -176,7 +184,7 @@ public class PhysicsWorld : IDisposable
                     new RigidPose(initialPosition),
                     inertia,
                     new CollidableDescription(compoundShapeIndex, 0.1f),
-                    new BodyActivityDescription(-1) // -1 = Always Active
+                    new BodyActivityDescription(-1)
                 );
                 
                 return Simulation.Bodies.Add(bodyDescription);

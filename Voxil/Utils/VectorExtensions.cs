@@ -1,33 +1,39 @@
-﻿// /Utils/VectorExtensions.cs
-using OpenTK.Mathematics;
+﻿using OpenTK.Mathematics;
 
 public static class VectorExtensions
 {
-    // OpenTK Vector3 -> System.Numerics Vector3
+    // --- Vector3 ---
     public static System.Numerics.Vector3 ToSystemNumerics(this OpenTK.Mathematics.Vector3 vec)
     {
         return new System.Numerics.Vector3(vec.X, vec.Y, vec.Z);
     }
 
-    // OpenTK Vector3i -> System.Numerics Vector3
-    public static System.Numerics.Vector3 ToSystemNumerics(this OpenTK.Mathematics.Vector3i vec)
-    {
-        return new System.Numerics.Vector3(vec.X, vec.Y, vec.Z);
-    }
-
-    // System.Numerics Vector3 -> OpenTK Vector3
     public static OpenTK.Mathematics.Vector3 ToOpenTK(this System.Numerics.Vector3 vec)
     {
         return new OpenTK.Mathematics.Vector3(vec.X, vec.Y, vec.Z);
     }
 
-    // --- ДОБАВЛЕННЫЙ МЕТОД ---
-    // OpenTK Vector3i -> OpenTK Vector3
+    // --- Vector3i ---
+    public static System.Numerics.Vector3 ToSystemNumerics(this OpenTK.Mathematics.Vector3i vec)
+    {
+        return new System.Numerics.Vector3(vec.X, vec.Y, vec.Z);
+    }
+
     public static OpenTK.Mathematics.Vector3 ToOpenTK(this OpenTK.Mathematics.Vector3i vec)
     {
         return new OpenTK.Mathematics.Vector3(vec.X, vec.Y, vec.Z);
     }
-    // --------------------------
+
+    // --- QUATERNION (НОВОЕ) ---
+    public static System.Numerics.Quaternion ToSystemNumerics(this OpenTK.Mathematics.Quaternion q)
+    {
+        return new System.Numerics.Quaternion(q.X, q.Y, q.Z, q.W);
+    }
+
+    public static OpenTK.Mathematics.Quaternion ToOpenTK(this System.Numerics.Quaternion q)
+    {
+        return new OpenTK.Mathematics.Quaternion(q.X, q.Y, q.Z, q.W);
+    }
 
     public static int LengthSquared(this OpenTK.Mathematics.Vector3i vec)
     {

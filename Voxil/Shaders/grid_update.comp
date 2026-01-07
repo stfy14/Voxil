@@ -1,6 +1,8 @@
 #version 450 core
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
+// === СТРУКТУРЫ ===
+
 struct DynamicObject {
     mat4 model;
     mat4 invModel;
@@ -9,12 +11,31 @@ struct DynamicObject {
     vec4 boxMax;
 };
 
+struct ListNode {
+    uint objectID;
+    int nextNode;
+};
+
+// === БУФЕРЫ ===
+
+// Binding 2: Массив объектов (только чтение)
 layout(std430, binding = 2) buffer DynObjects {
     DynamicObject dynObjects[];
 };
 
-// ВАЖНО: binding = 1 и r32i (как во Fragment Shader)
-layout(binding = 1, r32i) uniform iimage3D uObjectGrid;
+// Binding 3: Массив узлов списка (запись)
+// Используем имя listNodes для надежности
+layout(std430, binding = 3) buffer LinkedList {
+    ListNode listNodes[];
+};
+
+// Binding 1: Текстура-голова (R32I)
+layout(binding = 1, r32i) uniform iimage3D uObjectGridHead;
+
+// Binding 4: Атомарный счетчик
+layout(binding = 4, offset = 0) uniform atomic_uint uCounter;
+
+// === UNIFORMS ===
 
 uniform int uObjectCount;
 uniform vec3 uGridOrigin;
@@ -25,12 +46,11 @@ void main() {
     uint idx = gl_GlobalInvocationID.x;
     if (idx >= uObjectCount) return;
 
-    // Мы пишем idx + 1, чтобы 0 оставался "пустотой"
-    int objectIdToWrite = int(idx + 1);
-
+    // ID объекта (1-based)
+    uint objectID = idx + 1;
     DynamicObject obj = dynObjects[idx];
 
-    // Вычисляем AABB объекта в мировых координатах
+    // Вычисляем AABB (Axis Aligned Bounding Box)
     vec3 corners[8];
     corners[0] = vec3(obj.boxMin.x, obj.boxMin.y, obj.boxMin.z);
     corners[1] = vec3(obj.boxMax.x, obj.boxMin.y, obj.boxMin.z);
@@ -50,12 +70,11 @@ void main() {
         worldMax = max(worldMax, worldPos);
     }
 
-    // Переводим в координаты сетки
+    // Переводим AABB в координаты сетки
     vec3 gridMinF = (worldMin - uGridOrigin) / uGridStep;
     vec3 gridMaxF = (worldMax - uGridOrigin) / uGridStep;
 
-    // Округляем до индексов ячеек
-    // clamp нужен, чтобы не писать за пределы текстуры
+    // Ограничиваем индексами сетки
     ivec3 minI = ivec3(max(vec3(0), floor(gridMinF)));
     ivec3 maxI = ivec3(min(vec3(uGridSize - 1), floor(gridMaxF)));
 
@@ -63,10 +82,23 @@ void main() {
     for (int z = minI.z; z <= maxI.z; z++) {
         for (int y = minI.y; y <= maxI.y; y++) {
             for (int x = minI.x; x <= maxI.x; x++) {
-                // Используем imageAtomicMax, если в одну клетку попадает несколько объектов,
-                // чтобы не было гонки потоков (хотя imageStore тоже сойдет для теста).
-                // Но лучше просто imageStore для скорости сейчас.
-                imageStore(uObjectGrid, ivec3(x, y, z), ivec4(objectIdToWrite, 0, 0, 0));
+
+                // 1. Атомарно выделяем место в буфере узлов
+                uint nodeIndex = atomicCounterIncrement(uCounter);
+
+                // Защита от переполнения буфера (2 млн узлов)
+                if (nodeIndex >= 2000000) return;
+
+                // Индекс для хранения в текстуре (1-based, чтобы 0 был null)
+                int storedNodeIndex = int(nodeIndex) + 1;
+
+                // 2. Атомарно обновляем голову списка в текстуре
+                // imageAtomicExchange возвращает старое значение (которое станет nextNode)
+                int oldHead = imageAtomicExchange(uObjectGridHead, ivec3(x, y, z), storedNodeIndex);
+
+                // 3. Записываем данные в узел
+                listNodes[nodeIndex].objectID = objectID;
+                listNodes[nodeIndex].nextNode = oldHead;
             }
         }
     }

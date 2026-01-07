@@ -1,7 +1,6 @@
-﻿// /Physics/VoxelPhysicsBuilder.cs
-using OpenTK.Mathematics;
+﻿using OpenTK.Mathematics;
 using System;
-using System.Buffers; // <--- Не забудь!
+using System.Buffers;
 using System.Collections.Generic;
 using BepuVector3 = System.Numerics.Vector3;
 
@@ -11,7 +10,6 @@ public struct VoxelCollider
     public BepuVector3 HalfSize;
 }
 
-// Структура-результат, чтобы вернуть массив и его реальную длину
 public struct PhysicsBuildResultData : IDisposable
 {
     public VoxelCollider[] CollidersArray;
@@ -29,83 +27,144 @@ public struct PhysicsBuildResultData : IDisposable
 
 public static class VoxelPhysicsBuilder
 {
-    // Меняем возвращаемый тип с List на нашу структуру
+    private const int Size = Constants.ChunkResolution; // 64
+    private const int Volume = Constants.ChunkVolume;   // 262144
+    private const float VoxelSize = Constants.VoxelSize; // 0.25f
+
     public static PhysicsBuildResultData GenerateColliders(MaterialType[] voxels, Vector3i chunkPos)
     {
-        int size =Constants.ChunkSizeWorld;
-        int volume = Chunk.Volume;
+        // 1. Арендуем массив visited, чтобы не выделять память в куче
+        bool[] visited = ArrayPool<bool>.Shared.Rent(Volume);
+        Array.Clear(visited, 0, Volume);
 
-        // 1. Арендуем массив visited (вместо new bool[])
-        bool[] visited = ArrayPool<bool>.Shared.Rent(volume);
-        Array.Clear(visited, 0, volume); // Обязательно чистим, так как он из пула
-
-        // 2. Арендуем массив для коллайдеров (максимум коллайдеров = объему чанка, хоть это и редкость)
-        // Это предотвращает ресайзы List<>, которые убивают память.
-        VoxelCollider[] collidersBuffer = ArrayPool<VoxelCollider>.Shared.Rent(volume);
+        // 2. Арендуем массив результатов (максимум может быть равен объему, но greedy сократит это в сотни раз)
+        VoxelCollider[] collidersBuffer = ArrayPool<VoxelCollider>.Shared.Rent(Volume);
         int colliderCount = 0;
 
         try
         {
-            bool IsSolid(int x, int y, int z)
+            // Хелпер для проверки твердости и посещенности
+            // Индекс в массиве: x + Size * (y + Size * z)
+            bool IsSolidAndUnvisited(int x, int y, int z)
             {
-                if (x < 0 || x >= size || y < 0 || y >= size || z < 0 || z >= size) return false;
-                // ВАЖНО: voxels тоже может быть больше объема (из-за пула), используем правильный индекс
-                return MaterialRegistry.IsSolidForPhysics(voxels[x + size * (y + size * z)]);
+                if (x >= Size || y >= Size || z >= Size) return false;
+                int idx = x + Size * (y + Size * z);
+                return !visited[idx] && MaterialRegistry.IsSolidForPhysics(voxels[idx]);
             }
 
-            for (int y = 0; y < size; y++)
+            // Хелпер для пометки
+            void MarkVisited(int startX, int startY, int startZ, int sizeX, int sizeY, int sizeZ)
             {
-                for (int z = 0; z < size; z++)
+                for (int z = startZ; z < startZ + sizeZ; z++)
                 {
-                    for (int x = 0; x < size; x++)
+                    for (int y = startY; y < startY + sizeY; y++)
                     {
-                        int index = x + size * (y + size * z);
-
-                        if (!visited[index] && MaterialRegistry.IsSolidForPhysics(voxels[index]))
+                        int rowStart = startX + Size * (y + Size * z);
+                        // Заполняем линию по X (можно оптимизировать через Span.Fill, но так надежнее)
+                        for (int k = 0; k < sizeX; k++)
                         {
-                            // Оптимизация внутренних блоков (без изменений)
-                            if (IsSolid(x + 1, y, z) && IsSolid(x - 1, y, z) &&
-                                IsSolid(x, y + 1, z) && IsSolid(x, y - 1, z) &&
-                                IsSolid(x, y, z + 1) && IsSolid(x, y, z - 1))
-                            {
-                                visited[index] = true;
-                                continue;
-                            }
-
-                            // Greedy Strip по X
-                            int width = 1;
-                            while (x + width < size)
-                            {
-                                int nextIdx = (x + width) + size * (y + size * z);
-                                if (visited[nextIdx] || !MaterialRegistry.IsSolidForPhysics(voxels[nextIdx])) break;
-                                width++;
-                            }
-
-                            for (int k = 0; k < width; k++) visited[(x + k) + size * (y + size * z)] = true;
-
-                            // Записываем в массив вместо List.Add
-                            collidersBuffer[colliderCount] = new VoxelCollider
-                            {
-                                Position = new BepuVector3(x + width / 2f, y + 0.5f, z + 0.5f),
-                                HalfSize = new BepuVector3(width / 2f, 0.5f, 0.5f)
-                            };
-                            colliderCount++;
-                            
-                            x += width - 1;
+                            visited[rowStart + k] = true;
                         }
                     }
                 }
             }
 
-            return new PhysicsBuildResultData 
-            { 
-                CollidersArray = collidersBuffer, 
-                Count = colliderCount 
+            // --- GREEDY MESHING 3D ---
+            // Проходим по всем вокселям
+            for (int z = 0; z < Size; z++)
+            {
+                for (int y = 0; y < Size; y++)
+                {
+                    for (int x = 0; x < Size; x++)
+                    {
+                        // Если воксель пустой или уже обработан - пропускаем
+                        if (!IsSolidAndUnvisited(x, y, z)) continue;
+
+                        // 1. Растем по X (Ширина)
+                        int width = 1;
+                        while (IsSolidAndUnvisited(x + width, y, z))
+                        {
+                            width++;
+                        }
+
+                        // 2. Растем по Y (Высота) - проверяем, можно ли поднять весь ряд шириной 'width'
+                        int height = 1;
+                        bool canExtendY = true;
+                        while (canExtendY)
+                        {
+                            // Проверяем следующий ряд по Y
+                            int nextY = y + height;
+                            if (nextY >= Size) break;
+
+                            for (int k = 0; k < width; k++)
+                            {
+                                if (!IsSolidAndUnvisited(x + k, nextY, z))
+                                {
+                                    canExtendY = false;
+                                    break;
+                                }
+                            }
+                            if (canExtendY) height++;
+                        }
+
+                        // 3. Растем по Z (Глубина) - проверяем, можно ли углубить прямоугольник 'width * height'
+                        int depth = 1;
+                        bool canExtendZ = true;
+                        while (canExtendZ)
+                        {
+                            int nextZ = z + depth;
+                            if (nextZ >= Size) break;
+
+                            for (int py = 0; py < height; py++)
+                            {
+                                for (int px = 0; px < width; px++)
+                                {
+                                    if (!IsSolidAndUnvisited(x + px, y + py, nextZ))
+                                    {
+                                        canExtendZ = false;
+                                        break; // Выход из внутреннего цикла
+                                    }
+                                }
+                                if (!canExtendZ) break; // Выход из среднего цикла
+                            }
+                            if (canExtendZ) depth++;
+                        }
+
+                        // 4. Добавляем коллайдер
+                        // Центр коллайдера в локальных координатах чанка (метры)
+                        // x,y,z - начало (в индексах)
+                        // width, height, depth - размеры (в индексах)
+                        // Координата центра = (Start + Size/2) * VoxelSize
+                        
+                        float centerX = (x + width / 2f) * VoxelSize;
+                        float centerY = (y + height / 2f) * VoxelSize;
+                        float centerZ = (z + depth / 2f) * VoxelSize;
+
+                        collidersBuffer[colliderCount] = new VoxelCollider
+                        {
+                            Position = new BepuVector3(centerX, centerY, centerZ),
+                            HalfSize = new BepuVector3(
+                                (width * VoxelSize) / 2f, 
+                                (height * VoxelSize) / 2f, 
+                                (depth * VoxelSize) / 2f
+                            )
+                        };
+                        colliderCount++;
+
+                        // 5. Помечаем воксели как обработанные
+                        MarkVisited(x, y, z, width, height, depth);
+                    }
+                }
+            }
+
+            return new PhysicsBuildResultData
+            {
+                CollidersArray = collidersBuffer,
+                Count = colliderCount
             };
         }
         finally
         {
-            // Возвращаем visited сразу же
             ArrayPool<bool>.Shared.Return(visited);
         }
     }

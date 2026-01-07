@@ -25,6 +25,7 @@ public class Game : GameWindow
     private float _debugUpdateTimer = 0f;
     private List<string> _debugLines = new List<string>();
     private bool _isInitialized = false;
+    private TestManager _testManager;
 
     public Game(GameWindowSettings gameWindowSettings, NativeWindowSettings nativeWindowSettings)
         : base(gameWindowSettings, nativeWindowSettings)
@@ -54,6 +55,7 @@ public class Game : GameWindow
         _lineRenderer = new LineRenderer();
         _physicsDebugger = new PhysicsDebugDrawer();
         _crosshair = new Crosshair(Size.X, Size.Y);
+        _testManager = new TestManager(_worldManager, _camera);
 
         _renderer = new GpuRaycastingRenderer(_worldManager);
         _renderer.Load();
@@ -154,6 +156,7 @@ public class Game : GameWindow
         if (_input.IsKeyPressed(Keys.U)) GameSettings.GpuUploadSpeed = Math.Max(1, GameSettings.GpuUploadSpeed - 1);
         if (_input.IsKeyPressed(Keys.I)) GameSettings.GpuUploadSpeed = Math.Min(200, GameSettings.GpuUploadSpeed + 1);
 
+        _testManager.Update((float)e.Time, _input);
         _playerController.Update(_input, deltaTime);
         _worldManager.Update(deltaTime);
         _physicsWorld.Update(deltaTime);
@@ -202,6 +205,7 @@ public class Game : GameWindow
             
             _debugLines.Clear();
             _debugLines.Add($"FPS: {1.0f / deltaTime:F0}");
+            _debugLines.Add($"VoxelSize: {Constants.VoxelSize:F3}");
             
             // Читаем из GameSettings для отображения
             _debugLines.Add($"Water: {(GameSettings.UseProceduralWater ? "Procedural" : "Texture")}");

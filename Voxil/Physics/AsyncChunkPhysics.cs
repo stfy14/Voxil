@@ -54,13 +54,29 @@ public class AsyncChunkPhysics : IDisposable
     {
         if (chunk == null || !chunk.IsLoaded) return;
         
-        // --- ЗАГЛУШКА ДЛЯ МИКРО-ВОКСЕЛЕЙ ---
-        // Возвращаем пустой результат, чтобы не вешать игру генерацией 200к коллайдеров
-        _outputQueue.Enqueue(new PhysicsBuildResult(chunk, new PhysicsBuildResultData 
-        { 
-            CollidersArray = null, 
-            Count = 0 
-        }));
+        // Получаем массив вокселей (потокобезопасно)
+        var voxels = chunk.GetVoxelsCopy();
+        if (voxels == null) return; 
+
+        // Генерируем коллайдеры с помощью Greedy Meshing
+        MaterialType[] matArray = new MaterialType[Constants.ChunkVolume];
+        for(int i=0; i<Constants.ChunkVolume; i++) matArray[i] = (MaterialType)voxels[i];
+        System.Buffers.ArrayPool<byte>.Shared.Return(voxels); 
+
+        // --- ЗАМЕР ВРЕМЕНИ ---
+        long start = Stopwatch.GetTimestamp();
+        
+        var data = VoxelPhysicsBuilder.GenerateColliders(matArray, chunk.Position);
+        
+        long end = Stopwatch.GetTimestamp();
+        if (PerformanceMonitor.IsEnabled) 
+        {
+            // ThreadType.ChunkPhys - это то, что отображается как "Build (Phys)"
+            PerformanceMonitor.Record(ThreadType.ChunkPhys, end - start);
+        }
+        // ---------------------
+
+        _outputQueue.Enqueue(new PhysicsBuildResult(chunk, data));
     }
 
     public void Dispose()

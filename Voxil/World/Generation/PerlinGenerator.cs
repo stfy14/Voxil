@@ -3,11 +3,14 @@
 public class PerlinGenerator : IWorldGenerator
 {
     private readonly PerlinNoise _noise;
-    // Настройки масштаба для микро-вокселей
+    
+    // Настройки масштаба
+    // NoiseScale влияет на "ширину" холмов. Чем меньше - тем более пологие холмы.
     private const double NoiseScale = 0.03; 
-    private const int BaseHeightMeters = 40; 
-    private const int AmplitudeMeters = 20;  
-    private const int SeaLevelMeters = 35;          
+    
+    private const float BaseHeightMeters = 40.0f; 
+    private const float AmplitudeMeters = 20.0f;  
+    private const float SeaLevelMeters = 35.0f;          
 
     public PerlinGenerator(int seed)
     {
@@ -34,19 +37,22 @@ public class PerlinGenerator : IWorldGenerator
             {
                 float wz = worldBaseZ + (z * step);
                 
-                // Высота ландшафта в этой точке (в метрах)
+                // ВАЖНО: Считаем высоту как float, НЕ округляя до int!
+                // Иначе получим ступеньки высотой в 1 метр.
                 double noiseVal = _noise.Noise(wx * NoiseScale, wz * NoiseScale); 
-                int terrainHeightMeters = BaseHeightMeters + (int)(noiseVal * AmplitudeMeters);
+                float terrainHeight = BaseHeightMeters + (float)(noiseVal * AmplitudeMeters);
 
                 for (int y = 0; y < res; y++)
                 {
+                    // Высота текущего вокселя
                     float wy = worldBaseY + (y * step);
                     int index = x + res * (y + res * z);
 
-                    if (wy < terrainHeightMeters)
+                    // Сравниваем float с float -> получаем точность 0.25м
+                    if (wy < terrainHeight)
                     {
-                        // Верхний слой (1 метр) - земля, ниже - камень
-                        if (wy < terrainHeightMeters - 1.0f) 
+                        // Верхний слой (1 метр = 4 вокселя) - земля, ниже - камень
+                        if (wy < terrainHeight - 1.0f) 
                             voxels[index] = MaterialType.Stone;
                         else 
                             voxels[index] = MaterialType.Dirt;

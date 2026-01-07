@@ -6,6 +6,7 @@ uniform float uRenderDistance;
 uniform vec3 uSunDir;
 uniform float uTime;
 uniform int uMaxRaySteps;
+uniform int uSoftShadowSamples;
 
 // Culling / Bounds
 uniform int uBoundMinX; uniform int uBoundMinY; uniform int uBoundMinZ;
@@ -17,11 +18,24 @@ uniform vec3 uGridOrigin;
 uniform float uGridStep;
 uniform int uGridSize;
 
-// Textures & SSBO
-layout(binding = 1, r32i) uniform iimage3D uObjectGrid;
+// --- LINKED LIST GRID (Замена старого uObjectGrid) ---
+// Binding 1: Текстура-голова списка (хранит индекс первого узла)
+layout(binding = 1, r32i) uniform iimage3D uObjectGridHead;
+
+// Структура узла списка
+struct ListNode {
+    uint objectID;
+    int nextNode;
+};
+
+// Binding 3: Буфер узлов (хранит цепочки объектов)
+layout(std430, binding = 3) buffer LinkedList {
+    ListNode listNodes[];
+};
+// -----------------------------------------------------
+
 uniform sampler2D uNoiseTexture;
 
-const int CHUNK_SIZE = 16;
 const ivec3 PAGE_TABLE_SIZE = ivec3(512, 16, 512);
 layout(binding = 0, r32i) uniform iimage3D uPageTable;
 
