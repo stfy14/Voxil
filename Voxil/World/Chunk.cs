@@ -1,25 +1,25 @@
 ﻿using BepuPhysics;
 using OpenTK.Mathematics;
 using System;
-using System.Collections.Generic;
-using System.Threading;
 using System.Buffers;
+using System.Threading;
 
 public class Chunk : IDisposable
 {
-    public const int ChunkSize = 16;
-    public const int Volume = ChunkSize * ChunkSize * ChunkSize;
-    
+    // Ссылки на константы для совместимости
+    public const int ChunkSize = Constants.ChunkResolution; // 64
+    public const int Volume = Constants.ChunkVolume;        // 262144
+
     public Vector3i Position { get; }
     public WorldManager WorldManager { get; }
 
-    // --- ИНКАПСУЛЯЦИЯ: Приватное поле ---
-    private byte[] _voxels; 
-    
+    private byte[] _voxels; // Nullable!
     public int SolidCount { get; private set; } = 0;
+    
     private readonly ReaderWriterLockSlim _lock = new ReaderWriterLockSlim();
     public bool IsLoaded { get; private set; } = false;
     private volatile bool _isDisposed = false;
+    
     private StaticHandle _staticHandle;
     private bool _hasStaticBody = false;
 
@@ -27,10 +27,6 @@ public class Chunk : IDisposable
     {
         Position = position;
         WorldManager = worldManager;
-        
-        // Аренда массива
-        _voxels = ArrayPool<byte>.Shared.Rent(Volume);
-        Array.Clear(_voxels, 0, Volume);
     }
 
     public void SetDataFromArray(MaterialType[] sourceArray)
@@ -40,13 +36,26 @@ public class Chunk : IDisposable
         _lock.EnterWriteLock();
         try
         {
-            // Используем _voxels
-            Buffer.BlockCopy(sourceArray, 0, _voxels, 0, Volume);
-            
-            SolidCount = 0;
-            for(int i=0; i < Volume; i++) 
+            int solidCounter = 0;
+            for(int i = 0; i < Volume; i++) 
             {
-                if (_voxels[i] != 0) SolidCount++;
+                if (sourceArray[i] != MaterialType.Air) solidCounter++;
+            }
+            SolidCount = solidCounter;
+
+            if (SolidCount > 0)
+            {
+                if (_voxels == null) _voxels = ArrayPool<byte>.Shared.Rent(Volume);
+                // Безопасное копирование
+                for(int i=0; i < Volume; i++) _voxels[i] = (byte)sourceArray[i];
+            }
+            else
+            {
+                if (_voxels != null)
+                {
+                    ArrayPool<byte>.Shared.Return(_voxels);
+                    _voxels = null;
+                }
             }
             
             IsLoaded = true;
@@ -54,32 +63,22 @@ public class Chunk : IDisposable
         finally { _lock.ExitWriteLock(); }
     }
 
-    // Временный метод для совместимости (если где-то нужен сырой массив, но лучше избегать)
-    // Используй с осторожностью!
     public byte[] GetVoxelsUnsafe() => _voxels;
     
-    // Выполняет действие с сырым массивом вокселей под блокировкой чтения.
-    // Это безопасно и быстро (без лишних аллокаций).
     public void ReadVoxelsUnsafe(Action<byte[]> action)
     {
         if (_isDisposed) return;
-        
         _lock.EnterReadLock();
-        try
-        {
-            action(_voxels);
-        }
-        finally { _lock.ExitReadLock(); }
+        try { action(_voxels); } finally { _lock.ExitReadLock(); }
     }
 
-    // --- НОВЫЙ МЕТОД: Безопасная копия для физики ---
-    // PhysicsBuilder теперь должен использовать этот метод, а не лезть в массив напрямую
     public byte[] GetVoxelsCopy()
     {
         if (_isDisposed) return null;
         _lock.EnterReadLock();
         try
         {
+            if (_voxels == null) return null;
             var copy = ArrayPool<byte>.Shared.Rent(Volume);
             Buffer.BlockCopy(_voxels, 0, copy, 0, Volume);
             return copy;
@@ -87,11 +86,44 @@ public class Chunk : IDisposable
         finally { _lock.ExitReadLock(); }
     }
 
-    public ReaderWriterLockSlim GetLock() => _lock;
+    public MaterialType GetMaterial(int x, int y, int z)
+    {
+        if (_isDisposed || _voxels == null) return MaterialType.Air;
+        if ((uint)x >= ChunkSize || (uint)y >= ChunkSize || (uint)z >= ChunkSize) return MaterialType.Air;
+
+        _lock.EnterReadLock();
+        try
+        {
+            int index = x + ChunkSize * (y + ChunkSize * z);
+            return (MaterialType)_voxels[index];
+        }
+        finally { _lock.ExitReadLock(); }
+    }
+
+    public bool IsVoxelSolidAt(Vector3i localPos)
+    {
+        if (_isDisposed || _voxels == null) return false;
+        if (localPos.X < 0 || localPos.X >= ChunkSize ||
+            localPos.Y < 0 || localPos.Y >= ChunkSize ||
+            localPos.Z < 0 || localPos.Z >= ChunkSize) return false;
+
+        _lock.EnterReadLock();
+        try 
+        {
+            int index = localPos.X + ChunkSize * (localPos.Y + ChunkSize * localPos.Z);
+            return MaterialRegistry.IsSolidForPhysics((MaterialType)_voxels[index]);
+        }
+        finally { _lock.ExitReadLock(); }
+    }
 
     public bool RemoveVoxelAndUpdate(Vector3i localPosition)
     {
-        if (_isDisposed) return false;
+        if (_isDisposed || _voxels == null) return false;
+        
+        if (localPosition.X < 0 || localPosition.X >= ChunkSize ||
+            localPosition.Y < 0 || localPosition.Y >= ChunkSize ||
+            localPosition.Z < 0 || localPosition.Z >= ChunkSize) return false;
+
         int index = localPosition.X + ChunkSize * (localPosition.Y + ChunkSize * localPosition.Z);
         bool removed = false;
 
@@ -105,6 +137,11 @@ public class Chunk : IDisposable
                     _voxels[index] = 0;
                     SolidCount--;
                     removed = true;
+                    if (SolidCount == 0)
+                    {
+                        ArrayPool<byte>.Shared.Return(_voxels);
+                        _voxels = null;
+                    }
                 }
             }
             finally { _lock.ExitWriteLock(); }
@@ -113,38 +150,12 @@ public class Chunk : IDisposable
 
         if (removed && IsLoaded)
         {
-            WorldManager.NotifyVoxelFastDestroyed(this.Position * ChunkSize + localPosition);
+            // Уведомления (координаты примерные, поправим при работе над физикой разрушения)
+            WorldManager.NotifyVoxelFastDestroyed(this.Position * Constants.ChunkSizeWorld + localPosition);
             WorldManager.RebuildPhysics(this);
             WorldManager.NotifyChunkModified(this); 
         }
         return removed;
-    }
-
-    public MaterialType GetMaterial(int x, int y, int z)
-    {
-        if (_isDisposed) return MaterialType.Air;
-        if (x < 0 || x >= ChunkSize || y < 0 || y >= ChunkSize || z < 0 || z >= ChunkSize) return MaterialType.Air;
-
-        _lock.EnterReadLock();
-        try
-        {
-            int index = x + ChunkSize * (y + ChunkSize * z);
-            return (MaterialType)_voxels[index];
-        }
-        finally { _lock.ExitReadLock(); }
-    }
-
-    public bool IsVoxelSolidAt(Vector3i localPos)
-    {
-        if (_isDisposed) return false;
-        int index = localPos.X + ChunkSize * (localPos.Y + ChunkSize * localPos.Z);
-        
-        _lock.EnterReadLock();
-        try 
-        {
-            return MaterialRegistry.IsSolidForPhysics((MaterialType)_voxels[index]);
-        }
-        finally { _lock.ExitReadLock(); }
     }
 
     public void OnPhysicsRebuilt(StaticHandle handle)

@@ -1,14 +1,13 @@
-﻿// World/Generation/PerlinGenerator.cs
-using OpenTK.Mathematics;
+﻿using OpenTK.Mathematics;
 
 public class PerlinGenerator : IWorldGenerator
 {
     private readonly PerlinNoise _noise;
-    // Настройки ландшафта
-    private const double Scale = 0.03; 
-    private const int BaseHeight = 40; 
-    private const int Amplitude = 20;  
-    private const int SeaLevel = 35;          
+    // Настройки масштаба для микро-вокселей
+    private const double NoiseScale = 0.03; 
+    private const int BaseHeightMeters = 40; 
+    private const int AmplitudeMeters = 20;  
+    private const int SeaLevelMeters = 35;          
 
     public PerlinGenerator(int seed)
     {
@@ -17,48 +16,42 @@ public class PerlinGenerator : IWorldGenerator
 
     public void GenerateChunk(Vector3i chunkPosition, MaterialType[] voxels)
     {
-        // Очищаем массив перед заполнением (хотя он обычно новый, но для надежности)
+        // Очистка массива перед записью
         System.Array.Fill(voxels, MaterialType.Air);
 
-        // Мировые координаты начала чанка
-        int worldXBase = chunkPosition.X * Chunk.ChunkSize;
-        int worldYBase = chunkPosition.Y * Chunk.ChunkSize;
-        int worldZBase = chunkPosition.Z * Chunk.ChunkSize;
+        int res = Constants.ChunkResolution; // 64
+        float step = Constants.VoxelSize;    // 0.25
 
-        // Размер чанка (кэшируем для скорости)
-        int size = Chunk.ChunkSize;
+        // Координаты чанка в метрах
+        float worldBaseX = chunkPosition.X * Constants.ChunkSizeWorld;
+        float worldBaseY = chunkPosition.Y * Constants.ChunkSizeWorld;
+        float worldBaseZ = chunkPosition.Z * Constants.ChunkSizeWorld;
 
-        for (int x = 0; x < size; x++)
+        for (int x = 0; x < res; x++)
         {
-            int wx = worldXBase + x;
-            
-            for (int z = 0; z < size; z++)
+            float wx = worldBaseX + (x * step);
+            for (int z = 0; z < res; z++)
             {
-                int wz = worldZBase + z;
+                float wz = worldBaseZ + (z * step);
+                
+                // Высота ландшафта в этой точке (в метрах)
+                double noiseVal = _noise.Noise(wx * NoiseScale, wz * NoiseScale); 
+                int terrainHeightMeters = BaseHeightMeters + (int)(noiseVal * AmplitudeMeters);
 
-                // 1. Считаем высоту ландшафта (2D шум)
-                // Оптимизация: вычисляем шум 1 раз на столбец, а не для каждого вокселя
-                double noiseVal = _noise.Noise(wx * Scale, wz * Scale); 
-                int terrainHeight = BaseHeight + (int)(noiseVal * Amplitude);
-
-                // 2. Заполняем столбец вертикально
-                for (int y = 0; y < size; y++)
+                for (int y = 0; y < res; y++)
                 {
-                    int wy = worldYBase + y;
-                    
-                    // Индекс в одномерном массиве: x + size * (y + size * z)
-                    // Порядок должен совпадать с тем, как читает GpuRenderer и PhysicsBuilder!
-                    // В GpuRenderer мы использовали: x + 16 * (y + 16 * z)
-                    int index = x + size * (y + size * z);
+                    float wy = worldBaseY + (y * step);
+                    int index = x + res * (y + res * z);
 
-                    if (wy < terrainHeight)
+                    if (wy < terrainHeightMeters)
                     {
-                        if (wy < terrainHeight - 4) 
+                        // Верхний слой (1 метр) - земля, ниже - камень
+                        if (wy < terrainHeightMeters - 1.0f) 
                             voxels[index] = MaterialType.Stone;
                         else 
                             voxels[index] = MaterialType.Dirt;
                     }
-                    else if (wy <= SeaLevel)
+                    else if (wy <= SeaLevelMeters)
                     {
                         voxels[index] = MaterialType.Water;
                     }

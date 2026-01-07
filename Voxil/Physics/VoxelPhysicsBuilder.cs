@@ -32,7 +32,7 @@ public static class VoxelPhysicsBuilder
     // Меняем возвращаемый тип с List на нашу структуру
     public static PhysicsBuildResultData GenerateColliders(MaterialType[] voxels, Vector3i chunkPos)
     {
-        int size = Chunk.ChunkSize;
+        int size =Constants.ChunkSizeWorld;
         int volume = Chunk.Volume;
 
         // 1. Арендуем массив visited (вместо new bool[])

@@ -38,10 +38,6 @@ public class PlayerController
         var shape = new Capsule(radius, Height - 2 * radius);
         var shapeIndex = physicsWorld.Simulation.Shapes.Add(shape);
         
-        // --- ИСПРАВЛЕНИЕ ЗДЕСЬ ---
-        // Было: new BodyActivityDescription(0.01f)
-        // Стало: new BodyActivityDescription(-1)
-        // Значение -1 говорит движку: "Это тело всегда активно, не усыпляй его".
         var bodyDescription = BodyDescription.CreateDynamic(
             new RigidPose(startPosition),
             new BodyInertia { InverseMass = 1f / 70f },

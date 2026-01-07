@@ -41,7 +41,7 @@ public class Game : GameWindow
 
         _physicsWorld = new PhysicsWorld();
 
-        var startPosition = new System.Numerics.Vector3(8, 50, 8);
+        var startPosition = new System.Numerics.Vector3(8, 60, 8);
         _camera = new Camera(VectorExtensions.ToOpenTK(startPosition), Size.X / (float)Size.Y);
         _playerController = new PlayerController(_physicsWorld, _camera, startPosition);
         _physicsWorld.SetPlayerHandle(_playerController.BodyHandle);
