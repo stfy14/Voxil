@@ -248,8 +248,14 @@ public class GpuRaycastingRenderer : IDisposable
 
         _shader.Use();
         _shader.SetVector3("uCamPos", camera.Position);
-        _shader.SetMatrix4("uView", camera.GetViewMatrix());
-        _shader.SetMatrix4("uProjection", camera.GetProjectionMatrix());
+        var view = camera.GetViewMatrix();
+        var proj = camera.GetProjectionMatrix();
+        var invView = Matrix4.Invert(view);
+        var invProj = Matrix4.Invert(proj);
+        _shader.SetMatrix4("uView", view);
+        _shader.SetMatrix4("uProjection", proj);
+        _shader.SetMatrix4("uInvView", invView);       // <--- НОВОЕ
+        _shader.SetMatrix4("uInvProjection", invProj); // <--- НОВОЕ
         _shader.SetFloat("uRenderDistance", _worldManager.GetViewRangeInMeters());
         
         int maxRaySteps = (int)(GameSettings.RenderDistance * 3) + 32; 

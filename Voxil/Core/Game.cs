@@ -128,6 +128,28 @@ public class Game : GameWindow
             
             Console.WriteLine($"[Water Mode] Set to: {(GameSettings.UseProceduralWater ? "Procedural" : "Texture")}");
         }
+        
+        // --- ПЕРЕКЛЮЧЕНИЕ AO (V) ---
+        if (_input.IsKeyPressed(Keys.V))
+        {
+            GameSettings.EnableAO = !GameSettings.EnableAO;
+            
+            // Сообщаем рендеру, что настройка изменилась
+            _renderer.ReloadShader();
+            
+            Console.WriteLine($"[AO] Set to: {GameSettings.EnableAO}");
+        }
+        
+        // --- ПЕРЕКЛЮЧЕНИЕ ПРОЗРАЧНОСТИ ВОДЫ (B) ---
+        if (_input.IsKeyPressed(Keys.B))
+        {
+            GameSettings.EnableWaterTransparency = !GameSettings.EnableWaterTransparency;
+            
+            // Сообщаем рендеру, что настройка изменилась
+            _renderer.ReloadShader();
+            
+            Console.WriteLine($"[Water Transparency] Set to: {GameSettings.EnableWaterTransparency}");
+        }
 
 
         if (_input.IsKeyPressed(Keys.G)) 

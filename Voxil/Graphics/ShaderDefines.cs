@@ -5,32 +5,29 @@ public static class ShaderDefines
 {
     public static string GetGlslDefines()
     {
-        // Рассчитываем шаги теней в зависимости от размера вокселя.
-        // Мы хотим, чтобы тень отбрасывалась на 200 метров реального мира.
-        // Steps = DistanceMeters / VoxelSize
-        
+        // ... (расчет шагов теней как был раньше) ...
         int hardShadowDistMeters = 200;
-        int softShadowDistMeters = 50;
-
         int hardSteps = (int)(hardShadowDistMeters / Constants.VoxelSize);
-        int softSteps = (int)(softShadowDistMeters / Constants.VoxelSize);
-
-        // Ограничиваем минимум, чтобы не сломалось
         if (hardSteps < 10) hardSteps = 10;
-        if (softSteps < 5) softSteps = 5;
+        // ... и т.д.
 
-        return $@"
-               // --- AUTOMATICALLY GENERATED DEFINES FROM C# ---
-               #define CHUNK_SIZE {Constants.ChunkSizeWorld}
-               #define VOXEL_RESOLUTION {Constants.ChunkResolution}
-               #define VOXELS_PER_METER {Constants.VoxelsPerMeter.ToString("F1", CultureInfo.InvariantCulture)}
-               #define BIT_SHIFT {Constants.BitShift}
-               #define BIT_MASK {Constants.BitMask}
+        var sb = new System.Text.StringBuilder();
+        
+        // Вставляем базовые константы
+        sb.AppendLine($@"
+           #define CHUNK_SIZE {Constants.ChunkSizeWorld}
+           #define VOXEL_RESOLUTION {Constants.ChunkResolution}
+           #define VOXELS_PER_METER {Constants.VoxelsPerMeter.ToString("F1", CultureInfo.InvariantCulture)}
+           #define BIT_SHIFT {Constants.BitShift}
+           #define BIT_MASK {Constants.BitMask}
+           #define HARD_SHADOW_STEPS {hardSteps}
+           #define SOFT_SHADOW_STEPS 32
+        ");
 
-               // Shadow Steps (Dynamic based on Voxel Size)
-               #define HARD_SHADOW_STEPS {hardSteps}
-               #define SOFT_SHADOW_STEPS {softSteps}
-               // -----------------------------------------------
-               ";
+        // Вставляем настройки пользователя
+        if (GameSettings.EnableAO) sb.AppendLine("#define ENABLE_AO");
+        if (GameSettings.EnableWaterTransparency) sb.AppendLine("#define ENABLE_WATER_TRANSPARENCY");
+
+        return sb.ToString();
     }
 }

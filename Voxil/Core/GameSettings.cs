@@ -21,14 +21,16 @@ public static class GameSettings
     
     // Тип воды: true = Procedural (Gerstner), false = Texture
     public static bool UseProceduralWater = false; 
+    public static bool EnableWaterTransparency = false; // Вкл/Выкл Прозрачность и Каустику
 
     // --- НОВЫЕ НАСТРОЙКИ ТЕНЕЙ ---
     
     // Режим теней
-    public static ShadowMode CurrentShadowMode = ShadowMode.Soft;
-
+    public static ShadowMode CurrentShadowMode = ShadowMode.None;
+    public static bool EnableAO = false;              // Вкл/Выкл AO
     // Качество мягких теней (кол-во лучей). 
     // Меньше = быстрее/шумнее, Больше = медленнее/качественнее.
     // Рекомендуемые значения: 4, 8, 16, 32.
     public static int SoftShadowSamples = 8; 
+    
 }
