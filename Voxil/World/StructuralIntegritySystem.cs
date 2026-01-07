@@ -12,23 +12,30 @@ public class StructuralIntegritySystem : IDisposable
     private readonly BlockingCollection<IntegrityCheckTask> _queue = new();
     private readonly Thread _workerThread;
     private readonly CancellationTokenSource _cts = new();
+    private bool _isDisposed;
 
     public StructuralIntegritySystem(WorldManager worldManager)
     {
         _worldManager = worldManager;
-        _workerThread = new Thread(WorkerLoop) 
-        { 
-            IsBackground = true, 
-            Name = "IntegritySystem", 
-            Priority = ThreadPriority.Lowest 
+        _workerThread = new Thread(WorkerLoop)
+        {
+            IsBackground = true,
+            Name = "IntegritySystem",
+            Priority = ThreadPriority.Lowest
         };
         _workerThread.Start();
     }
 
     public void QueueCheck(Vector3i globalPos)
     {
-        if (!_cts.IsCancellationRequested)
-            _queue.Add(new IntegrityCheckTask { GlobalPosition = globalPos });
+        if (!_isDisposed && !_cts.IsCancellationRequested && !_queue.IsAddingCompleted)
+        {
+            try
+            {
+                _queue.Add(new IntegrityCheckTask { GlobalPosition = globalPos });
+            }
+            catch (InvalidOperationException) { } // Очередь закрывается
+        }
     }
 
     private void WorkerLoop()
@@ -37,14 +44,26 @@ public class StructuralIntegritySystem : IDisposable
         {
             try
             {
+                // Take блокирует поток до появления задачи или отмены токена
                 var task = _queue.Take(_cts.Token);
                 CheckNeighbors(task.GlobalPosition);
             }
-            catch (OperationCanceledException) { break; }
-            catch (Exception ex) { Console.WriteLine($"[Integrity] Error: {ex.Message}"); }
+            catch (OperationCanceledException)
+            {
+                // Это НОРМАЛЬНЫЙ выход при остановке игры. Просто прерываем цикл.
+                break;
+            }
+            catch (ObjectDisposedException) { break; } // Если очередь уничтожена
+            catch (InvalidOperationException) { break; } // Если очередь помечена как завершенная
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[Integrity] Error: {ex.Message}");
+            }
         }
     }
 
+    // ... методы CheckNeighbors и TraverseCluster оставляем БЕЗ ИЗМЕНЕНИЙ ...
+    // ... (скопируйте их из вашего старого файла, они были корректны) ...
     private void CheckNeighbors(Vector3i destroyedPos)
     {
         var neighbors = new Vector3i[] {
@@ -59,10 +78,7 @@ public class StructuralIntegritySystem : IDisposable
         foreach (var neighbor in neighbors)
         {
             if (checkedGlobals.Contains(neighbor)) continue;
-            
-            // Проверка через WorldManager
             if (!_worldManager.IsVoxelSolidGlobal(neighbor)) continue;
-
             TraverseCluster(neighbor, checkedGlobals);
         }
     }
@@ -88,14 +104,13 @@ public class StructuralIntegritySystem : IDisposable
             if (current.Y <= 0) { isGrounded = true; break; }
             if (cluster.Count > maxClusterSize) { isGrounded = true; break; }
 
-            var dirs = new Vector3i[] { new(1,0,0), new(-1,0,0), new(0,1,0), new(0,-1,0), new(0,0,1), new(0,0,-1) };
+            var dirs = new Vector3i[] { new(1, 0, 0), new(-1, 0, 0), new(0, 1, 0), new(0, -1, 0), new(0, 0, 1), new(0, 0, -1) };
 
             foreach (var d in dirs)
             {
                 var next = current + d;
                 if (visited.Contains(next)) continue;
 
-                // Проверяем: либо блок твердый, либо это земля (незагруженный чанк считается опорой)
                 if (_worldManager.IsVoxelSolidGlobal(next))
                 {
                     visited.Add(next);
@@ -105,7 +120,6 @@ public class StructuralIntegritySystem : IDisposable
                 }
                 else if (!_worldManager.IsChunkLoadedAt(next))
                 {
-                    // Если уперлись в незагруженный чанк — считаем, что остров держится за него
                     isGrounded = true;
                     break;
                 }
@@ -121,8 +135,18 @@ public class StructuralIntegritySystem : IDisposable
 
     public void Dispose()
     {
+        if (_isDisposed) return;
+        _isDisposed = true;
+
+        // 1. Отменяем токен. Это вызовет OperationCanceledException в Take()
         _cts.Cancel();
+
+        // 2. Ждем пока поток выйдет из цикла
+        if (_workerThread.IsAlive)
+            _workerThread.Join(200);
+
+        // 3. Теперь безопасно убиваем очередь и токен
         _queue.Dispose();
-        _workerThread.Join(100);
+        _cts.Dispose();
     }
 }

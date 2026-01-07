@@ -309,7 +309,7 @@ public void Render(Camera camera)
     _shader.SetMatrix4("uProjection", camera.GetProjectionMatrix());
     _shader.SetFloat("uRenderDistance", _worldManager.GetViewRangeInVoxels());
     int maxRaySteps = (int)(_worldManager.GetViewRangeInVoxels() * 3) + 32; 
-    _shader.SetInt("uMaxRaySteps", maxRaySteps);
+    _shader.SetInt("uMaxRaySteps", GameSettings.RenderDistance * 4);
 
     _shader.SetVector3("uSunDir", Vector3.Normalize(new Vector3(0.0f, 0.3f, 0.8f)));
     

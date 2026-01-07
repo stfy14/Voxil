@@ -9,7 +9,6 @@
     outNormal = -n * sign(rd);
     return vec2(tNear, tFar);
 }
-
 float CheckDynamicHitByID(int objectId, vec3 worldRo, vec3 worldRd, out uint outMat, out vec3 outLocalNormal) {
     if (objectId < 0 || objectId >= uObjectCount) return -1.0;
     DynamicObject obj = dynObjects[objectId];
@@ -21,7 +20,6 @@ float CheckDynamicHitByID(int objectId, vec3 worldRo, vec3 worldRd, out uint out
     outMat = 2u; outLocalNormal = localNormal;
     return max(0.0, t.x);
 }
-
 bool IsSolid(ivec3 pos) {
     ivec3 boundMin = ivec3(uBoundMinX, uBoundMinY, uBoundMinZ) * 16;
     ivec3 boundMax = ivec3(uBoundMaxX, uBoundMaxY, uBoundMaxZ) * 16;
@@ -33,20 +31,8 @@ bool IsSolid(ivec3 pos) {
     int idx = local.x + 16 * (local.y + 16 * local.z);
     return ((packedVoxels[chunkIdx + (idx >> 2)] >> ((idx & 3) * 8)) & 0xFFu) != 0u;
 }
-
-// Вспомогательная функция (оставляем как есть или добавляем, если нет)
-float GetDistToNextChunkBoundary(vec3 p, vec3 rd) {
-    vec3 nextChunkPos = floor(p / 16.0) * 16.0;
-    if (rd.x > 0.0) nextChunkPos.x += 16.0;
-    if (rd.y > 0.0) nextChunkPos.y += 16.0;
-    if (rd.z > 0.0) nextChunkPos.z += 16.0;
-    vec3 dists = (nextChunkPos - p) / rd;
-    if (abs(rd.x) < 1e-6) dists.x = 1e30;
-    if (abs(rd.y) < 1e-6) dists.y = 1e30;
-    if (abs(rd.z) < 1e-6) dists.z = 1e30;
-    return min(min(dists.x, dists.y), dists.z);
-}
-
+// === OPTIMIZATION: HIERARCHICAL DDA (HDDA) ===
+// Основная функция трассировки теперь использует двухуровневый подход.
 bool TraceStaticRay(
     vec3 ro,
     vec3 rd,
@@ -55,108 +41,136 @@ inout float tHit,
 inout uint matID,
 inout vec3 normal
 ) {
-    // Инициализация DDA
-    ivec3 mapPos = ivec3(floor(ro));
-    ivec3 stepDir = ivec3(sign(rd));
-    vec3 deltaDist = abs(1.0 / rd);
+    // --- 1. MACRO SETUP (Chunks) ---
+    ivec3 cMapPos = ivec3(floor(ro / 16.0));
+    vec3 cDeltaDist = abs(1.0 / rd) * 16.0;
+    ivec3 cStepDir = ivec3(sign(rd));
 
-    vec3 sideDist;
-    sideDist.x = (rd.x > 0.0 ? (float(mapPos.x + 1) - ro.x) : (ro.x - float(mapPos.x))) * deltaDist.x;
-    sideDist.y = (rd.y > 0.0 ? (float(mapPos.y + 1) - ro.y) : (ro.y - float(mapPos.y))) * deltaDist.y;
-    sideDist.z = (rd.z > 0.0 ? (float(mapPos.z + 1) - ro.z) : (ro.z - float(mapPos.z))) * deltaDist.z;
+    vec3 chunkOrigin = vec3(cMapPos) * 16.0;
+    vec3 relPos = ro - chunkOrigin;
 
-    vec3 mask = vec3(0);
+    vec3 cSideDist;
+    cSideDist.x = (rd.x > 0.0) ? (16.0 - relPos.x) : relPos.x;
+    cSideDist.y = (rd.y > 0.0) ? (16.0 - relPos.y) : relPos.y;
+    cSideDist.z = (rd.z > 0.0) ? (16.0 - relPos.z) : relPos.z;
+    cSideDist *= abs(1.0 / rd);
 
-    ivec3 bMin = ivec3(uBoundMinX, uBoundMinY, uBoundMinZ) * 16;
-    ivec3 bMax = ivec3(uBoundMaxX, uBoundMaxY, uBoundMaxZ) * 16;
+    // Маска показывает, какую ось мы пересекли последней (для нормали и входа)
+    vec3 cMask = vec3(0);
 
-    // Кэширование чанка
-    ivec3 cachedChunkCoord = ivec3(-999999);
-    int cachedChunkIdx = -1;
+    // tCurrent - дистанция до входа в ТЕКУЩИЙ рассматриваемый чанк
+    float tCurrent = 0.0;
 
-    // Основной цикл луча
+    ivec3 bMin = ivec3(uBoundMinX, uBoundMinY, uBoundMinZ);
+    ivec3 bMax = ivec3(uBoundMaxX, uBoundMaxY, uBoundMaxZ);
+
     for (int i = 0; i < uMaxRaySteps; i++) {
-        // Проверка выхода за мир
-        if (any(lessThan(mapPos, bMin)) || any(greaterThanEqual(mapPos, bMax))) break;
+        // Проверки выхода
+        if (tCurrent > maxDist) break;
+        if (any(lessThan(cMapPos, bMin)) || any(greaterThanEqual(cMapPos, bMax))) break;
 
-        // Текущая дистанция (для ограничения дальности)
-        // DDA хранит дистанцию до СЛЕДУЮЩЕЙ грани, поэтому вычитаем deltaDist, чтобы получить ТЕКУЩУЮ
-        float currentT = dot(mask, sideDist - deltaDist);
-        if (currentT > maxDist) break;
+        int chunkIdx = imageLoad(uPageTable, cMapPos & (PAGE_TABLE_SIZE - 1)).r;
 
-        // Определяем текущий чанк
-        ivec3 chunkCoord = mapPos >> 4; // Быстрое деление на 16
+        if (chunkIdx != -1) {
+            // === 2. MICRO SETUP (Voxels) ===
+            // Мы попали в непустой чанк.
 
-        // Обновляем кэш страницы, если перешли в новый чанк
-        if (chunkCoord != cachedChunkCoord) {
-            cachedChunkCoord = chunkCoord;
-            cachedChunkIdx = imageLoad(uPageTable, chunkCoord & (PAGE_TABLE_SIZE - 1)).r;
-        }
+            // Вычисляем точную точку входа на основе Макро-DDA
+            // Это намного точнее и быстрее, чем IntersectAABB
+            vec3 pEntry = ro + rd * (tCurrent + 0.0001); // Чуть-чуть внутрь, чтобы floor сработал
 
-        // === OPTIMIZATION: BLIND DDA (MACRO STEPPING) ===
-        if (cachedChunkIdx == -1) {
-            // Чанк пустой. Запускаем "слепой" цикл.
-            // Мы просто шагаем по сетке, не читая память, пока не выйдем из этого чанка.
-            // 32 шага достаточно, чтобы пройти любой чанк (16x16x16) насквозь по диагонали.
-            for (int k = 0; k < 32; k++) {
-                // Стандартный шаг DDA
-                mask = (sideDist.x < sideDist.y) ?
-                ((sideDist.x < sideDist.z) ? vec3(1,0,0) : vec3(0,0,1)) :
-                ((sideDist.y < sideDist.z) ? vec3(0,1,0) : vec3(0,0,1));
+            // Базовая позиция вокселя
+            ivec3 vMapPos = ivec3(floor(pEntry));
 
-                sideDist += mask * deltaDist;
-                mapPos += ivec3(mask) * stepDir;
+            // --- FACE SNAPPING (Исправление стен и щелей) ---
+            // Если мы пришли из другого чанка (tCurrent > 0), мы знаем, что стоим ровно на границе.
+            // Принудительно ставим координату вокселя в 0 или 15 в зависимости от того, откуда пришли.
+            // Это устраняет любые ошибки float-округления.
+            if (tCurrent > 0.0) {
+                if (cMask.x > 0.5) vMapPos.x = (rd.x > 0.0) ? (cMapPos.x * 16) : (cMapPos.x * 16 + 15);
+                if (cMask.y > 0.5) vMapPos.y = (rd.y > 0.0) ? (cMapPos.y * 16) : (cMapPos.y * 16 + 15);
+                if (cMask.z > 0.5) vMapPos.z = (rd.z > 0.0) ? (cMapPos.z * 16) : (cMapPos.z * 16 + 15);
+            }
 
-                // Быстрая проверка: вышли ли мы из текущего пустого чанка?
-                // Используем битовую маску ~15 (это то же самое, что floor(x/16)*16)
-                if ((mapPos.x & ~15) != (chunkCoord.x << 4) ||
-                (mapPos.y & ~15) != (chunkCoord.y << 4) ||
-                (mapPos.z & ~15) != (chunkCoord.z << 4)) {
-                    break; // Вышли! Возвращаемся в основной цикл
+            // Инициализируем Микро-DDA
+            vec3 vDeltaDist = abs(1.0 / rd);
+            ivec3 vStepDir = cStepDir;
+
+            vec3 vSideDist;
+            // Считаем sideDist глобально от ro, чтобы сохранить точность на больших дистанциях
+            vSideDist.x = (rd.x > 0.0) ? (float(vMapPos.x + 1) - ro.x) : (ro.x - float(vMapPos.x));
+            vSideDist.y = (rd.y > 0.0) ? (float(vMapPos.y + 1) - ro.y) : (ro.y - float(vMapPos.y));
+            vSideDist.z = (rd.z > 0.0) ? (float(vMapPos.z + 1) - ro.z) : (ro.z - float(vMapPos.z));
+            vSideDist *= vDeltaDist;
+
+            vec3 vMask = vec3(0);
+
+            int safetyLoopCount = 0; // Счетчик безопасности
+
+            // Микро-цикл (ходим пока внутри чанка)
+            while (true) {
+                // 1. Safety Break: Если мы сделали больше шагов, чем ширина чанка (по диагонали макс ~30), 
+                // значит мы застряли. Выходим принудительно.
+                safetyLoopCount++;
+                if (safetyLoopCount > 64) break;
+                // Дистанция до пересечения следующего вокселя
+                float tVoxel = dot(vMask, vSideDist - vDeltaDist);
+                // Коррекция для первого шага (когда vMask пустой)
+                if (vMask.x + vMask.y + vMask.z == 0.0) tVoxel = tCurrent;
+
+                if (tVoxel > maxDist) return false;
+
+                // Проверка вокселя
+                ivec3 local = vMapPos & 15;
+                int idx = local.x + 16 * (local.y + 16 * local.z);
+                uint mat = (packedVoxels[chunkIdx + (idx >> 2)] >> ((idx & 3) * 8)) & 0xFFu;
+
+                if (mat != 0u) {
+                    // HIT!
+                    tHit = tVoxel;
+                    matID = mat;
+
+                    // Нормаль
+                    // Если это самый первый шаг в чанк, нормаль берем из шага ЧАНКА (cMask)
+                    // Иначе берем из шага ВОКСЕЛЯ (vMask)
+                    // (length(vMask) < 0.5 означает, что мы еще не сделали ни одного шага в микро-цикле)
+                    if (length(vMask) < 0.5) {
+                        if (tCurrent == 0.0) normal = -vec3(vStepDir); // Мы заспавнились внутри блока
+                        else normal = -vec3(cStepDir) * cMask;         // Мы уперлись в стену чанка
+                    } else {
+                        normal = -vec3(vStepDir) * vMask;
+                    }
+                    return true;
+                }
+
+                // Шаг Микро-DDA
+                vMask = (vSideDist.x < vSideDist.y) ?
+                ((vSideDist.x < vSideDist.z) ? vec3(1,0,0) : vec3(0,0,1)) :
+                ((vSideDist.y < vSideDist.z) ? vec3(0,1,0) : vec3(0,0,1));
+
+                vSideDist += vMask * vDeltaDist;
+                vMapPos += ivec3(vMask) * vStepDir;
+
+                // Если вышли за пределы текущего чанка - прерываем микро-цикл
+                // Битовая магия: (vMapPos >> 4) эквивалентно floor(vMapPos / 16)
+                if ((vMapPos.x >> 4) != cMapPos.x ||
+                    (vMapPos.y >> 4) != cMapPos.y ||
+                    (vMapPos.z >> 4) != cMapPos.z) {
+                    break;
                 }
             }
-            // Continue перезапустит основной цикл, обновит chunkCoord и проверит новый чанк
-            continue;
         }
 
-        // === MICRO STEPPING (Внутри твердого чанка) ===
-        // Если чанк загружен, шагаем и проверяем воксели
-        // Лимит 64 на случай застревания, но обычно выход происходит раньше
-        for (int k = 0; k < 64; k++) {
-            ivec3 local = mapPos & 15;
-            int voxelIdx = local.x + 16 * (local.y + 16 * local.z);
-            uint mat = (packedVoxels[cachedChunkIdx + (voxelIdx >> 2)] >> ((voxelIdx & 3) * 8)) & 0xFFu;
+        // --- 3. MACRO STEP ---
+        cMask = (cSideDist.x < cSideDist.y) ?
+        ((cSideDist.x < cSideDist.z) ? vec3(1,0,0) : vec3(0,0,1)) :
+        ((cSideDist.y < cSideDist.z) ? vec3(0,1,0) : vec3(0,0,1));
 
-            if (mat != 0u) {
-                // ПОПАДАНИЕ!
-                // Нормаль берется из mask. 
-                // Если mask пустой (первый шаг луча), берем обратное направление луча.
-                if (length(mask) < 0.5) normal = -stepDir;
-                else normal = -vec3(stepDir) * mask;
+        cSideDist += cMask * cDeltaDist;
+        cMapPos += ivec3(cMask) * cStepDir;
 
-                tHit = dot(mask, sideDist - deltaDist);
-                // Фикс для tHit на самом первом шаге
-                if (tHit < 0.0001) tHit = 0.0;
-
-                matID = mat;
-                return true;
-            }
-
-            // Шаг DDA
-            mask = (sideDist.x < sideDist.y) ?
-            ((sideDist.x < sideDist.z) ? vec3(1,0,0) : vec3(0,0,1)) :
-            ((sideDist.y < sideDist.z) ? vec3(0,1,0) : vec3(0,0,1));
-
-            sideDist += mask * deltaDist;
-            mapPos += ivec3(mask) * stepDir;
-
-            // Если вышли из чанка во время обычного шага
-            if ((mapPos.x >> 4) != chunkCoord.x ||
-            (mapPos.y >> 4) != chunkCoord.y ||
-            (mapPos.z >> 4) != chunkCoord.z) {
-                break;
-            }
-        }
+        // Обновляем tCurrent для следующего чанка
+        tCurrent = dot(cMask, cSideDist - cDeltaDist);
     }
 
     return false;
