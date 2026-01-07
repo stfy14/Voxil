@@ -1,4 +1,5 @@
 ﻿using BepuPhysics;
+using BepuPhysics.Collidables;
 using OpenTK.Graphics.OpenGL4;
 using OpenTK.Mathematics;
 using OpenTK.Windowing.Common;
@@ -17,6 +18,8 @@ public class Game : GameWindow
     private GpuRaycastingRenderer _renderer;
     
     private DebugOverlay _debugOverlay;
+    private LineRenderer _lineRenderer;
+    private PhysicsDebugDrawer _physicsDebugger;
     private Crosshair _crosshair;
     private bool _showDebugOverlay = true;
     private float _debugUpdateTimer = 0f;
@@ -32,7 +35,7 @@ public class Game : GameWindow
     {
         base.OnLoad();
 
-        GL.ClearColor(0.53f, 0.81f, 0.92f, 1.0f);
+        GL.ClearColor(0.6f, 0.7f, 0.9f, 1.0f);
         GL.Enable(EnableCap.DepthTest);
         GL.Disable(EnableCap.CullFace);
 
@@ -48,32 +51,25 @@ public class Game : GameWindow
         CursorState = CursorState.Grabbed;
 
         _debugOverlay = new DebugOverlay(Size.X, Size.Y);
+        _lineRenderer = new LineRenderer();
+        _physicsDebugger = new PhysicsDebugDrawer();
         _crosshair = new Crosshair(Size.X, Size.Y);
 
         _renderer = new GpuRaycastingRenderer(_worldManager);
         _renderer.Load();
+
         _renderer.OnResize(Size.X, Size.Y);
 
         // --- ПОДПИСКИ НА СОБЫТИЯ ---
-        
-        // Загрузка нового чанка
         _worldManager.OnChunkLoaded += (chunk) => _renderer.NotifyChunkLoaded(chunk);
-        
-        // Модификация чанка (разрушение блоков) - используем ту же логику загрузки/перезаливки
         _worldManager.OnChunkModified += (chunk) => _renderer.NotifyChunkLoaded(chunk);
-        
-        // Визуальное разрушение (мгновенная очистка вокселя в GPU до полной перезаливки)
         _worldManager.OnVoxelFastDestroyed += (pos) => 
         {
-            // Находим чанк и просим рендер обновить его
             var chunk = _worldManager.GetAllChunks().GetValueOrDefault(GetChunkPos(pos));
             if(chunk != null) _renderer.NotifyChunkLoaded(chunk);
         };
-        
-        // Выгрузка чанка
         _worldManager.OnChunkUnloaded += (pos) => _renderer.UnloadChunk(pos);
 
-        // Первая инициализация
         _renderer.UploadAllVisibleChunks();
 
         _isInitialized = true;
@@ -93,7 +89,51 @@ public class Game : GameWindow
             Close();
             return;
         }
+        
+        // J - Переключение режима
+        if (_input.IsKeyPressed(Keys.J))
+        {
+            GameSettings.CurrentShadowMode++;
+            if ((int)GameSettings.CurrentShadowMode > 2) 
+                GameSettings.CurrentShadowMode = ShadowMode.None;
+            _renderer.ReloadShader(); // Перекомпиляция
+            Console.WriteLine($"[Shadow Mode] Set to: {GameSettings.CurrentShadowMode}");
+        }
 
+        // [ - Уменьшить сэмплы
+        if (_input.IsKeyPressed(Keys.LeftBracket))
+        {
+            GameSettings.SoftShadowSamples = Math.Max(2, GameSettings.SoftShadowSamples / 2);
+            Console.WriteLine($"[Soft Shadows] Samples: {GameSettings.SoftShadowSamples}");
+            // Здесь НЕ нужен ReloadShader, так как это Uniform
+        }
+
+        // ] - Увеличить сэмплы
+        if (_input.IsKeyPressed(Keys.RightBracket))
+        {
+            GameSettings.SoftShadowSamples = Math.Min(64, GameSettings.SoftShadowSamples * 2);
+            Console.WriteLine($"[Soft Shadows] Samples: {GameSettings.SoftShadowSamples}");
+            // Здесь НЕ нужен ReloadShader
+        }
+
+        // --- ПЕРЕКЛЮЧЕНИЕ ВОДЫ (H) ---
+        if (_input.IsKeyPressed(Keys.H))
+        {
+            GameSettings.UseProceduralWater = !GameSettings.UseProceduralWater;
+            
+            // Сообщаем рендеру, что настройка изменилась
+            _renderer.ReloadShader();
+            
+            Console.WriteLine($"[Water Mode] Set to: {(GameSettings.UseProceduralWater ? "Procedural" : "Texture")}");
+        }
+
+
+        if (_input.IsKeyPressed(Keys.G)) 
+        {
+            var sunDir = Vector3.Normalize(new Vector3(0.2f, 0.3f, 0.8f));
+            Console.WriteLine($"Sun Direction: {sunDir}");
+        }
+        
         if (_input.IsKeyPressed(Keys.F3))
         {
             PerformanceMonitor.IsEnabled = !PerformanceMonitor.IsEnabled;
@@ -101,46 +141,19 @@ public class Game : GameWindow
             if (!PerformanceMonitor.IsEnabled) _debugLines.Clear();
         }
 
-        // --- УПРАВЛЕНИЕ НАСТРОЙКАМИ (HOTKEYS) ---
-        
-        // 1. Render Distance (O / P)
-        if (_input.IsKeyPressed(Keys.O)) 
-            GameSettings.RenderDistance = Math.Max(4, GameSettings.RenderDistance - 4);
-        if (_input.IsKeyPressed(Keys.P)) 
-            GameSettings.RenderDistance = Math.Min(128, GameSettings.RenderDistance + 4);
+        // Settings Hotkeys
+        if (_input.IsKeyPressed(Keys.O)) GameSettings.RenderDistance = Math.Max(4, GameSettings.RenderDistance - 4);
+        if (_input.IsKeyPressed(Keys.P)) GameSettings.RenderDistance = Math.Min(128, GameSettings.RenderDistance + 4);
 
-        // 2. Generation Threads (K / L)
-        if (_input.IsKeyPressed(Keys.K))
-        {
-            GameSettings.GenerationThreads = Math.Max(1, GameSettings.GenerationThreads - 1);
-            _worldManager.SetGenerationThreadCount(GameSettings.GenerationThreads);
-        }
-        if (_input.IsKeyPressed(Keys.L))
-        {
-            GameSettings.GenerationThreads = Math.Min(16, GameSettings.GenerationThreads + 1);
-            _worldManager.SetGenerationThreadCount(GameSettings.GenerationThreads);
-        }
+        if (_input.IsKeyPressed(Keys.K)) { GameSettings.GenerationThreads = Math.Max(1, GameSettings.GenerationThreads - 1); _worldManager.SetGenerationThreadCount(GameSettings.GenerationThreads); }
+        if (_input.IsKeyPressed(Keys.L)) { GameSettings.GenerationThreads = Math.Min(16, GameSettings.GenerationThreads + 1); _worldManager.SetGenerationThreadCount(GameSettings.GenerationThreads); }
 
-        // 3. Physics Threads (N / M)
-        if (_input.IsKeyPressed(Keys.N))
-        {
-            GameSettings.PhysicsThreads = Math.Max(1, GameSettings.PhysicsThreads - 1);
-            _physicsWorld.SetThreadCount(GameSettings.PhysicsThreads);
-        }
-        if (_input.IsKeyPressed(Keys.M))
-        {
-            GameSettings.PhysicsThreads = Math.Min(16, GameSettings.PhysicsThreads + 1);
-            _physicsWorld.SetThreadCount(GameSettings.PhysicsThreads);
-        }
+        if (_input.IsKeyPressed(Keys.N)) { GameSettings.PhysicsThreads = Math.Max(1, GameSettings.PhysicsThreads - 1); _physicsWorld.SetThreadCount(GameSettings.PhysicsThreads); }
+        if (_input.IsKeyPressed(Keys.M)) { GameSettings.PhysicsThreads = Math.Min(16, GameSettings.PhysicsThreads + 1); _physicsWorld.SetThreadCount(GameSettings.PhysicsThreads); }
 
-        // 4. GPU Upload Speed (U / I)
-        if (_input.IsKeyPressed(Keys.U))
-            GameSettings.GpuUploadSpeed = Math.Max(1, GameSettings.GpuUploadSpeed - 1);
-        if (_input.IsKeyPressed(Keys.I))
-            GameSettings.GpuUploadSpeed = Math.Min(200, GameSettings.GpuUploadSpeed + 1);
+        if (_input.IsKeyPressed(Keys.U)) GameSettings.GpuUploadSpeed = Math.Max(1, GameSettings.GpuUploadSpeed - 1);
+        if (_input.IsKeyPressed(Keys.I)) GameSettings.GpuUploadSpeed = Math.Min(200, GameSettings.GpuUploadSpeed + 1);
 
-
-        // --- UPDATE LOGIC ---
         _playerController.Update(_input, deltaTime);
         _worldManager.Update(deltaTime);
         _physicsWorld.Update(deltaTime);
@@ -180,13 +193,19 @@ public class Game : GameWindow
         if (!PerformanceMonitor.IsEnabled) return;
 
         _debugUpdateTimer += deltaTime;
-        if (_debugUpdateTimer >= 0.2f)
+        if (_debugUpdateTimer >= 0.25f)
         {
+            var averages = PerformanceMonitor.GetDataAndReset(_debugUpdateTimer);
+            
+            // Сбрасываем таймер ПОСЛЕ передачи данных
             _debugUpdateTimer = 0f;
-            var averages = PerformanceMonitor.GetDataAndReset();
             
             _debugLines.Clear();
             _debugLines.Add($"FPS: {1.0f / deltaTime:F0}");
+            
+            // Читаем из GameSettings для отображения
+            _debugLines.Add($"Water: {(GameSettings.UseProceduralWater ? "Procedural" : "Texture")}");
+
             _debugLines.Add($"Pos: {_camera.Position.X:F0} {_camera.Position.Y:F0} {_camera.Position.Z:F0}");
             
             _debugLines.Add("--- Settings ---");
@@ -195,14 +214,23 @@ public class Game : GameWindow
             _debugLines.Add($"[N/M] Phys Th:{GameSettings.PhysicsThreads}");
             _debugLines.Add($"[U/I] GPU Up: {GameSettings.GpuUploadSpeed}/frame");
 
-            _debugLines.Add("--- Perf ---");
+            _debugLines.Add("--- Perf (Avg Time | Rate) ---");
             if (averages != null)
             {
-                foreach(var kvp in averages) _debugLines.Add($"{kvp.Key}: {kvp.Value}");
+                foreach(var kvp in averages) 
+                {
+                    // Ключ: Значение
+                    _debugLines.Add($"{kvp.Key}: {kvp.Value}");
+                }
             }
         }
     }
-    
+
+    private void DrawPhysicsDebug()
+    {
+        _physicsDebugger.DrawVoxelObjects(_physicsWorld, _worldManager.GetAllVoxelObjects(), _lineRenderer);
+    }
+
     private Vector3i GetChunkPos(Vector3i worldPos) => new Vector3i(
         (int)Math.Floor(worldPos.X / 16f), 
         (int)Math.Floor(worldPos.Y / 16f), 
@@ -216,6 +244,11 @@ public class Game : GameWindow
         GL.Clear(ClearBufferMask.ColorBufferBit | ClearBufferMask.DepthBufferBit);
 
         _renderer.Render(_camera);
+        if (_showDebugOverlay)
+        {
+            DrawPhysicsDebug();
+            _lineRenderer.Render(_camera);
+        }
         _crosshair.Render();
         if (_showDebugOverlay) _debugOverlay.Render(_debugLines);
 
@@ -239,6 +272,7 @@ public class Game : GameWindow
         _worldManager?.Dispose();
         _physicsWorld?.Dispose();
         _debugOverlay?.Dispose();
+        _lineRenderer.Dispose();
         _crosshair?.Dispose();
     }
 }

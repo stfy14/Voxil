@@ -2,212 +2,216 @@
 out vec4 FragColor;
 in vec2 uv;
 
-uniform vec3 uCamPos;
-uniform mat4 uView;
-uniform mat4 uProjection;
-uniform float uRenderDistance;
-
-uniform int uBoundMinX, uBoundMinY, uBoundMinZ;
-uniform int uBoundMaxX, uBoundMaxY, uBoundMaxZ;
-
-const int CHUNK_SIZE = 16;
-const ivec3 PAGE_TABLE_SIZE = ivec3(512, 16, 512);
-
-layout(binding = 0, r32i) uniform iimage3D uPageTable;
-
-layout(std430, binding = 1) buffer VoxelSSBO {
-    uint packedVoxels[];
-};
-
-struct DynamicObject {
-    mat4 invModel;
-    vec4 color;
-    vec4 boxMin;
-    vec4 boxMax;
-};
-layout(std430, binding = 2) buffer DynObjects {
-    DynamicObject dynObjects[];
-};
-uniform int uDynamicObjectCount;
-
-struct Ray { vec3 org; vec3 dir; vec3 invDir; };
-
-bool intersectBox(Ray r, vec3 boxMin, vec3 boxMax, out float tNear, out float tFar) {
-    vec3 tMin = (boxMin - r.org) * r.invDir;
-    vec3 tMax = (boxMax - r.org) * r.invDir;
-    vec3 t1 = min(tMin, tMax);
-    vec3 t2 = max(tMin, tMax);
-    tNear = max(max(t1.x, t1.y), t1.z);
-    tFar = min(min(t2.x, t2.y), t2.z);
-    return tFar >= tNear && tFar > 0.0;
-}
-
-vec3 getMaterialColor(uint mat) {
-    if (mat == 1) return vec3(0.55, 0.27, 0.07); 
-    if (mat == 2) return vec3(0.5, 0.5, 0.5);    
-    if (mat == 3) return vec3(0.4, 0.26, 0.13);  
-    if (mat == 4) return vec3(0.2, 0.4, 0.8);    
-    return vec3(1.0, 0.0, 1.0);
-}
-
-float traceDynamic(Ray ray, float maxDist, out vec3 outNormal, out vec3 outColor) {
-    float closestT = maxDist;
-    bool hitAny = false;
-    for(int i = 0; i < uDynamicObjectCount; i++) {
-        DynamicObject obj = dynObjects[i];
-        vec3 localOrg = (obj.invModel * vec4(ray.org, 1.0)).xyz;
-        vec3 localDir = (obj.invModel * vec4(ray.dir, 0.0)).xyz;
-        float tNear, tFar;
-
-        if (intersectBox(Ray(localOrg, localDir, 1.0/(localDir+vec3(1e-6))), obj.boxMin.xyz, obj.boxMax.xyz, tNear, tFar)) {
-            if (tNear < closestT && tFar > 0.0) {
-                closestT = max(0.0, tNear);
-                hitAny = true;
-                outColor = obj.color.rgb;
-
-                vec3 hp = localOrg + localDir * closestT;
-                vec3 c = (obj.boxMin.xyz + obj.boxMax.xyz)*0.5;
-                vec3 hs = (obj.boxMax.xyz - obj.boxMin.xyz)*0.5;
-                vec3 d = abs(hp - c) - hs;
-                vec3 n = vec3(0);
-                if (d.x > d.y && d.x > d.z) n.x = sign(hp.x - c.x);
-                else if (d.y > d.z) n.y = sign(hp.y - c.y);
-                else n.z = sign(hp.z - c.z);
-
-                outNormal = normalize((transpose(obj.invModel) * vec4(n, 0.0)).xyz);
-            }
-        }
-    }
-    return hitAny ? closestT : -1.0;
-}
+// 1. Подключаем модули
+#include "include/common.glsl"
+#include "include/tracing.glsl"
+#include "include/lighting.glsl"
+#include "include/atmosphere.glsl"
+#include "include/postprocess.glsl"
+#include "include/water_impl.glsl"
 
 void main() {
+    vec3 safeSunDir = normalize(length(uSunDir) < 0.01 ? vec3(0.0, 0.1, 0.8) : uSunDir);
+
+    // --- 2. Генерация луча ---
     vec2 pos = uv * 2.0 - 1.0;
     vec4 target = inverse(uProjection) * vec4(pos, 1.0, 1.0);
     vec3 rayDir = normalize((inverse(uView) * vec4(target.xyz, 0.0)).xyz);
 
-    Ray ray;
-    ray.org = uCamPos;
-    ray.dir = rayDir;
+    // ИСПРАВЛЕНИЕ: Фикс артефактов + ПОВТОРНАЯ НОРМАЛИЗАЦИЯ
+    if (abs(rayDir.x) < 1e-6) rayDir.x = 1e-6;
+    if (abs(rayDir.y) < 1e-6) rayDir.y = 1e-6;
+    if (abs(rayDir.z) < 1e-6) rayDir.z = 1e-6;
+    rayDir = normalize(rayDir); // <--- Важно! Иначе солнце пропадет или будет искажено
 
-    if (abs(ray.dir.x) < 1e-5) ray.dir.x = 1e-5;
-    if (abs(ray.dir.y) < 1e-5) ray.dir.y = 1e-5;
-    if (abs(ray.dir.z) < 1e-5) ray.dir.z = 1e-5;
-    ray.invDir = 1.0 / ray.dir;
+    // --- 3. Рендер неба (Base) ---
+    vec3 finalColor = GetSkyColor(rayDir, safeSunDir);
+    float finalDepth = 0.999999;
 
-    vec3 finalColor = vec3(0.53, 0.81, 0.92); 
-    vec3 finalNormal = vec3(0,1,0);
-    float finalT = uRenderDistance;
-    bool hit = false;
+    // --- 4. Трассировка ---
+    float tDynamicHit = 100000.0;
+    int bestObjID = -1;
+    vec3 bestLocalNormal = vec3(0);
 
-    vec3 worldMin = vec3(uBoundMinX, uBoundMinY, uBoundMinZ) * float(CHUNK_SIZE);
-    vec3 worldMax = vec3(uBoundMaxX, uBoundMaxY, uBoundMaxZ) * float(CHUNK_SIZE);
-
-    float tBoxNear, tBoxFar;
-    bool hitWorld = intersectBox(ray, worldMin, worldMax, tBoxNear, tBoxFar);
-
-    float tStart = 0.0;
-
-    if (hitWorld) {
-        tStart = max(0.0, tBoxNear);
-
-        if (tStart > uRenderDistance) hitWorld = false;
-    }
-
-    if (hitWorld) {
-        vec3 startPos = ray.org + ray.dir * (tStart + 0.001);
-
-        ivec3 mapPos = ivec3(floor(startPos));
-        vec3 deltaDist = abs(1.0 / rayDir);
-        ivec3 stepDir = ivec3(sign(rayDir));
-
-        vec3 sideDist;
-        if (rayDir.x < 0) sideDist.x = (startPos.x - float(mapPos.x)) * deltaDist.x;
-        else              sideDist.x = (float(mapPos.x) + 1.0 - startPos.x) * deltaDist.x;
-        if (rayDir.y < 0) sideDist.y = (startPos.y - float(mapPos.y)) * deltaDist.y;
-        else              sideDist.y = (float(mapPos.y) + 1.0 - startPos.y) * deltaDist.y;
-        if (rayDir.z < 0) sideDist.z = (startPos.z - float(mapPos.z)) * deltaDist.z;
-        else              sideDist.z = (float(mapPos.z) + 1.0 - startPos.z) * deltaDist.z;
-
-        vec3 mask = vec3(0);
-
-        ivec3 boundMin = ivec3(uBoundMinX, uBoundMinY, uBoundMinZ);
-        ivec3 boundMax = ivec3(uBoundMaxX, uBoundMaxY, uBoundMaxZ);
-
-        int currentChunkOffset = -2;
-        ivec3 currentChunkCoord = ivec3(-999999);
-
-        float maxTrace = uRenderDistance - tStart;
-
-        for (int i = 0; i < 2000; i++) { 
-
-                                         ivec3 chunkCoord = mapPos >> 4;
-
-                                         if (chunkCoord != currentChunkCoord) {
-                                             currentChunkCoord = chunkCoord;
-                                             if (any(lessThan(chunkCoord, boundMin)) || any(greaterThanEqual(chunkCoord, boundMax))) {
-                                                 break;
-                                             }
-                                             ivec3 pageCoord = chunkCoord & (PAGE_TABLE_SIZE - 1);
-                                             currentChunkOffset = imageLoad(uPageTable, pageCoord).r;
-                                         }
-
-                                         if (currentChunkOffset != -1) {
-                                             ivec3 local = mapPos & 15;
-                                             int voxelIdxLinear = local.x + 16 * (local.y + 16 * local.z);
-                                             int uintIdx = currentChunkOffset + (voxelIdxLinear >> 2); 
-                                             uint packedVal = packedVoxels[uintIdx];
-                                             int byteShift = (voxelIdxLinear & 3) * 8;
-                                             uint mat = (packedVal >> byteShift) & 0xFFu;
-                                             if (mat > 0u) {
-                                                 hit = true;
-                                                 float voxelT;
-                                                 if (mask.x > 0.5) voxelT = sideDist.x - deltaDist.x;
-                                                 else if (mask.y > 0.5) voxelT = sideDist.y - deltaDist.y;
-                                                 else voxelT = sideDist.z - deltaDist.z;
-
-                                                 finalT = tStart + voxelT;
-
-                                                 finalNormal = -vec3(stepDir) * mask;
-                                                 finalColor = getMaterialColor(mat);
-                                                 break;
-                                             }
-                                         }
-
-                                         mask = step(sideDist.xyz, sideDist.yzx) * step(sideDist.xyz, sideDist.zxy);
-                                         sideDist += mask * deltaDist;
-                                         mapPos += ivec3(mask) * stepDir;
-
-                                         if ((sideDist.x > maxTrace) && (sideDist.y > maxTrace) && (sideDist.z > maxTrace)) break;
+    // 4.1 Динамика
+    if (uObjectCount > 0) {
+        vec3 gridSpaceRo = (uCamPos - uGridOrigin) / uGridStep;
+        vec3 invDir = 1.0 / rayDir;
+        vec3 t0 = -gridSpaceRo * invDir, t1 = (vec3(uGridSize) - gridSpaceRo) * invDir;
+        vec3 tmin = min(t0, t1), tmax = max(t0, t1);
+        float tEnter = max(max(tmin.x, tmin.y), tmin.z), tExit = min(min(tmax.x, tmax.y), tmax.z);
+        if (tExit >= tEnter && tExit > 0.0) {
+            vec3 currPos = gridSpaceRo + rayDir * (max(0.0, tEnter) + 0.001);
+            ivec3 mapPos = ivec3(floor(currPos)), stepDir = ivec3(sign(rayDir));
+            vec3 deltaDist = abs(1.0 / rayDir);
+            vec3 sideDist = (sign(rayDir) * (vec3(mapPos) - currPos) + (0.5 + 0.5 * sign(rayDir))) * deltaDist;
+            vec3 mask;
+            for (int i = 0; i < 128; i++) {
+                if (any(lessThan(mapPos, ivec3(0))) || any(greaterThanEqual(mapPos, ivec3(uGridSize)))) break;
+                int val = imageLoad(uObjectGrid, mapPos).r;
+                if (val > 0) {
+                    uint dynMat; vec3 localN;
+                    float tHit = CheckDynamicHitByID(val - 1, uCamPos, rayDir, dynMat, localN);
+                    if (tHit >= 0.0 && tHit < tDynamicHit) {
+                        tDynamicHit = tHit; bestObjID = val - 1; bestLocalNormal = localN;
+                    }
+                }
+                mask = (sideDist.x < sideDist.y) ?
+                ((sideDist.x < sideDist.z) ? vec3(1,0,0) : vec3(0,0,1)) :
+                ((sideDist.y < sideDist.z) ? vec3(0,1,0) : vec3(0,0,1));
+                if ((dot(mask, sideDist - deltaDist) + max(0.0, tEnter)) * uGridStep > tDynamicHit) break;
+                sideDist += mask * deltaDist; mapPos += ivec3(mask) * stepDir;
+            }
         }
     }
 
-    vec3 dn, dc;
-    float td = traceDynamic(ray, finalT, dn, dc);
-    if (td > 0.0 && td < finalT) {
-        finalT = td;
-        finalNormal = dn;
-        finalColor = dc;
-        hit = true;
+    // 4.2 Статика
+    float tStaticHit = 100000.0; // Значение по умолчанию, если не попадем
+    uint staticHitMat = 0u;
+    vec3 finalNormal = vec3(0);
+
+    // Теперь TraceStaticRay принимает inout и не сломает tStaticHit, если вернет false
+    TraceStaticRay(uCamPos, rayDir, uRenderDistance, tStaticHit, staticHitMat, finalNormal);
+
+    float tEnd = min(tStaticHit, tDynamicHit);
+
+    // --- 5. Расчет освещения поверхности ---
+    if (tEnd < 99000.0) {
+        bool isDynamic = tDynamicHit < tStaticHit;
+        vec3 hitPos = uCamPos + rayDir * tEnd, normal, albedo;
+        float ao = 1.0;
+
+        if (isDynamic) {
+            normal = normalize(transpose(inverse(mat3(dynObjects[bestObjID].model))) * bestLocalNormal);
+            albedo = dynObjects[bestObjID].color.rgb;
+            ao = 0.8;
+        } else {
+            normal = finalNormal;
+            albedo = GetColor(staticHitMat);
+            ao = CalculateAO(hitPos + normal * 0.001, normal);
+        }
+
+        // Тени
+        float ndotl = max(dot(normal, safeSunDir), 0.0);
+        float shadowFactor = 0.0;
+        if (ndotl > 0.0) {
+            shadowFactor = CalculateShadow(hitPos, normal, safeSunDir);
+        }
+
+        vec3 sunLightColor = vec3(1.0, 0.98, 0.95);
+        vec3 direct = albedo * sunLightColor * 1.2 * ndotl * shadowFactor;
+        vec3 ambient = albedo * mix(vec3(0.15, 0.15, 0.2), vec3(0.3, 0.5, 0.8), 0.5 + 0.5 * normal.y) * 0.7 * ao;
+        finalColor = direct + ambient;
+
+        // --- 6. Вода ---
+        if (!isDynamic && staticHitMat == 4u) {
+            vec3 viewDir = -rayDir;
+            vec3 tangentViewDir = vec3(viewDir.x, viewDir.z, viewDir.y);
+            bool flowing = false;
+            vec2 flowDir = vec2(1.0, 0.0);
+
+            vec2 originalUV = hitPos.xz;
+            vec2 parallaxUV = get_water_parallax_coord(tangentViewDir, originalUV, flowDir, flowing);
+            vec3 waterNormalTangent = get_water_normal_photon(hitPos, finalNormal, parallaxUV, flowDir, 1.0, flowing);
+            vec3 waterNormal = normalize(vec3(waterNormalTangent.x, waterNormalTangent.z, waterNormalTangent.y));
+
+            float fresnel = 0.02 + 0.98 * pow(1.0 - max(dot(waterNormal, -rayDir), 0.0), 5.0);
+
+            vec3 refDir = reflect(rayDir, waterNormal);
+            if (refDir.y < 0.05) { refDir.y = 0.05; refDir = normalize(refDir); }
+
+            vec3 reflectionColor;
+            float tRef = 100000.0; uint matRef = 0u; vec3 refNorm = vec3(0);
+
+            if (TraceStaticRay(hitPos + normal * 0.01, refDir, 200.0, tRef, matRef, refNorm)) {
+                vec3 refAlbedo = GetColor(matRef);
+                vec3 totalLight = sunLightColor * 1.5 * max(dot(refNorm, safeSunDir), 0.0) +
+                vec3(0.2, 0.4, 0.6) * 0.8 * max(dot(refNorm, -safeSunDir), 0.0) +
+                mix(vec3(0.4, 0.25, 0.2), vec3(0.6, 0.55, 0.6), refNorm.y * 0.5 + 0.5);
+
+                reflectionColor = refAlbedo * totalLight;
+                float absorption = 1.0 - exp(-tRef * 0.015);
+                reflectionColor = mix(reflectionColor, vec3(0.1, 0.15, 0.2), absorption);
+
+                vec3 horizonColor = vec3(0.60, 0.75, 0.95);
+                vec3 skyTopColor = vec3(0.3, 0.5, 0.85);
+                reflectionColor = mix(reflectionColor, mix(horizonColor, skyTopColor, max(refDir.y, 0.0)),
+                                      pow(clamp(tRef / 200.0, 0.0, 1.0), 4.0));
+            } else {
+                reflectionColor = GetSkyColor(refDir, safeSunDir);
+            }
+
+            vec3 refractionColor = vec3(0.0);
+            vec3 underwaterRo = hitPos + rayDir * 0.01;
+            vec3 underwaterRd = rayDir;
+
+            ivec3 uMapPos = ivec3(floor(underwaterRo));
+            ivec3 uStepDir = ivec3(sign(underwaterRd));
+            vec3 uDeltaDist = abs(1.0 / underwaterRd);
+            vec3 uSideDist = (sign(underwaterRd) * (vec3(uMapPos) - underwaterRo) + (0.5 + 0.5 * sign(underwaterRd))) * uDeltaDist;
+            vec3 uMask;
+            float tWaterDepth = 0.0;
+            bool hitBottom = false;
+            uint bottomMat = 0u;
+
+            for (int k = 0; k < 64; k++) {
+                uMask = (uSideDist.x < uSideDist.y) ?
+                ((uSideDist.x < uSideDist.z) ? vec3(1,0,0) : vec3(0,0,1)) :
+                ((uSideDist.y < uSideDist.z) ? vec3(0,1,0) : vec3(0,0,1));
+                uSideDist += uMask * uDeltaDist;
+                uMapPos += ivec3(uMask) * uStepDir;
+                ivec3 chunkCoord = uMapPos >> 4;
+                int chunkIdx = imageLoad(uPageTable, chunkCoord & (PAGE_TABLE_SIZE - 1)).r;
+                if (chunkIdx != -1) {
+                    ivec3 local = uMapPos & 15;
+                    int idx = local.x + 16 * (local.y + 16 * local.z);
+                    uint m = (packedVoxels[chunkIdx + (idx >> 2)] >> ((idx & 3) * 8)) & 0xFFu;
+                    if (m != 0u && m != 4u) {
+                        tWaterDepth = dot(uMask, uSideDist - uDeltaDist);
+                        bottomMat = m;
+                        hitBottom = true;
+                        break;
+                    }
+                }
+                if (dot(uMask, uSideDist - uDeltaDist) > 80.0) break;
+            }
+
+            vec3 waterAbsorb = vec3(WATER_ABSORPTION_R_UNDERWATER, WATER_ABSORPTION_G_UNDERWATER, WATER_ABSORPTION_B_UNDERWATER);
+            vec3 extinction = waterAbsorb * 2.0;
+
+            if (hitBottom) {
+                vec3 bottomPos = underwaterRo + underwaterRd * tWaterDepth;
+                vec3 bottomAlbedo = GetColor(bottomMat);
+
+                float caustics = GetCaustics(bottomPos, uTime);
+                float causticFade = exp(-tWaterDepth * 0.3);
+                vec3 causticLight = sunLightColor * caustics * causticFade * 0.8;
+                float bottomLightBase = max(dot(vec3(0,1,0), safeSunDir), 0.0) * shadowFactor * 0.8 + 0.2;
+                vec3 bottomFinalColor = bottomAlbedo * (sunLightColor * bottomLightBase + causticLight);
+
+                vec3 transmission = exp(-extinction * tWaterDepth);
+                refractionColor = bottomFinalColor * transmission;
+                refractionColor += vec3(WATER_SCATTERING_UNDERWATER) * (1.0 - transmission) * sunLightColor * 0.5;
+            } else {
+                refractionColor = vec3(0.05, 0.1, 0.2);
+            }
+
+            vec3 halfVec = normalize(safeSunDir - rayDir);
+            float specular = pow(max(dot(waterNormal, halfVec), 0.0), 200.0) * shadowFactor;
+
+            finalColor = mix(refractionColor, reflectionColor, fresnel) + specular * sunLightColor;
+        }
+
+        // --- 7. Туман ---
+        finalColor = ApplyFog(finalColor, rayDir, safeSunDir, tEnd, uRenderDistance);
+
+        vec4 clipPos = uProjection * uView * vec4(hitPos, 1.0);
+        finalDepth = (clipPos.z / clipPos.w) * 0.5 + 0.5;
     }
 
-    if (hit) {
-        vec3 light = normalize(vec3(0.5, 1.0, 0.3));
-        float diff = max(dot(finalNormal, light), 0.2);
+    // --- 8. Пост-процессинг ---
+    finalColor = ApplyPostProcess(finalColor);
 
-        float fogStart = uRenderDistance * 0.6;
-        float fogEnd = uRenderDistance;
-        float fog = smoothstep(fogStart, fogEnd, finalT);
-
-        vec3 col = finalColor * diff;
-        finalColor = mix(col, vec3(0.53, 0.81, 0.92), fog);
-
-        FragColor = vec4(finalColor, 1.0);
-
-        vec4 clip = uProjection * uView * vec4(ray.org + ray.dir * finalT, 1.0);
-        gl_FragDepth = (clip.z / clip.w) * 0.5 + 0.5;
-    } else {
-        FragColor = vec4(0.53, 0.81, 0.92, 1.0);
-        gl_FragDepth = 1.0;
-    }
+    FragColor = vec4(finalColor, 1.0);
+    gl_FragDepth = finalDepth;
 }

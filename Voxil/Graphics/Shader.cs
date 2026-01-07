@@ -3,61 +3,182 @@ using OpenTK.Mathematics;
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Text;
 
 public class Shader : IDisposable
 {
     public readonly int Handle;
     private readonly Dictionary<string, int> _uniformLocations = new();
+    private readonly string _name;
     private bool _disposed;
 
-    // Новое поле для хранения имени (пути)
-    private readonly string _name;
-
-    public Shader(string vertexPath, string fragmentPath)
+    // --- 1. Конструктор: Пути к файлам + Defines ---
+    public Shader(string vertexPath, string fragmentPath, List<string> defines = null)
     {
-        // Сохраняем имя для дебага
-        _name = $"{vertexPath} + {fragmentPath}";
+        _name = $"{vertexPath}+{fragmentPath}";
 
-        if (!File.Exists(vertexPath))
-            throw new FileNotFoundException($"Вершинный шейдер не найден: {vertexPath}");
+        // 1. Загружаем исходники (с обработкой #include и удалением комментариев)
+        string vsSource = LoadSource(vertexPath);
+        string fsSource = LoadSource(fragmentPath);
 
-        if (!File.Exists(fragmentPath))
-            throw new FileNotFoundException($"Фрагментный шейдер не найден: {fragmentPath}");
+        // 2. Внедряем #define
+        if (defines != null && defines.Count > 0)
+        {
+            vsSource = InjectDefines(vsSource, defines);
+            fsSource = InjectDefines(fsSource, defines);
+        }
 
-        string vertexSource = File.ReadAllText(vertexPath);
-        string fragmentSource = File.ReadAllText(fragmentPath);
+        // 3. Компилируем
+        int vs = CompileShader(ShaderType.VertexShader, vsSource);
+        int fs = CompileShader(ShaderType.FragmentShader, fsSource);
 
-        int vertexShader = CompileShader(ShaderType.VertexShader, vertexSource, vertexPath);
-        int fragmentShader = CompileShader(ShaderType.FragmentShader, fragmentSource, fragmentPath);
-
-        Handle = LinkProgram(vertexShader, fragmentShader);
-
-        GL.DetachShader(Handle, vertexShader);
-        GL.DetachShader(Handle, fragmentShader);
-        GL.DeleteShader(vertexShader);
-        GL.DeleteShader(fragmentShader);
-
+        Handle = LinkProgram(vs, fs);
         CacheUniformLocations();
-        Console.WriteLine($"[Shader] Шейдер загружен: {_name} (ID: {Handle})");
+
+        Console.WriteLine($"[Shader] Compiled: {_name} (Defines: {defines?.Count ?? 0})");
     }
 
-    // Дополнительный конструктор для кода из строки (как в DebugOverlay/Crosshair)
+    // --- 2. Конструктор: Compute Shader ---
+    public Shader(string computePath, List<string> defines = null)
+    {
+        _name = computePath;
+        string source = LoadSource(computePath);
+
+        if (defines != null && defines.Count > 0)
+            source = InjectDefines(source, defines);
+
+        int cs = CompileShader(ShaderType.ComputeShader, source);
+        Handle = LinkProgram(cs);
+        CacheUniformLocations();
+    }
+    
+    // --- 4. Конструктор для RAW SOURCE (Сырой код из строки) ---
+    // Используется в LineRenderer и других процедурных генераторах
     public Shader(string vertexSource, string fragmentSource, bool isSourceCode)
     {
-        _name = "Generated/Internal"; // Имя для внутренних шейдеров
+        if (!isSourceCode) 
+            throw new ArgumentException("Use the path-based constructor for files.");
 
-        int vertexShader = CompileShader(ShaderType.VertexShader, vertexSource, "Internal Vert");
-        int fragmentShader = CompileShader(ShaderType.FragmentShader, fragmentSource, "Internal Frag");
+        _name = "Generated/Internal";
+        
+        // Для сырого кода обычно не нужны Defines и Includes, 
+        // так как это простые встроенные шейдеры.
+        // Но на всякий случай удалим комментарии.
+        vertexSource = RemoveComments(vertexSource);
+        fragmentSource = RemoveComments(fragmentSource);
 
-        Handle = LinkProgram(vertexShader, fragmentShader);
+        int vs = CompileShader(ShaderType.VertexShader, vertexSource);
+        int fs = CompileShader(ShaderType.FragmentShader, fragmentSource);
 
-        GL.DetachShader(Handle, vertexShader);
-        GL.DetachShader(Handle, fragmentShader);
-        GL.DeleteShader(vertexShader);
-        GL.DeleteShader(fragmentShader);
+        Handle = LinkProgram(vs, fs);
+        CacheUniformLocations();
     }
 
-    private int CompileShader(ShaderType type, string source, string path)
+    // --- INTERNAL LOGIC ---
+
+    private static string LoadSource(string path)
+    {
+        if (!File.Exists(path))
+            throw new FileNotFoundException($"Shader file not found: {path}");
+
+        string source = File.ReadAllText(path);
+        
+        // СНАЧАЛА удаляем комментарии, чтобы парсер инклюдов не триггерился на закомментированный код
+        source = RemoveComments(source);
+
+        string dir = Path.GetDirectoryName(path);
+        return ParseIncludes(source, dir);
+    }
+
+    private static string RemoveComments(string source)
+    {
+        var lines = source.Split(new[] { "\r\n", "\r", "\n" }, StringSplitOptions.None);
+        var sb = new StringBuilder();
+
+        foreach (var line in lines)
+        {
+            // Упрощенное удаление однострочных комментариев //
+            // (Для блочных /* */ нужен более сложный парсер, но обычно хватает этого)
+            int commentIndex = line.IndexOf("//");
+            if (commentIndex >= 0)
+                sb.AppendLine(line.Substring(0, commentIndex));
+            else
+                sb.AppendLine(line);
+        }
+
+        return sb.ToString();
+    }
+
+    private static string ParseIncludes(string source, string currentDir)
+    {
+        var lines = source.Split(new[] { "\r\n", "\r", "\n" }, StringSplitOptions.None);
+        var sb = new StringBuilder();
+
+        foreach (var line in lines)
+        {
+            // Проверяем #include только если строка не пустая (комментарии уже удалены)
+            if (line.Trim().StartsWith("#include"))
+            {
+                int firstQuote = line.IndexOf('"');
+                int lastQuote = line.LastIndexOf('"');
+
+                if (firstQuote > 0 && lastQuote > firstQuote)
+                {
+                    string includeFile = line.Substring(firstQuote + 1, lastQuote - firstQuote - 1);
+                    string includePath = Path.Combine(currentDir, includeFile);
+
+                    if (!File.Exists(includePath))
+                        throw new FileNotFoundException($"Include file not found: {includePath}");
+
+                    // Рекурсивно читаем и чистим вложенный файл
+                    string includeSource = File.ReadAllText(includePath);
+                    includeSource = RemoveComments(includeSource); // <--- ЧИСТИМ И ВКЛЮЧАЕМЫЙ ФАЙЛ
+                    
+                    // Рекурсивно парсим инклюды внутри него
+                    string processedInclude = ParseIncludes(includeSource, Path.GetDirectoryName(includePath));
+
+                    sb.AppendLine($"// --- BEGIN INCLUDE: {includeFile} ---");
+                    sb.AppendLine(processedInclude);
+                    sb.AppendLine($"// --- END INCLUDE: {includeFile} ---");
+                }
+                else
+                {
+                    // Если синтаксис кривой, оставляем как есть, пусть компилятор GLSL ругается
+                    sb.AppendLine(line);
+                }
+            }
+            else
+            {
+                sb.AppendLine(line);
+            }
+        }
+
+        return sb.ToString();
+    }
+
+    private static string InjectDefines(string source, List<string> defines)
+    {
+        int versionIndex = source.IndexOf("#version");
+        int insertIndex = 0;
+
+        if (versionIndex != -1)
+        {
+            int endOfLine = source.IndexOf('\n', versionIndex);
+            insertIndex = endOfLine + 1;
+        }
+
+        var sb = new StringBuilder();
+        foreach (var def in defines)
+        {
+            sb.AppendLine($"#define {def}");
+        }
+
+        return source.Insert(insertIndex, sb.ToString());
+    }
+
+    // --- COMPILE & LINK ---
+
+    private int CompileShader(ShaderType type, string source)
     {
         int shader = GL.CreateShader(type);
         GL.ShaderSource(shader, source);
@@ -67,25 +188,40 @@ public class Shader : IDisposable
         if (success == 0)
         {
             string infoLog = GL.GetShaderInfoLog(shader);
-            string shaderTypeName = type == ShaderType.VertexShader ? "вершинного" : "фрагментного";
-            throw new Exception($"Ошибка компиляции {shaderTypeName} шейдера ({path}):\n{infoLog}");
+            GL.DeleteShader(shader);
+            
+            // Вывод части кода для дебага, если ошибка неочевидна
+            Console.WriteLine($"--- SHADER ERROR SOURCE ({type}) ---");
+            var lines = source.Split('\n');
+            for(int i=0; i<Math.Min(lines.Length, 20); i++) Console.WriteLine($"{i+1}: {lines[i]}");
+            Console.WriteLine("...");
+            
+            throw new Exception($"Error compiling {type} in '{_name}':\n{infoLog}");
         }
         return shader;
     }
 
-    private int LinkProgram(int vertexShader, int fragmentShader)
+    private int LinkProgram(params int[] shaders)
     {
         int program = GL.CreateProgram();
-        GL.AttachShader(program, vertexShader);
-        GL.AttachShader(program, fragmentShader);
+        foreach (var shader in shaders) GL.AttachShader(program, shader);
         GL.LinkProgram(program);
 
         GL.GetProgram(program, GetProgramParameterName.LinkStatus, out int success);
         if (success == 0)
         {
             string infoLog = GL.GetProgramInfoLog(program);
-            throw new Exception($"Ошибка линковки шейдера [{_name}]:\n{infoLog}");
+            GL.DeleteProgram(program);
+            foreach (var shader in shaders) GL.DeleteShader(shader);
+            throw new Exception($"Error linking program '{_name}':\n{infoLog}");
         }
+
+        foreach (var shader in shaders)
+        {
+            GL.DetachShader(program, shader);
+            GL.DeleteShader(shader);
+        }
+
         return program;
     }
 
@@ -100,60 +236,32 @@ public class Shader : IDisposable
         }
     }
 
-    public void Use()
+    // --- PUBLIC API ---
+
+    public void Use() => GL.UseProgram(Handle);
+
+    public void SetTexture(string name, int textureHandle, TextureUnit unit)
     {
-        GL.UseProgram(Handle);
+        int loc = GetLoc(name);
+        if (loc == -1) return;
+        GL.ActiveTexture(unit);
+        GL.BindTexture(TextureTarget.Texture2D, textureHandle);
+        GL.Uniform1(loc, (int)unit - (int)TextureUnit.Texture0);
     }
 
-    private int GetUniformLocation(string name)
+    private int GetLoc(string name)
     {
-        if (_uniformLocations.TryGetValue(name, out int location))
-        {
-            return location;
-        }
-
-        location = GL.GetUniformLocation(Handle, name);
-        if (location == -1)
-        {
-            // --- ОБНОВЛЕННЫЙ ВЫВОД ОШИБКИ ---
-            // Теперь пишет конкретный файл шейдера
-            Console.WriteLine($"[Shader Warning] Uniform '{name}' не найден (или вырезан компилятором) в шейдере: [{_name}]");
-        }
-
-        // Кэшируем даже -1, чтобы не спамить в консоль каждый кадр
-        _uniformLocations[name] = location;
-        return location;
+        if (_uniformLocations.TryGetValue(name, out int loc)) return loc;
+        loc = GL.GetUniformLocation(Handle, name);
+        _uniformLocations[name] = loc;
+        return loc;
     }
 
-    public void SetMatrix4(string name, Matrix4 matrix)
-    {
-        int location = GetUniformLocation(name);
-        if (location != -1) GL.UniformMatrix4(location, false, ref matrix);
-    }
-
-    public void SetVector3(string name, Vector3 vector)
-    {
-        int location = GetUniformLocation(name);
-        if (location != -1) GL.Uniform3(location, vector);
-    }
-
-    public void SetVector4(string name, Vector4 vector)
-    {
-        int location = GetUniformLocation(name);
-        if (location != -1) GL.Uniform4(location, vector);
-    }
-
-    public void SetFloat(string name, float value)
-    {
-        int location = GetUniformLocation(name);
-        if (location != -1) GL.Uniform1(location, value);
-    }
-
-    public void SetInt(string name, int value)
-    {
-        int location = GetUniformLocation(name);
-        if (location != -1) GL.Uniform1(location, value);
-    }
+    public void SetMatrix4(string name, Matrix4 data) { int loc = GetLoc(name); if (loc != -1) GL.UniformMatrix4(loc, false, ref data); }
+    public void SetVector3(string name, Vector3 data) { int loc = GetLoc(name); if (loc != -1) GL.Uniform3(loc, data); }
+    public void SetVector4(string name, Vector4 data) { int loc = GetLoc(name); if (loc != -1) GL.Uniform4(loc, data); }
+    public void SetFloat(string name, float data) { int loc = GetLoc(name); if (loc != -1) GL.Uniform1(loc, data); }
+    public void SetInt(string name, int data) { int loc = GetLoc(name); if (loc != -1) GL.Uniform1(loc, data); }
 
     public void Dispose()
     {

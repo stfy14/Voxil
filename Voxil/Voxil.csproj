@@ -8,6 +8,7 @@
     <AllowUnsafeBlocks>True</AllowUnsafeBlocks>
 	<AllowVeryLargeObjects>true</AllowVeryLargeObjects>
 	<PlatformTarget>x64</PlatformTarget>
+	<StartupObject>Program</StartupObject>
   </PropertyGroup>
 
   <ItemGroup>
@@ -21,17 +22,43 @@
     <None Update="Assets\RobotoMono-Regular.ttf">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
+    <None Update="Shaders\grid_update.comp">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </None>
     <None Update="Shaders\raycast.vert">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </None>
     <None Update="Shaders\raycast.frag">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </None>
+    <None Update="Shaders\images\noise.png">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </None>
+    <None Update="Shaders\Images\water_noise.png">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </None>
+    <None Update="Shaders\include\water_impl.glsl">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </None>
+    <None Update="Shaders\include\atmosphere.glsl">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </None>
+    <None Update="Shaders\include\common.glsl">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </None>
+    <None Update="Shaders\include\lighting.glsl">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </None>
+    <None Update="Shaders\include\postprocess.glsl">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </None>
+    <None Update="Shaders\include\tracing.glsl">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </None>
   </ItemGroup>
 
   <ItemGroup>
     <Folder Include="Assets\" />
-    <Folder Include="World\Meshing\" />
   </ItemGroup>
 
 </Project>
