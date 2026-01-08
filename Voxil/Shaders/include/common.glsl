@@ -18,17 +18,14 @@ uniform vec3 uGridOrigin;
 uniform float uGridStep;
 uniform int uGridSize;
 
-// --- LINKED LIST GRID (Замена старого uObjectGrid) ---
-// Binding 1: Текстура-голова списка (хранит индекс первого узла)
+// --- LINKED LIST GRID ---
 layout(binding = 1, r32i) uniform iimage3D uObjectGridHead;
 
-// Структура узла списка
 struct ListNode {
     uint objectID;
     int nextNode;
 };
 
-// Binding 3: Буфер узлов (хранит цепочки объектов)
 layout(std430, binding = 3) buffer LinkedList {
     ListNode listNodes[];
 };
@@ -37,7 +34,9 @@ layout(std430, binding = 3) buffer LinkedList {
 uniform sampler2D uNoiseTexture;
 
 const ivec3 PAGE_TABLE_SIZE = ivec3(512, 16, 512);
-layout(binding = 0, r32i) uniform iimage3D uPageTable;
+
+// --- ИЗМЕНЕНИЕ: Тип uniform для uint ---
+layout(binding = 0, r32ui) uniform uimage3D uPageTable;
 
 layout(std430, binding = 1) buffer VoxelSSBO { uint packedVoxels[]; };
 
