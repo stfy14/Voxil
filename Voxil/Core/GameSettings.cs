@@ -11,7 +11,7 @@ public static class GameSettings
     public static int RenderDistance = 2;
     
     // Лимит загрузки чанков в GPU за кадр
-    public static int GpuUploadSpeed = 200;
+    public static int GpuUploadSpeed = 8;
     
     // Кол-во потоков генерации (Perlin noise)
     public static int GenerationThreads = 1;

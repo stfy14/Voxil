@@ -45,6 +45,7 @@ public class Game : GameWindow
         GL.Disable(EnableCap.CullFace);
 
         _physicsWorld = new PhysicsWorld();
+        _physicsWorld.SetThreadCount(GameSettings.PhysicsThreads);
 
         var startPosition = new System.Numerics.Vector3(8, 60, 8);
         _camera = new Camera(VectorExtensions.ToOpenTK(startPosition), Size.X / (float)Size.Y);
@@ -272,7 +273,7 @@ public class Game : GameWindow
         _renderer.Render(_camera);
         if (_showDebugOverlay)
         {
-            DrawPhysicsDebug();
+            //DrawPhysicsDebug();
             _lineRenderer.Render(_camera);
         }
         _crosshair.Render();

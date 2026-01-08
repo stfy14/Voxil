@@ -8,6 +8,7 @@ using System.Threading.Tasks;
 using StbImageSharp;
 using System.Runtime.InteropServices;
 using System.IO;
+using System.Diagnostics;
 
 public class GpuRaycastingRenderer : IDisposable
 {
@@ -32,6 +33,12 @@ public class GpuRaycastingRenderer : IDisposable
     private int _beamHeight;
     private const int BeamDivisor = 2; // Разрешение в 4 раза меньше (1/16 пикселей)
     // -------------------------
+    
+    // --- Micro-stepping optimization ---
+    private int _maskSsbo;
+    private const int ChunkMaskSizeInUlongs = Chunk.MasksCount; // 4096
+    // Массив для временного копирования масок перед отправкой
+    private readonly ulong[] _maskUploadBuffer = new ulong[ChunkMaskSizeInUlongs];
 
     private const int ChunkVol = Constants.ChunkVolume;
     private const int PackedChunkSizeInInts = ChunkVol / 4;
@@ -122,6 +129,14 @@ public class GpuRaycastingRenderer : IDisposable
         catch (Exception ex) { Console.WriteLine($"[FATAL] GPU Mem: {ex.Message}"); throw; }
         GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 1, _voxelSsbo);
 
+        // --- ДОБАВЛЕНО: ИНИЦИАЛИЗАЦИЯ МАСОК ---
+        _maskSsbo = GL.GenBuffer();
+        GL.BindBuffer(BufferTarget.ShaderStorageBuffer, _maskSsbo);
+        long totalMaskBytes = (long)_currentCapacity * ChunkMaskSizeInUlongs * sizeof(ulong);
+        GL.BufferData(BufferTarget.ShaderStorageBuffer, (IntPtr)totalMaskBytes, IntPtr.Zero, BufferUsageHint.DynamicDraw);
+        GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 5, _maskSsbo);
+        // ---------------------------------------
+
         _gridHeadTexture = GL.GenTexture();
         GL.BindTexture(TextureTarget.Texture3D, _gridHeadTexture);
         GL.TexImage3D(TextureTarget.Texture3D, 0, PixelInternalFormat.R32i, OBJ_GRID_SIZE, OBJ_GRID_SIZE, OBJ_GRID_SIZE, 0, PixelFormat.RedInteger, PixelType.Int, IntPtr.Zero);
@@ -175,20 +190,39 @@ public class GpuRaycastingRenderer : IDisposable
     {
         _totalTime += deltaTime;
 
-        int unloads = 0;
-        while (unloads < 200 && _chunksToUnload.TryDequeue(out var pos)) { ProcessUnload(pos); unloads++; }
+        // ИСПРАВЛЕНИЕ 1: Безлимитная выгрузка.
+        // Если нужно выгрузить 500 чанков - выгружаем все сразу. Это быстро.
+        // Иначе у нас не будет свободных слотов для загрузки новых.
+        while (_chunksToUnload.TryDequeue(out var pos)) 
+        { 
+            ProcessUnload(pos); 
+        }
+
+        // ИСПРАВЛЕНИЕ 2: Загрузка по времени.
+        // Увеличиваем бюджет времени до 4-5 мс, так как GPU Upload - это то, что видит игрок.
+        long maxTicks = Stopwatch.Frequency / 1000 * 4; // 4ms бюджет
+        long startTicks = Stopwatch.GetTimestamp();
 
         int uploads = 0;
-        int limit = GameSettings.GpuUploadSpeed;
-        while (uploads < limit && _chunksToUpload.TryDequeue(out var chunk))
+        // Убираем жесткий лимит GameSettings.GpuUploadSpeed, или делаем его огромным (напр. 1000)
+        // Доверяем только таймеру.
+        while (_chunksToUpload.TryDequeue(out var chunk))
         {
+            // Пропускаем, если чанк уже стоит в очереди на удаление (бывает при развороте камеры)
+            if (_chunksToUnload.Contains(chunk.Position)) continue; 
+
             _queuedChunkPositions.Remove(chunk.Position);
             UploadChunkVoxels(chunk);
             uploads++;
+
+            // Прерываемся, только если вышли за бюджет времени
+            if (Stopwatch.GetTimestamp() - startTicks > maxTicks) 
+                break;
         }
 
         if (_pageTableDirty)
         {
+            // Обновление таблицы страниц быстрое, но тоже стоит учитывать
             GL.BindTexture(TextureTarget.Texture3D, _pageTableTexture);
             GL.TexSubImage3D(TextureTarget.Texture3D, 0, 0, 0, 0, PT_X, PT_Y, PT_Z, PixelFormat.RedInteger, PixelType.UnsignedInt, _cpuPageTable);
             _pageTableDirty = false;
@@ -301,13 +335,17 @@ public class GpuRaycastingRenderer : IDisposable
         GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 2, _dynamicObjectsBuffer);
         GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 3, _linkedListSsbo);
 
+        // <--- ВАЖНО: ВОТ ЭТА СТРОКА БЫЛА ПРОПУЩЕНА --->
+        // Без неё шейдер читает нули вместо масок и пропускает все блоки
+        GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 5, _maskSsbo); 
+
         _shader.SetTexture("uNoiseTexture", _noiseTexture, TextureUnit.Texture0);
         _shader.SetVector3("uGridOrigin", _lastGridOrigin);
         _shader.SetFloat("uGridStep", _gridCellSize);
         _shader.SetInt("uGridSize", OBJ_GRID_SIZE);
         _shader.SetInt("uObjectCount", _worldManager.GetAllVoxelObjects().Count);
 
-        // --- ИСПРАВЛЕНИЕ: Биндим VAO всегда, независимо от настроек ---
+        // Привязываем VAO для рисования квадрата
         GL.BindVertexArray(_quadVao);
 
         // === 1. BEAM PASS (Low Res) ===
@@ -318,30 +356,24 @@ public class GpuRaycastingRenderer : IDisposable
             GL.Clear(ClearBufferMask.ColorBufferBit);
             
             _shader.SetInt("uIsBeamPass", 1); // true
-            
             GL.Disable(EnableCap.DepthTest);
-            // VAO уже привязан выше
             GL.DrawArrays(PrimitiveType.TriangleStrip, 0, 4);
         }
         
         // === 2. MAIN PASS (High Res) ===
         GL.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
         
-        // Восстанавливаем viewport
-        // Примечание: тут используется BeamDivisor, что предполагает деление без остатка.
-        // Если разрешение экрана нечетное, возможна потеря 1 пикселя по краям, 
-        // но для рендерера это не критично.
-        GL.Viewport(0, 0, _beamWidth * BeamDivisor, _beamHeight * BeamDivisor); 
+        if (GameSettings.BeamOptimization)
+            GL.Viewport(0, 0, _beamWidth * BeamDivisor, _beamHeight * BeamDivisor); 
+        else
+            GL.Viewport(0, 0, _beamWidth * BeamDivisor, _beamHeight * BeamDivisor); 
         
         _shader.SetInt("uIsBeamPass", 0); // false
         _shader.SetTexture("uBeamTexture", _beamTexture, TextureUnit.Texture1); 
         
-        // VAO всё еще привязан
         GL.DrawArrays(PrimitiveType.TriangleStrip, 0, 4);
         
         GL.Enable(EnableCap.DepthTest);
-        
-        // Сбрасываем VAO для чистоты
         GL.BindVertexArray(0);
     }
 
@@ -381,7 +413,9 @@ public class GpuRaycastingRenderer : IDisposable
     {
         if (chunk == null || !chunk.IsLoaded) return;
 
-        chunk.ReadVoxelsUnsafe(src =>
+        // ИСПРАВЛЕНИЕ: Используем ReadDataUnsafe, чтобы получить доступ 
+        // и к вокселям, и к маскам под ОДНОЙ блокировкой.
+        chunk.ReadDataUnsafe((srcVoxels, srcMasks) =>
         {
             if (chunk.SolidCount == 0)
             {
@@ -389,7 +423,7 @@ public class GpuRaycastingRenderer : IDisposable
                 return;
             }
 
-            if (src == null) return;
+            if (srcVoxels == null) return;
 
             int offset;
             if (!_loadedChunks.TryGetValue(chunk.Position, out offset))
@@ -402,7 +436,8 @@ public class GpuRaycastingRenderer : IDisposable
                 _loadedChunks[chunk.Position] = offset;
             }
 
-            System.Buffer.BlockCopy(src, 0, _chunkUploadBuffer, 0, Constants.ChunkVolume);
+            // 1. Upload Voxels
+            System.Buffer.BlockCopy(srcVoxels, 0, _chunkUploadBuffer, 0, Constants.ChunkVolume);
             IntPtr gpuOffset = (IntPtr)((long)offset * PackedChunkSizeInInts * sizeof(uint));
             
             GL.BindBuffer(BufferTarget.ShaderStorageBuffer, _voxelSsbo);
@@ -413,7 +448,18 @@ public class GpuRaycastingRenderer : IDisposable
             
             PerformanceMonitor.Record(ThreadType.GpuRender, end - start);
 
-            _cpuPageTable[GetPageTableIndex(chunk.Position)] = (uint)((long)offset * PackedChunkSizeInInts);
+            // 2. Upload Masks
+            if (srcMasks != null)
+            {
+                System.Buffer.BlockCopy(srcMasks, 0, _maskUploadBuffer, 0, ChunkMaskSizeInUlongs * sizeof(ulong));
+                
+                IntPtr maskGpuOffset = (IntPtr)((long)offset * ChunkMaskSizeInUlongs * sizeof(ulong));
+                GL.BindBuffer(BufferTarget.ShaderStorageBuffer, _maskSsbo);
+                GL.BufferSubData(BufferTarget.ShaderStorageBuffer, maskGpuOffset, ChunkMaskSizeInUlongs * sizeof(ulong), _maskUploadBuffer);
+            }
+
+            // ВАЖНО: Записываем просто ID слота (offset), а не байтовое смещение
+            _cpuPageTable[GetPageTableIndex(chunk.Position)] = (uint)offset;
             _pageTableDirty = true;
         });
     }
@@ -450,6 +496,7 @@ public class GpuRaycastingRenderer : IDisposable
     public void Dispose()
     {
         GL.DeleteTexture(_pageTableTexture);
+        GL.DeleteBuffer(_maskSsbo);
         GL.DeleteTexture(_gridHeadTexture);
         GL.DeleteTexture(_noiseTexture);
         GL.DeleteTexture(_beamTexture);

@@ -129,40 +129,73 @@ public class WorldManager : IDisposable
         });
     }
 
-    private void CalculateChunksBackground(Vector3i center, HashSet<Vector3i> activeSnapshot, int viewDist, int height)
+     private void CalculateChunksBackground(Vector3i center, HashSet<Vector3i> activeSnapshot, int viewDist, int height)
     {
         _chunksToLoadList.Clear();
         _chunksToUnloadList.Clear();
         _requiredChunksSet.Clear();
         _sortedLoadPositions.Clear();
 
+        // ИЗМЕНЕНИЕ: Рассчитываем вертикальный диапазон относительно центра (игрока)
+        // Если height = 16, мы хотим видеть от center.Y - 8 до center.Y + 8 (примерно)
+        // Но обычно в воксельных играх чанки грузятся "столбами" (от 0 до макс высоты).
+        // Если вы хотите "столбы" (как в Minecraft), оставьте 0..height. 
+        // Если "сферу" (как в No Man's Sky) - используйте относительный Y.
+        // Ниже вариант для "бесконечного" мира по вертикали или корректной обработки высоты:
+        
+        int yDist = viewDist / 2; // Вертикальная дальность обычно меньше горизонтальной
+        if (yDist < 4) yDist = 4;
+
         for (int x = -viewDist; x <= viewDist; x++)
         {
             for (int z = -viewDist; z <= viewDist; z++)
             {
-                for (int y = 0; y < height; y++) 
+                // ВАРИАНТ 1: Если мир ограничен по высоте (0..16 чанков), используем clamp
+                for (int y = 0; y < height; y++)
+                {
                     _requiredChunksSet.Add(new Vector3i(center.X + x, y, center.Z + z));
+                }
+                
+                // ВАРИАНТ 2 (Если нужен бесконечный мир вверх/вниз):
+                /*
+                for (int y = -yDist; y <= yDist; y++)
+                {
+                     _requiredChunksSet.Add(new Vector3i(center.X + x, center.Y + y, center.Z + z));
+                }
+                */
             }
         }
 
-        foreach (var pos in activeSnapshot) if (!_requiredChunksSet.Contains(pos)) _chunksToUnloadList.Add(pos);
-        foreach (var pos in _requiredChunksSet) if (!activeSnapshot.Contains(pos)) _sortedLoadPositions.Add(pos);
+        // Логика выгрузки и загрузки остается той же, но сортировку нужно обезопасить от переполнения
+        foreach (var pos in activeSnapshot)
+        {
+            if (!_requiredChunksSet.Contains(pos)) _chunksToUnloadList.Add(pos);
+        }
+
+        foreach (var pos in _requiredChunksSet)
+        {
+            if (!activeSnapshot.Contains(pos)) _sortedLoadPositions.Add(pos);
+        }
 
         _sortedLoadPositions.Sort((a, b) =>
         {
-            int dxA = a.X - center.X; int dzA = a.Z - center.Z;
-            int distA = dxA * dxA + dzA * dzA;
+            // Использование long для предотвращения переполнения при больших координатах
+            long dxA = a.X - center.X; long dyA = a.Y - center.Y; long dzA = a.Z - center.Z;
+            long distA = dxA * dxA + dyA * dyA + dzA * dzA; // Добавляем Y в сортировку!
             
-            int dxB = b.X - center.X; int dzB = b.Z - center.Z;
-            int distB = dxB * dxB + dzB * dzB; // <--- Вот эту строку я пропустил
+            long dxB = b.X - center.X; long dyB = b.Y - center.Y; long dzB = b.Z - center.Z;
+            long distB = dxB * dxB + dyB * dyB + dzB * dzB;
             
             return distA.CompareTo(distB);
         });
 
         foreach (var pos in _sortedLoadPositions)
         {
+            // Приоритет инвертируем, чтобы ближайшие (меньшая дистанция) имели больший вес?
+            // AsyncChunkGenerator обычно берет задачи FIFO. 
+            // Просто передаем дистанцию как приоритет, генератор сам разберется (или можно не использовать приоритет).
             int dx = pos.X - center.X; int dz = pos.Z - center.Z;
-            int priority = dx * dx + dz * dz;
+            int priority = dx * dx + dz * dz; 
             _chunksToLoadList.Add(new ChunkGenerationTask(pos, priority));
         }
 
@@ -208,6 +241,12 @@ public class WorldManager : IDisposable
 
     private void ProcessGeneratedChunks()
     {
+        // Даем бюджет 3мс на прием чанков.
+        // За 3мс можно принять сотню чанков (это просто перекладывание ссылок), 
+        // если не запускать тяжелую физику синхронно.
+        long maxTicks = Stopwatch.Frequency / 1000 * 3; 
+        long startTicks = Stopwatch.GetTimestamp();
+
         while (_chunkGenerator.TryGetResult(out var result))
         {
             if (!_activeChunkPositions.Contains(result.Position))
@@ -232,13 +271,22 @@ public class WorldManager : IDisposable
             if (chunkToAdd != null)
             {
                 OnChunkLoaded?.Invoke(chunkToAdd);
-                _physicsBuilder.EnqueueTask(chunkToAdd);
+                // Важно: PhysicsBuilder работает асинхронно, это быстро
+                _physicsBuilder.EnqueueTask(chunkToAdd); 
             }
+
+            // Выходим только по таймеру
+            if (Stopwatch.GetTimestamp() - startTicks > maxTicks) break;
         }
     }
 
     private void ProcessPhysicsResults()
     {
+        // То же самое для физики. Добавление коллайдеров — тяжелая операция для главного потока.
+        int processedCount = 0;
+        long maxTicks = Stopwatch.Frequency / 1000 * 2; // 2ms
+        long startTicks = Stopwatch.GetTimestamp();
+
         while (_physicsBuilder.TryGetResult(out var result))
         {
             if (!result.IsValid) continue;
@@ -248,6 +296,7 @@ public class WorldManager : IDisposable
                 if (result.TargetChunk == null || !result.TargetChunk.IsLoaded) continue;
 
                 StaticHandle handle = default;
+                // AddStaticChunkBody - это тяжелая операция Bepu
                 if (result.Data.CollidersArray != null && result.Data.Count > 0)
                 {
                     handle = PhysicsWorld.AddStaticChunkBody(
@@ -258,6 +307,10 @@ public class WorldManager : IDisposable
                 }
                 result.TargetChunk.OnPhysicsRebuilt(handle);
             }
+            
+            processedCount++;
+            if (processedCount > 5 || (Stopwatch.GetTimestamp() - startTicks > maxTicks))
+                break;
         }
     }
 
