@@ -25,6 +25,14 @@ public class GpuRaycastingRenderer : IDisposable
 
     private int _dynamicObjectsBuffer;
 
+    // --- BEAM OPTIMIZATION ---
+    private int _beamFbo;
+    private int _beamTexture;
+    private int _beamWidth;
+    private int _beamHeight;
+    private const int BeamDivisor = 2; // Разрешение в 4 раза меньше (1/16 пикселей)
+    // -------------------------
+
     private const int ChunkVol = Constants.ChunkVolume;
     private const int PackedChunkSizeInInts = ChunkVol / 4;
 
@@ -61,33 +69,25 @@ public class GpuRaycastingRenderer : IDisposable
         _worldManager = worldManager;
         _gridCellSize = Math.Max(Constants.VoxelSize, 0.5f);
 
-        // Умный расчет буфера: минимум 8 чанков, но не меньше RenderDistance
         int dist = Math.Max(GameSettings.RenderDistance, 8);
-        dist = (int)(dist * 1.5f); // Запас на движение
+        dist = (int)(dist * 1.5f);
 
         int estimatedChunks = (dist * 2 + 1) * (dist * 2 + 1) * WorldManager.WorldHeightChunks;
 
-        // --- ЗАЩИТА ОТ ПЕРЕПОЛНЕНИЯ VRAM (для 0.25f) ---
-        // Лимит 1.5 ГБ под воксели
         long maxBufferBytes = 1536L * 1024 * 1024; 
-        long bytesPerChunk = Constants.ChunkVolume; // 1 байт на воксель
+        long bytesPerChunk = Constants.ChunkVolume; 
 
         int maxChunksByMem = (int)(maxBufferBytes / bytesPerChunk);
 
         if (estimatedChunks > maxChunksByMem)
         {
-            Console.WriteLine($"[Renderer] Capacity capped from {estimatedChunks} to {maxChunksByMem} chunks (VRAM safety limit).");
+            Console.WriteLine($"[Renderer] Capacity capped to {maxChunksByMem} chunks.");
             estimatedChunks = maxChunksByMem;
         }
         
         _currentCapacity = estimatedChunks;
-
-        // Проверка на технический лимит адресации SSBO (uint index)
         long maxAddressable = (long)uint.MaxValue / PackedChunkSizeInInts;
         if (_currentCapacity > maxAddressable) _currentCapacity = (int)maxAddressable - 1000;
-
-        Console.WriteLine($"[Renderer] Initialized. Chunk Capacity: {_currentCapacity}. VoxelSize: {Constants.VoxelSize}");
-        Console.WriteLine($"[Renderer] Linked List Grid: {OBJ_GRID_SIZE}^3, Cell: {_gridCellSize:F3}m");
 
         for (int i = 0; i < _currentCapacity; i++) _freeSlots.Push(i);
         Array.Fill(_cpuPageTable, 0xFFFFFFFF);
@@ -118,9 +118,6 @@ public class GpuRaycastingRenderer : IDisposable
         _voxelSsbo = GL.GenBuffer();
         GL.BindBuffer(BufferTarget.ShaderStorageBuffer, _voxelSsbo);
         long totalBytes = (long)_currentCapacity * PackedChunkSizeInInts * sizeof(uint);
-        
-        Console.WriteLine($"[Renderer] Allocating Voxel SSBO: {totalBytes / 1024 / 1024} MB");
-        
         try { GL.BufferData(BufferTarget.ShaderStorageBuffer, (IntPtr)totalBytes, IntPtr.Zero, BufferUsageHint.DynamicDraw); }
         catch (Exception ex) { Console.WriteLine($"[FATAL] GPU Mem: {ex.Message}"); throw; }
         GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 1, _voxelSsbo);
@@ -147,7 +144,31 @@ public class GpuRaycastingRenderer : IDisposable
         GL.BufferData(BufferTarget.ShaderStorageBuffer, maxObjectsBytes, IntPtr.Zero, BufferUsageHint.DynamicDraw);
         GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 2, _dynamicObjectsBuffer);
 
+        // --- INIT BEAM FBO ---
+        _beamFbo = GL.GenFramebuffer();
+        _beamTexture = GL.GenTexture();
+        // ---------------------
+
         UploadAllVisibleChunks();
+    }
+
+    private void ResizeBeamBuffer(int screenWidth, int screenHeight)
+    {
+        _beamWidth = screenWidth / BeamDivisor;
+        _beamHeight = screenHeight / BeamDivisor;
+        if (_beamWidth < 1) _beamWidth = 1;
+        if (_beamHeight < 1) _beamHeight = 1;
+
+        GL.BindTexture(TextureTarget.Texture2D, _beamTexture);
+        // Используем R32F для хранения дистанции (float)
+        GL.TexImage2D(TextureTarget.Texture2D, 0, PixelInternalFormat.R32f, _beamWidth, _beamHeight, 0, PixelFormat.Red, PixelType.Float, IntPtr.Zero);
+        GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Nearest);
+        GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMinFilter.Nearest);
+        GL.BindTexture(TextureTarget.Texture2D, 0);
+
+        GL.BindFramebuffer(FramebufferTarget.Framebuffer, _beamFbo);
+        GL.FramebufferTexture2D(FramebufferTarget.Framebuffer, FramebufferAttachment.ColorAttachment0, TextureTarget.Texture2D, _beamTexture, 0);
+        GL.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
     }
 
     public void Update(float deltaTime)
@@ -264,11 +285,6 @@ public class GpuRaycastingRenderer : IDisposable
         int camCy = (int)Math.Floor(camPos.Y / Constants.ChunkSizeWorld);
         int camCz = (int)Math.Floor(camPos.Z / Constants.ChunkSizeWorld);
         int range = GameSettings.RenderDistance;
-
-        // --- ФИКС ДЛЯ 4.0f (и других больших вокселей) ---
-        // Добавляем +1 чанк к границам баундинга. При очень больших вокселях
-        // (когда чанк это всего 4x4 вокселя) стандартный clipping может
-        // обрезать геометрию слишком агрессивно на краях.
         int rangeBias = 1; 
 
         _shader.SetInt("uBoundMinX", camCx - range - rangeBias);
@@ -291,10 +307,42 @@ public class GpuRaycastingRenderer : IDisposable
         _shader.SetInt("uGridSize", OBJ_GRID_SIZE);
         _shader.SetInt("uObjectCount", _worldManager.GetAllVoxelObjects().Count);
 
-        GL.Disable(EnableCap.DepthTest);
+        // --- ИСПРАВЛЕНИЕ: Биндим VAO всегда, независимо от настроек ---
         GL.BindVertexArray(_quadVao);
+
+        // === 1. BEAM PASS (Low Res) ===
+        if (GameSettings.BeamOptimization)
+        {
+            GL.BindFramebuffer(FramebufferTarget.Framebuffer, _beamFbo);
+            GL.Viewport(0, 0, _beamWidth, _beamHeight);
+            GL.Clear(ClearBufferMask.ColorBufferBit);
+            
+            _shader.SetInt("uIsBeamPass", 1); // true
+            
+            GL.Disable(EnableCap.DepthTest);
+            // VAO уже привязан выше
+            GL.DrawArrays(PrimitiveType.TriangleStrip, 0, 4);
+        }
+        
+        // === 2. MAIN PASS (High Res) ===
+        GL.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
+        
+        // Восстанавливаем viewport
+        // Примечание: тут используется BeamDivisor, что предполагает деление без остатка.
+        // Если разрешение экрана нечетное, возможна потеря 1 пикселя по краям, 
+        // но для рендерера это не критично.
+        GL.Viewport(0, 0, _beamWidth * BeamDivisor, _beamHeight * BeamDivisor); 
+        
+        _shader.SetInt("uIsBeamPass", 0); // false
+        _shader.SetTexture("uBeamTexture", _beamTexture, TextureUnit.Texture1); 
+        
+        // VAO всё еще привязан
         GL.DrawArrays(PrimitiveType.TriangleStrip, 0, 4);
+        
         GL.Enable(EnableCap.DepthTest);
+        
+        // Сбрасываем VAO для чистоты
+        GL.BindVertexArray(0);
     }
 
     public void ReloadShader()
@@ -302,6 +350,10 @@ public class GpuRaycastingRenderer : IDisposable
         _shader?.Dispose();
         var defines = new List<string>();
         if (GameSettings.UseProceduralWater) defines.Add("WATER_MODE_PROCEDURAL");
+        if (GameSettings.EnableAO) defines.Add("ENABLE_AO");
+        if (GameSettings.EnableWaterTransparency) defines.Add("ENABLE_WATER_TRANSPARENCY");
+        if (GameSettings.BeamOptimization) defines.Add("ENABLE_BEAM_OPTIMIZATION");
+
         switch (GameSettings.CurrentShadowMode)
         {
             case ShadowMode.Hard: defines.Add("SHADOW_MODE_HARD"); break;
@@ -353,16 +405,13 @@ public class GpuRaycastingRenderer : IDisposable
             System.Buffer.BlockCopy(src, 0, _chunkUploadBuffer, 0, Constants.ChunkVolume);
             IntPtr gpuOffset = (IntPtr)((long)offset * PackedChunkSizeInInts * sizeof(uint));
             
-            // --- ИСПРАВЛЕНИЕ: ДОБАВЛЕН ЗАМЕР GPU UPLOAD ---
             GL.BindBuffer(BufferTarget.ShaderStorageBuffer, _voxelSsbo);
             
             long start = Stopwatch.GetTimestamp();
             GL.BufferSubData(BufferTarget.ShaderStorageBuffer, gpuOffset, PackedChunkSizeInInts * sizeof(uint), _chunkUploadBuffer);
             long end = Stopwatch.GetTimestamp();
             
-            // Записываем статистику
             PerformanceMonitor.Record(ThreadType.GpuRender, end - start);
-            // ---------------------------------------------
 
             _cpuPageTable[GetPageTableIndex(chunk.Position)] = (uint)((long)offset * PackedChunkSizeInInts);
             _pageTableDirty = true;
@@ -390,13 +439,22 @@ public class GpuRaycastingRenderer : IDisposable
     public void UploadAllVisibleChunks() { foreach (var c in _worldManager.GetChunksSnapshot()) NotifyChunkLoaded(c); }
     public void NotifyChunkLoaded(Chunk chunk) { if (chunk != null && chunk.IsLoaded) { if (_queuedChunkPositions.Add(chunk.Position)) _chunksToUpload.Enqueue(chunk); } }
     public void UnloadChunk(Vector3i chunkPos) => _chunksToUnload.Enqueue(chunkPos);
-    public void OnResize(int width, int height) => GL.Viewport(0, 0, width, height);
+    
+    public void OnResize(int width, int height)
+    {
+        // Вызывается из Game.cs при ресайзе окна
+        ResizeBeamBuffer(width, height);
+        GL.Viewport(0, 0, width, height);
+    }
 
     public void Dispose()
     {
         GL.DeleteTexture(_pageTableTexture);
         GL.DeleteTexture(_gridHeadTexture);
         GL.DeleteTexture(_noiseTexture);
+        GL.DeleteTexture(_beamTexture);
+        GL.DeleteFramebuffer(_beamFbo);
+        
         GL.DeleteBuffer(_voxelSsbo);
         GL.DeleteBuffer(_dynamicObjectsBuffer);
         GL.DeleteBuffer(_linkedListSsbo);

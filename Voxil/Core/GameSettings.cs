@@ -33,4 +33,7 @@ public static class GameSettings
     // Рекомендуемые значения: 4, 8, 16, 32.
     public static int SoftShadowSamples = 8; 
     
+    // --- Дебаг оптимизации --- ///
+    public static bool BeamOptimization = true;
+
 }

@@ -3,11 +3,13 @@
 // =============================================================================
 //                              LIGHTING SETTINGS
 // =============================================================================
-#define SOFT_SHADOW_RADIUS 0.06
-#define SHADOW_BIAS 0.001
+#define SOFT_SHADOW_RADIUS 0.08  // Чуть увеличил радиус для большей мягкости
+#define SHADOW_BIAS 0.002        // Чуть увеличил смещение, чтобы убрать шум на гранях
 #define AO_STRENGTH 0.8
+#define AO_CULL_DISTANCE 64.0
 // =============================================================================
 
+// Хелпер проверки вокселя
 bool IsSolidVoxelSpace(ivec3 pos) {
     ivec3 boundMin = ivec3(uBoundMinX, uBoundMinY, uBoundMinZ) * VOXEL_RESOLUTION;
     ivec3 boundMax = ivec3(uBoundMaxX, uBoundMaxY, uBoundMaxZ) * VOXEL_RESOLUTION;
@@ -31,6 +33,9 @@ float GetCornerOcclusion(ivec3 pos, ivec3 side1, ivec3 side2) {
 }
 
 float CalculateAO(vec3 hitPos, vec3 normal) {
+    float dist = length(hitPos - uCamPos);
+    if (dist > AO_CULL_DISTANCE) return 1.0;
+
     vec3 aoRayOrigin = hitPos + normal * 0.001;
     vec3 voxelPos = aoRayOrigin * VOXELS_PER_METER;
     ivec3 ipos = ivec3(floor(voxelPos));
@@ -42,130 +47,111 @@ float CalculateAO(vec3 hitPos, vec3 normal) {
     if (abs(n.y) > 0.5) { t = ivec3(1, 0, 0); b = ivec3(0, 0, 1); uvSurf = localPos.xz; }
     else if (abs(n.x) > 0.5) { t = ivec3(0, 0, 1); b = ivec3(0, 1, 0); uvSurf = localPos.zy; }
     else { t = ivec3(1, 0, 0); b = ivec3(0, 1, 0); uvSurf = localPos.xy; }
+
     float occ00 = GetCornerOcclusion(ipos, -t, -b), occ10 = GetCornerOcclusion(ipos, t, -b);
     float occ01 = GetCornerOcclusion(ipos, -t, b), occ11 = GetCornerOcclusion(ipos, t, b);
     vec2 smoothUV = uvSurf * uvSurf * (3.0 - 2.0 * uvSurf);
     float finalOcc = mix(mix(occ00, occ10, smoothUV.x), mix(occ01, occ11, smoothUV.x), smoothUV.y);
-    return clamp(pow(AO_STRENGTH, finalOcc) + (IGN(gl_FragCoord.xy) - 0.5) / float(VOXEL_RESOLUTION), 0.0, 1.0);
+
+    float ao = clamp(pow(AO_STRENGTH, finalOcc) + (IGN(gl_FragCoord.xy) - 0.5) / float(VOXEL_RESOLUTION), 0.0, 1.0);
+    return mix(ao, 1.0, smoothstep(AO_CULL_DISTANCE * 0.8, AO_CULL_DISTANCE, dist));
 }
 
-bool CheckDynamicShadowHit(vec3 ro, vec3 rd, float maxDist) {
-    float tHitIgnored; int objIDIgnored; vec3 normIgnored;
-    return TraceDynamicRay(ro, rd, maxDist, tHitIgnored, objIDIgnored, normIgnored);
-}
+// ----------------------------------------------------------------------------
+// Shadow Helpers
+// ----------------------------------------------------------------------------
 
-bool CheckShadowHit(vec3 ro, vec3 rd, float maxDist) {
-    ivec3 cMapPos = ivec3(floor(ro / float(CHUNK_SIZE)));
-    vec3 cDeltaDist = abs(1.0 / rd) * float(CHUNK_SIZE);
-    ivec3 cStepDir = ivec3(sign(rd));
-    vec3 relPos = ro - (vec3(cMapPos) * float(CHUNK_SIZE));
-    vec3 cSideDist = (sign(rd) * (relPos - vec3(cMapPos) * float(CHUNK_SIZE)) + (sign(rd) * 0.5 + 0.5) * float(CHUNK_SIZE)) * abs(1.0/rd);
-    vec3 cMask = vec3(0);
-    float tCurrent = 0.0;
-    ivec3 bMin = ivec3(uBoundMinX, uBoundMinY, uBoundMinZ);
-    ivec3 bMax = ivec3(uBoundMaxX, uBoundMaxY, uBoundMaxZ);
+float CalculateSoftShadow(vec3 hitPos, vec3 normal, vec3 sunDir) {
+    float distToCam = length(hitPos - uCamPos);
+    vec3 shadowOrigin = hitPos + normal * SHADOW_BIAS;
 
-    for (int i = 0; i < HARD_SHADOW_STEPS; i++) {
-        if (any(lessThan(cMapPos, bMin)) || any(greaterThanEqual(cMapPos, bMax))) return false;
+    // --- GRADIENT LOD SYSTEM ---
+    // Плавно снижаем кол-во сэмплов с расстоянием, но НЕ переключаемся на Hard Shadow (1 луч),
+    // чтобы сохранить "мягкое" ощущение.
+    int maxSamples = uSoftShadowSamples;
+    int effectiveSamples = maxSamples;
+    float currentRadius = SOFT_SHADOW_RADIUS;
 
-        uint chunkIdx = imageLoad(uPageTable, cMapPos & (PAGE_TABLE_SIZE - 1)).r;
-        if (chunkIdx != 0xFFFFFFFFu) {
-            vec3 pEntry = ro + rd * (tCurrent + 1e-4);
-            vec3 pVoxel = pEntry * VOXELS_PER_METER;
-            ivec3 vMapPos = ivec3(floor(pVoxel));
-            if (tCurrent > 0.0) vMapPos = ivec3(floor((ro + rd * (tCurrent + 0.001)) * VOXELS_PER_METER));
+    if (distToCam > 80.0) {
+        effectiveSamples = max(2, maxSamples / 8); // Очень далеко: 2-4 луча (легкий шум, но мягко)
+        currentRadius *= 3.0; // Тени более размытые вдали
+    } else if (distToCam > 40.0) {
+        effectiveSamples = max(4, maxSamples / 4); // Далеко: 4-8 лучей
+        currentRadius *= 2.0;
+    } else if (distToCam > 15.0) {
+        effectiveSamples = max(8, maxSamples / 2); // Средне: 8-16 лучей
+        currentRadius *= 1.5;
+    }
+    // Ближе 15м = Полное качество (32 луча)
 
-            vec3 vDeltaDist = abs(1.0 / rd);
-            ivec3 vStepDir = cStepDir;
-            vec3 vSideDist = (sign(rd) * (vec3(vMapPos) - pVoxel) + (sign(rd) * 0.5 + 0.5)) * vDeltaDist;
-            vec3 vMask = vec3(0);
+    // Если пользователь поставил очень низкие настройки, не падаем ниже 1 сэмпла
+    if (effectiveSamples < 1) effectiveSamples = 1;
 
-            for (int j = 0; j < 512; j++) {
-                if ((vMapPos >> BIT_SHIFT) != cMapPos) break;
-                ivec3 local = vMapPos & BIT_MASK;
-                int idx = local.x + VOXEL_RESOLUTION * (local.y + VOXEL_RESOLUTION * local.z);
-                uint mat = (packedVoxels[chunkIdx + (idx >> 2)] >> ((idx & 3) * 8)) & 0xFFu;
-                if (mat != 0u && mat != 4u) return true;
+    // Basis construction
+    vec3 up = abs(sunDir.y) < 0.999 ? vec3(0, 1, 0) : vec3(0, 0, 1);
+    vec3 right = normalize(cross(sunDir, up));
+    up = cross(right, sunDir);
 
-                vMask = (vSideDist.x < vSideDist.y) ? ((vSideDist.x < vSideDist.z) ? vec3(1,0,0) : vec3(0,0,1)) : ((vSideDist.y < vSideDist.z) ? vec3(0,1,0) : vec3(0,0,1));
-                vSideDist += vMask * vDeltaDist; vMapPos += ivec3(vMask) * vStepDir;
+    float totalVisibility = 0.0;
+    float noiseVal = random(gl_FragCoord.xy);
+
+    // Ограничиваем дальность лучей тени (нет смысла искать тень за 100м от точки)
+    float maxShadowDist = 60.0;
+
+    for (int k = 0; k < effectiveSamples; k++) {
+        float angle = (float(k) + noiseVal) * 2.39996;
+        float r = sqrt(float(k) + 0.5) / sqrt(float(effectiveSamples));
+        vec2 offset = vec2(cos(angle), sin(angle)) * r * currentRadius;
+        vec3 offsetDir = right * offset.x + up * offset.y;
+        vec3 shadowDir = normalize(sunDir + offsetDir);
+
+        bool hit = false;
+        float hitDistMeters = 0.0;
+
+        // 1. Dynamic Check
+        float tDyn = 100000.0; int idDyn = -1; vec3 nDyn = vec3(0);
+        if (uObjectCount > 0 && TraceDynamicRay(shadowOrigin, shadowDir, maxShadowDist, tDyn, idDyn, nDyn)) {
+            hit = true;
+            hitDistMeters = tDyn;
+        }
+
+        // 2. Static Check (Optimized)
+        if (!hit) {
+            float tStatic = 100000.0;
+            uint matID = 0u;
+            if (TraceShadowRay(shadowOrigin, shadowDir, maxShadowDist, tStatic, matID)) {
+                hit = true;
+                hitDistMeters = tStatic;
             }
         }
-        cMask = (cSideDist.x < cSideDist.y) ? ((cSideDist.x < cSideDist.z) ? vec3(1,0,0) : vec3(0,0,1)) : ((cSideDist.y < cSideDist.z) ? vec3(0,1,0) : vec3(0,0,1));
-        cSideDist += cMask * cDeltaDist; cMapPos += ivec3(cMask) * cStepDir;
-        tCurrent = dot(cMask, cSideDist - cDeltaDist);
+
+        if (!hit) {
+            totalVisibility += 1.0;
+        } else {
+            // --- ИСПРАВЛЕНИЕ АРТЕФАКТА "90 ГРАДУСОВ" ---
+            // Было: smoothstep(2.0, 25.0, ...) -> Все что ближе 2м было черным.
+            // Стало: smoothstep(0.1, 10.0, ...) -> Мягкость начинается с 10см.
+            // Это позволит теням от соседних ступенек слегка размываться.
+            totalVisibility += smoothstep(0.1, 10.0, hitDistMeters);
+        }
     }
-    return false;
+
+    return smoothstep(0.0, 1.0, totalVisibility / float(effectiveSamples));
 }
 
 float CalculateHardShadow(vec3 hitPos, vec3 normal, vec3 sunDir) {
     vec3 shadowOrigin = hitPos + normal * SHADOW_BIAS;
-    float tDyn = 50.0; int id = -1; vec3 n = vec3(0);
-    if (TraceDynamicRay(shadowOrigin, sunDir, 50.0, tDyn, id, n)) return 0.0;
-    if (CheckShadowHit(shadowOrigin, sunDir, 200.0)) return 0.0;
+    float tHit = 0.0; uint matID = 0u;
+    if (TraceShadowRay(shadowOrigin, sunDir, 100.0, tHit, matID)) return 0.0;
     return 1.0;
-}
-
-float CalculateSoftShadow(vec3 hitPos, vec3 normal, vec3 sunDir) {
-    vec3 shadowOrigin = hitPos + normal * SHADOW_BIAS;
-    vec3 voxelRo = shadowOrigin * VOXELS_PER_METER;
-    vec3 up = abs(sunDir.y) < 0.999 ? vec3(0, 1, 0) : vec3(0, 0, 1);
-    vec3 right = normalize(cross(sunDir, up));
-    up = cross(right, sunDir);
-    float totalVisibility = 0.0;
-    float diskRadius = SOFT_SHADOW_RADIUS;
-    float noiseVal = random(gl_FragCoord.xy);
-    ivec3 bMin = ivec3(uBoundMinX, uBoundMinY, uBoundMinZ) * VOXEL_RESOLUTION;
-    ivec3 bMax = ivec3(uBoundMaxX, uBoundMaxY, uBoundMaxZ) * VOXEL_RESOLUTION;
-    int samples = uSoftShadowSamples;
-    if (samples <= 0) samples = 1;
-    for (int k = 0; k < samples; k++) {
-        float angle = (float(k) + noiseVal) * 2.39996;
-        float r = sqrt(float(k) + 0.5) / sqrt(float(samples));
-        vec2 offset = vec2(cos(angle), sin(angle)) * r * diskRadius;
-        vec3 offsetDir = right * offset.x + up * offset.y;
-        vec3 shadowDir = normalize(sunDir + offsetDir);
-        bool hit = false;
-        float hitDistMeters = 0.0;
-        float tDyn = 100000.0; int idDyn = -1; vec3 nDyn = vec3(0);
-        if (TraceDynamicRay(shadowOrigin, shadowDir, 50.0, tDyn, idDyn, nDyn)) {
-            hit = true; hitDistMeters = tDyn;
-        }
-        if (!hit) {
-            ivec3 sMapPos = ivec3(floor(voxelRo));
-            ivec3 sStepDir = ivec3(sign(shadowDir));
-            vec3 sDeltaDist = abs(1.0 / shadowDir);
-            vec3 sSideDist = (sign(shadowDir) * (vec3(sMapPos) - voxelRo) + (0.5 + 0.5 * sign(shadowDir))) * sDeltaDist;
-
-            ivec3 sCachedChunkCoord = ivec3(-999999);
-            uint sCachedChunkIdx = 0xFFFFFFFFu;
-
-            for (int step = 0; step < SOFT_SHADOW_STEPS; step++) {
-                if (any(lessThan(sMapPos, bMin)) || any(greaterThanEqual(sMapPos, bMax))) break;
-                ivec3 chunkCoord = sMapPos >> BIT_SHIFT;
-
-                if (chunkCoord != sCachedChunkCoord) { sCachedChunkCoord = chunkCoord; sCachedChunkIdx = imageLoad(uPageTable, chunkCoord & (PAGE_TABLE_SIZE - 1)).r; }
-                if (sCachedChunkIdx != 0xFFFFFFFFu) {
-                    ivec3 local = sMapPos & BIT_MASK; int idx = local.x + VOXEL_RESOLUTION * (local.y + VOXEL_RESOLUTION * local.z);
-                    uint sMat = (packedVoxels[sCachedChunkIdx + (idx >> 2)] >> ((idx & 3) * 8)) & 0xFFu;
-                    if (sMat != 0u && sMat != 4u) { hit = true; float hitDistVoxel = distance(voxelRo, vec3(sMapPos) + 0.5); hitDistMeters = hitDistVoxel / VOXELS_PER_METER; break; }
-                }
-                vec3 sMask = (sSideDist.x < sSideDist.y) ? ((sSideDist.x < sSideDist.z) ? vec3(1,0,0) : vec3(0,0,1)) : ((sSideDist.y < sSideDist.z) ? vec3(0,1,0) : vec3(0,0,1));
-                sSideDist += sMask * sDeltaDist; sMapPos += ivec3(sMask) * sStepDir;
-            }
-        }
-        if (!hit) totalVisibility += 1.0;
-        else totalVisibility += smoothstep(2.0, 25.0, hitDistMeters) * 0.9;
-    }
-    return smoothstep(0.0, 1.0, totalVisibility / float(samples));
 }
 
 float CalculateShadow(vec3 hitPos, vec3 normal, vec3 sunDir) {
     #ifdef SHADOW_MODE_HARD
-    return CalculateHardShadow(hitPos, normal, sunDir);
+        return CalculateHardShadow(hitPos, normal, sunDir);
     #elif defined(SHADOW_MODE_SOFT)
-    return CalculateSoftShadow(hitPos, normal, sunDir);
+        return CalculateSoftShadow(hitPos, normal, sunDir);
     #else
-    return 1.0;
+        return 1.0;
     #endif
 }

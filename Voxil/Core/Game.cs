@@ -22,7 +22,11 @@ public class Game : GameWindow
     private PhysicsDebugDrawer _physicsDebugger;
     private Crosshair _crosshair;
     private bool _showDebugOverlay = true;
+    
+    // --- ИЗМЕНЕНИЕ 1: Добавили счетчик кадров ---
+    private int _frameCount = 0; 
     private float _debugUpdateTimer = 0f;
+    
     private List<string> _debugLines = new List<string>();
     private bool _isInitialized = false;
     private TestManager _testManager;
@@ -92,13 +96,13 @@ public class Game : GameWindow
             return;
         }
         
-        // J - Переключение режима
+        // J - Переключение режима теней
         if (_input.IsKeyPressed(Keys.J))
         {
             GameSettings.CurrentShadowMode++;
             if ((int)GameSettings.CurrentShadowMode > 2) 
                 GameSettings.CurrentShadowMode = ShadowMode.None;
-            _renderer.ReloadShader(); // Перекомпиляция
+            _renderer.ReloadShader(); 
             Console.WriteLine($"[Shadow Mode] Set to: {GameSettings.CurrentShadowMode}");
         }
 
@@ -107,7 +111,6 @@ public class Game : GameWindow
         {
             GameSettings.SoftShadowSamples = Math.Max(2, GameSettings.SoftShadowSamples / 2);
             Console.WriteLine($"[Soft Shadows] Samples: {GameSettings.SoftShadowSamples}");
-            // Здесь НЕ нужен ReloadShader, так как это Uniform
         }
 
         // ] - Увеличить сэмплы
@@ -115,47 +118,38 @@ public class Game : GameWindow
         {
             GameSettings.SoftShadowSamples = Math.Min(64, GameSettings.SoftShadowSamples * 2);
             Console.WriteLine($"[Soft Shadows] Samples: {GameSettings.SoftShadowSamples}");
-            // Здесь НЕ нужен ReloadShader
         }
 
-        // --- ПЕРЕКЛЮЧЕНИЕ ВОДЫ (H) ---
+        // H - Вода
         if (_input.IsKeyPressed(Keys.H))
         {
             GameSettings.UseProceduralWater = !GameSettings.UseProceduralWater;
-            
-            // Сообщаем рендеру, что настройка изменилась
             _renderer.ReloadShader();
-            
             Console.WriteLine($"[Water Mode] Set to: {(GameSettings.UseProceduralWater ? "Procedural" : "Texture")}");
         }
         
-        // --- ПЕРЕКЛЮЧЕНИЕ AO (V) ---
+        // V - AO
         if (_input.IsKeyPressed(Keys.V))
         {
             GameSettings.EnableAO = !GameSettings.EnableAO;
-            
-            // Сообщаем рендеру, что настройка изменилась
             _renderer.ReloadShader();
-            
             Console.WriteLine($"[AO] Set to: {GameSettings.EnableAO}");
         }
         
-        // --- ПЕРЕКЛЮЧЕНИЕ ПРОЗРАЧНОСТИ ВОДЫ (B) ---
+        // B - Прозрачность воды
         if (_input.IsKeyPressed(Keys.B))
         {
             GameSettings.EnableWaterTransparency = !GameSettings.EnableWaterTransparency;
-            
-            // Сообщаем рендеру, что настройка изменилась
             _renderer.ReloadShader();
-            
             Console.WriteLine($"[Water Transparency] Set to: {GameSettings.EnableWaterTransparency}");
         }
 
-
+        // G - Beam Optimization
         if (_input.IsKeyPressed(Keys.G)) 
         {
-            var sunDir = Vector3.Normalize(new Vector3(0.2f, 0.3f, 0.8f));
-            Console.WriteLine($"Sun Direction: {sunDir}");
+            GameSettings.BeamOptimization = !GameSettings.BeamOptimization;
+            _renderer.ReloadShader();
+            Console.WriteLine($"[Beam Optimization] Set to: {GameSettings.BeamOptimization}");
         }
         
         if (_input.IsKeyPressed(Keys.F3))
@@ -218,18 +212,18 @@ public class Game : GameWindow
         if (!PerformanceMonitor.IsEnabled) return;
 
         _debugUpdateTimer += deltaTime;
-        if (_debugUpdateTimer >= 0.25f)
+        
+        // --- ИЗМЕНЕНИЕ 2: Обновляем текст раз в 0.5 сек для читаемости ---
+        if (_debugUpdateTimer >= 0.5f)
         {
+            // Считаем средний FPS за прошедшее время (количество кадров / время)
+            float avgFps = (float)_frameCount / _debugUpdateTimer;
+            
             var averages = PerformanceMonitor.GetDataAndReset(_debugUpdateTimer);
             
-            // Сбрасываем таймер ПОСЛЕ передачи данных
-            _debugUpdateTimer = 0f;
-            
             _debugLines.Clear();
-            _debugLines.Add($"FPS: {1.0f / deltaTime:F0}");
+            _debugLines.Add($"FPS: {avgFps:F0}"); // Стабильное значение
             _debugLines.Add($"VoxelSize: {Constants.VoxelSize:F3}");
-            
-            // Читаем из GameSettings для отображения
             _debugLines.Add($"Water: {(GameSettings.UseProceduralWater ? "Procedural" : "Texture")}");
 
             _debugLines.Add($"Pos: {_camera.Position.X:F0} {_camera.Position.Y:F0} {_camera.Position.Z:F0}");
@@ -245,10 +239,13 @@ public class Game : GameWindow
             {
                 foreach(var kvp in averages) 
                 {
-                    // Ключ: Значение
                     _debugLines.Add($"{kvp.Key}: {kvp.Value}");
                 }
             }
+            
+            // Сбрасываем таймеры
+            _debugUpdateTimer = 0f;
+            _frameCount = 0;
         }
     }
 
@@ -266,6 +263,9 @@ public class Game : GameWindow
     {
         base.OnRenderFrame(e);
         if (!_isInitialized) return;
+        
+        // --- ИЗМЕНЕНИЕ 3: Считаем кадры здесь ---
+        _frameCount++; 
 
         GL.Clear(ClearBufferMask.ColorBufferBit | ClearBufferMask.DepthBufferBit);
 
