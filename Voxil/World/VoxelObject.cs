@@ -12,6 +12,8 @@ public class VoxelObject : IDisposable
     public Vector3 LocalCenterOfMass { get; private set; }
     public Vector3 Position { get; private set; }
     public Quaternion Rotation { get; private set; }
+    
+    // Эти свойства теперь будут хранить границы в локальном геометрическом пространстве
     public Vector3 LocalBoundsMin { get; private set; }
     public Vector3 LocalBoundsMax { get; private set; }
     
@@ -41,37 +43,39 @@ public class VoxelObject : IDisposable
 
     private void RecalculateBounds()
     {
-        if (VoxelCoordinates.Count == 0) return;
+        if (VoxelCoordinates.Count == 0)
+        {
+            LocalBoundsMin = Vector3.Zero;
+            LocalBoundsMax = Vector3.Zero;
+            return;
+        }
 
         var min = new Vector3i(int.MaxValue);
         var max = new Vector3i(int.MinValue);
 
         foreach (var v in VoxelCoordinates)
         {
-            if (v.X < min.X) min.X = v.X;
-            if (v.Y < min.Y) min.Y = v.Y;
-            if (v.Z < min.Z) min.Z = v.Z;
-            if (v.X > max.X) max.X = v.X;
-            if (v.Y > max.Y) max.Y = v.Y;
-            if (v.Z > max.Z) max.Z = v.Z;
+            min.X = Math.Min(min.X, v.X);
+            min.Y = Math.Min(min.Y, v.Y);
+            min.Z = Math.Min(min.Z, v.Z);
+            max.X = Math.Max(max.X, v.X);
+            max.Y = Math.Max(max.Y, v.Y);
+            max.Z = Math.Max(max.Z, v.Z);
         }
 
-        // Индексы в метры
         float s = Constants.VoxelSize;
-        Vector3 worldMin = new Vector3(min.X * s, min.Y * s, min.Z * s);
-        Vector3 worldMax = new Vector3((max.X + 1) * s, (max.Y + 1) * s, (max.Z + 1) * s);
 
-        LocalBoundsMin = worldMin - LocalCenterOfMass;
-        LocalBoundsMax = worldMax - LocalCenterOfMass;
+        // --- ИСПРАВЛЕНИЕ ЗДЕСЬ ---
+        // Убираем вычитание LocalCenterOfMass. Границы теперь находятся
+        // в том же пространстве, что и VoxelCoordinates (геометрическое пространство объекта).
+        LocalBoundsMin = new Vector3(min.X * s, min.Y * s, min.Z * s);
+        LocalBoundsMax = new Vector3((max.X + 1) * s, (max.Y + 1) * s, (max.Z + 1) * s);
     }
 
     public void RebuildMeshAndPhysics(PhysicsWorld physicsWorld)
     {
         if (_isDisposed) return;
         
-        // --- ФИКС КРАША ---
-        // Если вокселей не осталось, не пытаемся строить физику.
-        // Событие OnEmpty уже сработало в RemoveVoxel, WorldManager удалит этот объект в следующем кадре.
         if (VoxelCoordinates.Count == 0) return; 
 
         if (!physicsWorld.Simulation.Bodies.BodyExists(BodyHandle)) return;
@@ -81,30 +85,21 @@ public class VoxelObject : IDisposable
         {
             var newHandle = physicsWorld.UpdateVoxelObjectBody(BodyHandle, VoxelCoordinates, Material, out var newCenterOfMassBepu);
             var newCoM = newCenterOfMassBepu.ToOpenTK();
-
-            // Корректируем позицию тела, так как центр масс сместился
-            var shiftLocal = newCoM - oldCoM;
-            var bodyRef = physicsWorld.Simulation.Bodies.GetBodyReference(BodyHandle);
             
-            // ВАЖНО: Читаем ориентацию аккуратно
+            var bodyRef = physicsWorld.Simulation.Bodies.GetBodyReference(newHandle);
+            
+            // Корректируем мировую позицию тела, чтобы объект визуально остался на месте
+            var shiftLocal = newCoM - oldCoM;
             var orientation = bodyRef.Pose.Orientation;
             var tkOrientation = new Quaternion(orientation.X, orientation.Y, orientation.Z, orientation.W);
             var shiftWorld = Vector3.Transform(shiftLocal, tkOrientation);
-
-            // Если хендл изменился (старое тело удалено, новое создано)
-            // UpdateVoxelObjectBody уже возвращает новый хендл, и он уже в Simulation
             
-            // Если UpdateVoxelObjectBody внутри себя делает Remove/Add, то bodyRef выше может быть невалидным, 
-            // если мы взяли его от старого Handle.
-            // Но PhysicsWorld.UpdateVoxelObjectBody возвращает НОВЫЙ Handle.
-            
-            // Берем референс от НОВОГО хендла
-            var newBodyRef = physicsWorld.Simulation.Bodies.GetBodyReference(newHandle);
-            newBodyRef.Pose.Position += shiftWorld.ToSystemNumerics();
-            newBodyRef.Awake = true;
+            bodyRef.Pose.Position -= shiftWorld.ToSystemNumerics();
+            bodyRef.Awake = true;
 
-            LocalCenterOfMass = newCoM;
+            // Обновляем состояние объекта
             BodyHandle = newHandle;
+            LocalCenterOfMass = newCoM;
             RecalculateBounds();
         }
         catch (Exception ex)
@@ -128,7 +123,6 @@ public class VoxelObject : IDisposable
         return false;
     }
 
-    // --- ЛОГИКА РАЗДЕЛЕНИЯ (BFS) ---
     public List<List<Vector3i>> GetConnectedClusters()
     {
         var clusters = new List<List<Vector3i>>();
@@ -148,7 +142,6 @@ public class VoxelObject : IDisposable
             {
                 var current = queue.Dequeue();
                 
-                // Соседи
                 var neighbors = new Vector3i[] 
                 {
                     current + new Vector3i(1,0,0), current + new Vector3i(-1,0,0),

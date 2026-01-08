@@ -14,11 +14,11 @@ public static class Constants
     // 0.5f   = 32^3
     // 0.25f  = 64^3
     // 0.125f = 128^3
-    public const float VoxelSize = 1f; 
+    public const float VoxelSize = 1.0f; 
 
     // ==========================================
     // АВТОМАТИЧЕСКИЕ ВЫЧИСЛЕНИЯ (НЕ ТРОГАТЬ)
-    // ==========================================
+    // ==========================================ц
 
     // Разрешение чанка (сколько вокселей на сторону)
     public const int ChunkResolution = (int)(ChunkSizeWorld / VoxelSize);
