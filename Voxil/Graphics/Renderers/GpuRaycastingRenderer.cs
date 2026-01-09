@@ -266,7 +266,16 @@ public class GpuRaycastingRenderer : IDisposable
     {
         _totalTime += deltaTime;
 
-        long maxTicks = Stopwatch.Frequency / 1000 * 4; // 4ms
+        // 1. Выгрузка (Безлимитная, она дешевая)
+        // В новой архитектуре UnloadChunk работает синхронно, но если вы используете очередь:
+        // while (_chunksToUnload.TryDequeue...) { ... } - но у нас сейчас вызов идет из WorldManager напрямую.
+        // Оставим только обработку очереди загрузки.
+
+        // 2. ЗАГРУЗКА ДАННЫХ
+        // БЮДЖЕТ: 8 мс.
+        // Итого: 8мс (WorldManager) + 8мс (Renderer) + ~2мс (Render) = ~18мс на кадр.
+        // Это ~55-60 FPS при полной загрузке. Как только очередь пустеет, FPS взлетает до небес.
+        long maxTicks = Stopwatch.Frequency / 1000 * 8; 
         long startTicks = Stopwatch.GetTimestamp();
 
         while (_uploadQueue.TryDequeue(out var chunk))
@@ -274,6 +283,7 @@ public class GpuRaycastingRenderer : IDisposable
             bool isStillAllocated = false;
             int slot = -1;
 
+            // Проверка валидности
             if (_allocatedChunks.TryGetValue(chunk.Position, out slot))
             {
                 lock(_chunksPendingUpload)
@@ -286,11 +296,15 @@ public class GpuRaycastingRenderer : IDisposable
                 }
             }
 
+            // Самая тяжелая часть
             if (isStillAllocated && chunk.IsLoaded)
             {
                 UploadChunkVoxels(chunk, slot);
             }
 
+            // Выходим строго по таймеру. Никаких лимитов по количеству (processedCount).
+            // Если чанки пустые (воздух), мы их пролетим сотни за миллисекунду.
+            // Если полные - успеем меньше, но зато не зафризим игру.
             if (Stopwatch.GetTimestamp() - startTicks > maxTicks) break;
         }
 

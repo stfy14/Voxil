@@ -202,7 +202,6 @@ public class Game : GameWindow
         _playerController.Update(_input, deltaTime);
         _worldManager.Update(deltaTime);
         _physicsWorld.Update(deltaTime);
-        _worldManager.ProcessVoxelObjects();
         _renderer.Update(deltaTime);
 
         if (_input.IsMouseButtonPressed(MouseButton.Left))
