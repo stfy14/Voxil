@@ -3,7 +3,7 @@
 public readonly struct ChunkGenerationTask
 {
     public readonly Vector3i Position;
-    public readonly int Priority; // Дистанция^2
+    public readonly int Priority;
 
     public ChunkGenerationTask(Vector3i pos, int priority)
     {
@@ -24,7 +24,6 @@ public readonly struct ChunkGenerationResult
     }
 }
 
-// Физика без изменений
 public readonly struct PhysicsBuildTask
 {
     public readonly Chunk ChunkToProcess;
@@ -37,8 +36,11 @@ public readonly struct PhysicsBuildResult
     public readonly Chunk TargetChunk;
     public readonly PhysicsBuildResultData Data;
     public readonly bool IsValid;
+
     public PhysicsBuildResult(Chunk chunk, PhysicsBuildResultData data) 
     { 
-        TargetChunk = chunk; Data = data; IsValid = chunk != null; 
+        TargetChunk = chunk; 
+        Data = data; 
+        IsValid = chunk != null; 
     }
 }

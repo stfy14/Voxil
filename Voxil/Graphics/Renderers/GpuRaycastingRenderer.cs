@@ -322,6 +322,9 @@ public class GpuRaycastingRenderer : IDisposable
 
     private void UploadChunkVoxels(Chunk chunk, int offset)
     {
+        // ЗАМЕР НАЧАЛО
+        long start = Stopwatch.GetTimestamp();
+
         chunk.ReadDataUnsafe((srcVoxels, srcMasks) =>
         {
             if (srcVoxels == null) return;
@@ -340,6 +343,13 @@ public class GpuRaycastingRenderer : IDisposable
                 GL.BufferSubData(BufferTarget.ShaderStorageBuffer, maskGpuOffset, ChunkMaskSizeInUlongs * sizeof(ulong), _maskUploadBuffer);
             }
         });
+
+        // ЗАМЕР КОНЕЦ
+        if (PerformanceMonitor.IsEnabled)
+        {
+            long end = Stopwatch.GetTimestamp();
+            PerformanceMonitor.Record(ThreadType.GpuRender, end - start);
+        }
     }
 
     private int GetPageTableIndex(Vector3i chunkPos) => (chunkPos.X & MASK_X) + PT_X * ((chunkPos.Y & MASK_Y) + PT_Y * (chunkPos.Z & MASK_Z));

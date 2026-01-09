@@ -13,16 +13,14 @@ public class AsyncChunkPhysics : IDisposable
     private readonly Thread _workerThread;
     private volatile bool _isDisposed;
 
-    // Реюзер буфера для Greedy Meshing (чтобы не выделять память каждый раз)
-    private bool[] _reusedVisitedBuffer; 
+    private bool[] _visitedBuffer;
+    private VoxelCollider[] _scratchColliders;
 
     public AsyncChunkPhysics()
     {
         _workerThread = new Thread(WorkerLoop)
         {
-            IsBackground = true, 
-            Name = "PhysicsBuilder", 
-            Priority = ThreadPriority.AboveNormal // <--- БЫЛО BelowNormal
+            IsBackground = true, Name = "PhysicsBuilder", Priority = ThreadPriority.AboveNormal
         };
         _workerThread.Start();
     }
@@ -41,13 +39,14 @@ public class AsyncChunkPhysics : IDisposable
     {
         while (_urgentQueue.TryDequeue(out _)) { }
         while (_inputQueue.TryTake(out _)) { }
-        while (_outputQueue.TryDequeue(out var result)) result.Data.Dispose();
+        while (_outputQueue.TryDequeue(out _)) { }
     }
 
     private void WorkerLoop()
     {
-        // Выделяем буфер ОДИН РАЗ на весь жизненный цикл потока
-        _reusedVisitedBuffer = new bool[Constants.ChunkVolume];
+        int vol = Constants.ChunkVolume;
+        _visitedBuffer = new bool[vol];
+        _scratchColliders = new VoxelCollider[vol];
 
         while (!_isDisposed)
         {
@@ -71,34 +70,37 @@ public class AsyncChunkPhysics : IDisposable
     {
         if (chunk == null || !chunk.IsLoaded) return;
         
-        // Получаем копию вокселей (потокобезопасно)
         var voxels = chunk.GetVoxelsCopy();
-        if (voxels == null) return; // Чанк пустой
+        if (voxels == null) return;
 
-        // Преобразуем byte[] в MaterialType[] (для совместимости с методом Builder'а)
-        // В идеале Builder переписать на byte[], но пока сделаем через Pool
         var matArray = System.Buffers.ArrayPool<MaterialType>.Shared.Rent(Constants.ChunkVolume);
         
         try
         {
-            // Быстрое копирование
             for(int i = 0; i < Constants.ChunkVolume; i++) matArray[i] = (MaterialType)voxels[i];
-            
-            // Возвращаем байтовый массив сразу
-            System.Buffers.ArrayPool<byte>.Shared.Return(voxels); 
+            System.Buffers.ArrayPool<byte>.Shared.Return(voxels);
             voxels = null;
 
             long start = Stopwatch.GetTimestamp();
             
-            // ВАЖНО: Передаем наш переиспользуемый буфер
-            var data = VoxelPhysicsBuilder.GenerateColliders(matArray, chunk.Position, _reusedVisitedBuffer);
+            // Используем буферы
+            int count = VoxelPhysicsBuilder.GenerateColliders(matArray, _visitedBuffer, _scratchColliders);
             
+            // Создаем структуру с правильным именем
+            PhysicsBuildResultData finalData = new PhysicsBuildResultData();
+            
+            if (count > 0)
+            {
+                finalData.Count = count;
+                // Компактный массив для отправки
+                finalData.CollidersArray = new VoxelCollider[count];
+                Array.Copy(_scratchColliders, finalData.CollidersArray, count);
+            }
+
             long end = Stopwatch.GetTimestamp();
+            if (PerformanceMonitor.IsEnabled) PerformanceMonitor.Record(ThreadType.ChunkPhys, end - start);
 
-            if (PerformanceMonitor.IsEnabled) 
-                PerformanceMonitor.Record(ThreadType.ChunkPhys, end - start);
-
-            _outputQueue.Enqueue(new PhysicsBuildResult(chunk, data));
+            _outputQueue.Enqueue(new PhysicsBuildResult(chunk, finalData));
         }
         finally
         {
@@ -113,6 +115,7 @@ public class AsyncChunkPhysics : IDisposable
         _inputQueue.CompleteAdding();
         if (_workerThread.IsAlive) _workerThread.Join(100);
         _inputQueue.Dispose();
-        _reusedVisitedBuffer = null;
+        _visitedBuffer = null;
+        _scratchColliders = null;
     }
 }

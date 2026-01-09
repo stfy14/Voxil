@@ -122,8 +122,11 @@ public class AsyncChunkGenerator : IDisposable
         {
             try
             {
+                // Если очередь пуста, эта строка заблокирует поток и он уснет.
+                // Это нормально и правильно. CPU будет на 0%.
                 if (!_inputQueue.TryDequeue(out var task, token)) break;
 
+                // Если проснулись, значит есть задача. Работаем.
                 voxels = System.Buffers.ArrayPool<MaterialType>.Shared.Rent(Constants.ChunkVolume);
                 
                 long start = Stopwatch.GetTimestamp();

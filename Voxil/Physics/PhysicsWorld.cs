@@ -55,35 +55,31 @@ public class PhysicsWorld : IDisposable
         VoxelCollider[] colliders, 
         int count) 
     {
+        // БЕЗ Batching'а, так как он создавал overhead на списках.
+        // Bepu достаточно быстра для 100-200 вызовов за кадр.
+        
         lock (_simLock)
         {
             if (count == 0) return new StaticHandle();
 
             TypedIndex shapeIndex;
 
-            // ОПТИМИЗАЦИЯ: Если коллайдер всего один, не создаем тяжелый Compound
             if (count == 1)
             {
                 var c = colliders[0];
                 var boxShape = new Box(c.HalfSize.X * 2, c.HalfSize.Y * 2, c.HalfSize.Z * 2);
                 shapeIndex = Simulation.Shapes.Add(boxShape);
-                
-                // Для одиночного бокса позиция статика = позиция чанка + позиция бокса внутри чанка
                 var finalPos = chunkWorldPosition + c.Position;
-                var staticDesc = new StaticDescription(finalPos, shapeIndex);
-                return Simulation.Statics.Add(staticDesc);
+                return Simulation.Statics.Add(new StaticDescription(finalPos, shapeIndex));
             }
             else
             {
-                // Старый путь для множества коллайдеров
                 _bufferPool.Take<CompoundChild>(count, out var children);
-
                 for (int i = 0; i < count; i++)
                 {
                     var c = colliders[i];
                     var boxShape = new Box(c.HalfSize.X * 2, c.HalfSize.Y * 2, c.HalfSize.Z * 2);
                     var boxIndex = Simulation.Shapes.Add(boxShape);
-
                     children[i] = new CompoundChild
                     {
                         ShapeIndex = boxIndex,
@@ -91,18 +87,10 @@ public class PhysicsWorld : IDisposable
                         LocalOrientation = BepuQuaternion.Identity
                     };
                 }
-
-                var childrenSlice = children.Slice(0, count);
-                var compoundShape = new Compound(childrenSlice);
+                var compoundShape = new Compound(children.Slice(0, count));
                 shapeIndex = Simulation.Shapes.Add(compoundShape);
-
-                lock (_bufferLock)
-                {
-                    _compoundBuffers.Add(shapeIndex, children);
-                }
-
-                var staticDesc = new StaticDescription(chunkWorldPosition, shapeIndex);
-                return Simulation.Statics.Add(staticDesc);
+                lock (_bufferLock) _compoundBuffers.Add(shapeIndex, children);
+                return Simulation.Statics.Add(new StaticDescription(chunkWorldPosition, shapeIndex));
             }
         }
     }
