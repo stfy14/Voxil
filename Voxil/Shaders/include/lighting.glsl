@@ -8,28 +8,30 @@
 #define SHADOW_BIAS 0.003
 // =============================================================================
 
-// Проверка наличия вокселя
+// Функция проверки вокселя для AO и освещения
 bool IsSolidVoxelSpace(ivec3 pos) {
     ivec3 boundMin = ivec3(uBoundMinX, uBoundMinY, uBoundMinZ) * VOXEL_RESOLUTION;
     ivec3 boundMax = ivec3(uBoundMaxX, uBoundMaxY, uBoundMaxZ) * VOXEL_RESOLUTION;
 
     if (any(lessThan(pos, boundMin)) || any(greaterThanEqual(pos, boundMax))) return false;
 
-    ivec3 chunkCoord = pos >> BIT_SHIFT;
+    ivec3 chunkCoord = pos >> BIT_SHIFT; // BIT_SHIFT = log2(VOXEL_RESOLUTION)
+
+    // Читаем слот чанка из таблицы страниц
     uint chunkSlot = imageLoad(uPageTable, chunkCoord & (PAGE_TABLE_SIZE - 1)).r;
 
     if (chunkSlot == 0xFFFFFFFFu) return false;
 
-    uint chunkSizeUint = (uint(VOXEL_RESOLUTION) * uint(VOXEL_RESOLUTION) * uint(VOXEL_RESOLUTION)) / 4u;
-    uint voxelBaseOffset = chunkSlot * chunkSizeUint;
-
+    // Вычисляем локальный индекс вокселя
     ivec3 local = pos & BIT_MASK;
     int idx = local.x + VOXEL_RESOLUTION * (local.y + VOXEL_RESOLUTION * local.z);
 
-    uint storedVal = packedVoxels[voxelBaseOffset + (idx >> 2)];
-    uint shift = (uint(idx) & 3u) * 8u;
+    // !!! ВАЖНО: Используем GetVoxelData для поддержки 4 банков памяти !!!
+    // GetVoxelData определена в tracing.glsl, который включен ДО lighting.glsl
+    uint matID = GetVoxelData(chunkSlot, idx);
 
-    return ((storedVal >> shift) & 0xFFu) != 0u;
+    // ID 0 = воздух, ID 4 = вода (вода не считается твердой для AO, чтобы не затемнять дно)
+    return (matID != 0u && matID != 4u);
 }
 
 float GetCornerOcclusion(ivec3 pos, ivec3 side1, ivec3 side2) {

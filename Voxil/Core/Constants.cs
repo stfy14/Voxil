@@ -14,7 +14,7 @@ public static class Constants
     // 32 - очень быстро
     // 64 - норма (для 0.125f)
     // 128 - тяжело для CPU (то, что у вас сейчас)
-    private const int TargetResolution = 32; 
+    private const int TargetResolution = 16; 
 
     // ==========================================
     // АВТОМАТИЧЕСКИЕ ВЫЧИСЛЕНИЯ

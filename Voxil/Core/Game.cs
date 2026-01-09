@@ -1,17 +1,14 @@
 ﻿using BepuPhysics;
-using BepuPhysics.Collidables;
 using OpenTK.Graphics.OpenGL4;
 using OpenTK.Mathematics;
 using OpenTK.Windowing.Common;
 using OpenTK.Windowing.Desktop;
 using OpenTK.Windowing.GraphicsLibraryFramework;
 using System;
-using System.Collections.Generic;
 using System.Text;
 
 public class Game : GameWindow
 {
-    // Основные системы
     private Camera _camera;
     private InputManager _input;
     private PhysicsWorld _physicsWorld;
@@ -19,26 +16,21 @@ public class Game : GameWindow
     private PlayerController _playerController;
     private GpuRaycastingRenderer _renderer;
     
-    // Вспомогательные системы
     private LineRenderer _lineRenderer;
     private PhysicsDebugDrawer _physicsDebugger;
     private Crosshair _crosshair;
     private TestManager _testManager;
 
-    // Счетчики и флаги
     private int _frameCount = 0; 
     private float _debugUpdateTimer = 0f;
     private bool _isInitialized = false;
 
-    // UI (ImGui)
     private WindowManager _uiManager;
     private SettingsWindow _settingsWindow;
     private MainMenuWindow _mainMenuWindow;
     private DebugStatsWindow _debugStatsWindow;
     
-    private int _reallocationDelayFrames;
-    
-    
+    private int _reallocationDelayFrames = 0;
 
     public Game(GameWindowSettings gameWindowSettings, NativeWindowSettings nativeWindowSettings)
         : base(gameWindowSettings, nativeWindowSettings)
@@ -80,9 +72,8 @@ public class Game : GameWindow
 
         _renderer.UploadAllVisibleChunks();
 
-        // --- UI INIT ---
+        // UI INIT
         _uiManager = new WindowManager(this);
-        
         _settingsWindow = new SettingsWindow(_worldManager, _renderer);
         _mainMenuWindow = new MainMenuWindow(this, _settingsWindow);
         _debugStatsWindow = new DebugStatsWindow();
@@ -91,7 +82,6 @@ public class Game : GameWindow
         _uiManager.AddWindow(_mainMenuWindow);
         _uiManager.AddWindow(_debugStatsWindow);
 
-        // Сразу захватываем курсор и сбрасываем дельту
         CursorState = CursorState.Grabbed;
         _input.ResetMouseDelta();
 
@@ -99,114 +89,89 @@ public class Game : GameWindow
         Console.WriteLine("[Game] Initialization Complete.");
     }
 
-protected override void OnUpdateFrame(FrameEventArgs e)
-{
-    base.OnUpdateFrame(e);
-    if (!_isInitialized) return;
-
-    // 1. ОБЪЯВЛЯЕМ DELTATIME ОДИН РАЗ В САМОМ НАЧАЛЕ
-    float deltaTime = (float)e.Time;
-
-    // 2. СНАЧАЛА ОБНОВЛЯЕМ UI (Здесь вызывается ImGui.NewFrame)
-    _uiManager.Update(this, deltaTime);
-
-    // =========================================================================
-    // === ЛОГИКА ПЕРЕЗАГРУЗКИ (Вставляем ПОСЛЕ UI)
-    // =========================================================================
-    if (_renderer.IsReallocationPending())
+    protected override void OnUpdateFrame(FrameEventArgs e)
     {
-        _reallocationDelayFrames++;
-        
-        // Ждем 3 кадра
-        if (_reallocationDelayFrames >= 15)
+        base.OnUpdateFrame(e);
+        if (!_isInitialized) return;
+
+        float deltaTime = (float)e.Time;
+
+        // 1. СНАЧАЛА UI (чтобы ImGui.NewFrame всегда вызывался)
+        _uiManager.Update(this, deltaTime);
+
+        // 2. ЛОГИКА ПЕРЕЗАГРУЗКИ ПАМЯТИ
+        if (_renderer.IsReallocationPending())
         {
-            _renderer.PerformReallocation();
-            _worldManager.ReloadWorld();
-            _renderer.ReloadShader(); // Обновляем шейдеры
-            
-            _reallocationDelayFrames = 0;
-            Console.WriteLine("[Game] Reallocation completed.");
-            
-            GC.Collect();
+            _reallocationDelayFrames++;
+            if (_reallocationDelayFrames >= 3)
+            {
+                _renderer.PerformReallocation();
+                _worldManager.ReloadWorld();
+                _renderer.ReloadShader();
+                _reallocationDelayFrames = 0;
+                Console.WriteLine("[Game] Reallocation completed.");
+                GC.Collect();
+            }
+            else
+            {
+                return; // Ждем драйвер, пропускаем остальную логику
+            }
+        }
+
+        // 3. Управление курсором
+        bool isMenuOpen = _mainMenuWindow.IsVisible || _settingsWindow.IsVisible;
+        if (isMenuOpen)
+        {
+            if (CursorState != CursorState.Normal) CursorState = CursorState.Normal;
         }
         else
         {
-            // Прерываем обновление игры, но UI уже отрисован (см. пункт 2)
-            return; 
+            if (CursorState != CursorState.Grabbed)
+            {
+                CursorState = CursorState.Grabbed;
+                _input.ResetMouseDelta(); 
+            }
         }
-    }
-    // =========================================================================
 
-    // 3. Логика состояния курсора
-    bool isMenuOpen = _mainMenuWindow.IsVisible || _settingsWindow.IsVisible;
-
-    if (isMenuOpen)
-    {
-        if (CursorState != CursorState.Normal)
+        // 4. Ввод
+        _input.Update(KeyboardState, MouseState);
+        if (_input.IsKeyPressed(Keys.Escape))
         {
-            CursorState = CursorState.Normal;
+            if (_settingsWindow.IsVisible) _settingsWindow.Toggle();
+            else _mainMenuWindow.Toggle();
         }
-    }
-    else
-    {
-        if (CursorState != CursorState.Grabbed)
+
+        // 5. Геймплей
+        if (!isMenuOpen)
         {
-            CursorState = CursorState.Grabbed;
-            _input.ResetMouseDelta(); 
+            if (_input.IsKeyPressed(Keys.F3))
+            {
+                PerformanceMonitor.IsEnabled = !PerformanceMonitor.IsEnabled;
+                _debugStatsWindow.Toggle();
+            }
+            if (_input.IsKeyPressed(Keys.F)) _playerController.ToggleFly();
+
+            _testManager.Update(deltaTime, _input);
+            _playerController.Update(_input, deltaTime);
+            
+            if (_input.IsMouseButtonPressed(MouseButton.Left)) ProcessBlockDestruction();
         }
-    }
 
-    // 4. Ввод
-    _input.Update(KeyboardState, MouseState);
-
-    if (_input.IsKeyPressed(Keys.Escape))
-    {
-        if (_settingsWindow.IsVisible) _settingsWindow.Toggle();
-        else _mainMenuWindow.Toggle();
-    }
-
-    // 5. Игровой процесс (только если меню закрыто)
-    if (!isMenuOpen)
-    {
-        if (_input.IsKeyPressed(Keys.F3))
+        // 6. Обновление мира
+        if (!_renderer.IsReallocationPending())
         {
-            PerformanceMonitor.IsEnabled = !PerformanceMonitor.IsEnabled;
-            _debugStatsWindow.Toggle();
+            _worldManager.Update(deltaTime);
+            _physicsWorld.Update(deltaTime);
+            _renderer.Update(deltaTime);
         }
 
-        if (_input.IsKeyPressed(Keys.F)) 
-        {
-            _playerController.ToggleFly();
-        }
-
-        _testManager.Update(deltaTime, _input);
-        _playerController.Update(_input, deltaTime);
-        
-        if (_input.IsMouseButtonPressed(MouseButton.Left)) 
-        {
-            ProcessBlockDestruction();
-        }
+        UpdateDebugStats(deltaTime);
     }
-
-    // 6. Обновление мира (только если НЕ в процессе перезагрузки)
-    // Так как выше стоит return, дополнительная проверка тут не обязательна, но и не мешает
-    if (!_renderer.IsReallocationPending())
-    {
-        _worldManager.Update(deltaTime);
-        _physicsWorld.Update(deltaTime);
-        _renderer.Update(deltaTime);
-    }
-
-    // 7. Дебаг текст
-    UpdateDebugStats(deltaTime);
-}
     
     private void UpdateDebugStats(float deltaTime)
     {
         if (!_debugStatsWindow.IsVisible || !PerformanceMonitor.IsEnabled) return;
-
         _debugUpdateTimer += deltaTime;
-        
         if (_debugUpdateTimer >= 0.5f)
         {
             float avgFps = (float)_frameCount / _debugUpdateTimer;
@@ -216,26 +181,11 @@ protected override void OnUpdateFrame(FrameEventArgs e)
             sb.AppendLine($"FPS: {avgFps:F0}");
             sb.AppendLine($"Pos: {_camera.Position.X:F0} {_camera.Position.Y:F0} {_camera.Position.Z:F0}");
             sb.AppendLine("------------------");
-            sb.AppendLine("--- Perf ---");
-            if (averages != null)
-            {
-                foreach(var kvp in averages) 
-                    sb.AppendLine($"{kvp.Key}: {kvp.Value}");
-            }
-
+            if (averages != null) foreach(var kvp in averages) sb.AppendLine($"{kvp.Key}: {kvp.Value}");
             sb.AppendLine("------------------");
-            sb.AppendLine("--- Queues ---");
-            sb.AppendLine($"Gen Pending: {_worldManager.GeneratorPendingCount}");
-            sb.AppendLine($"Gen Results: {_worldManager.GeneratorResultsCount}");
-            sb.AppendLine($"Phys Urgent: {_worldManager.PhysicsUrgentCount}");
-            sb.AppendLine($"Phys Pending:{_worldManager.PhysicsPendingCount}");
-            sb.AppendLine($"Phys Results:{_worldManager.PhysicsResultsCount}");
-            sb.AppendLine($"World Chunks: {_worldManager.LoadedChunkCount}");
-            sb.AppendLine($"Chunks InPrg: {_worldManager.ChunksInProgressCount}");
-            sb.AppendLine($"Chunks UnloadQ:{_worldManager.UnloadQueueCount}");
-
-            _debugStatsWindow.UpdateText(sb.ToString());
+            sb.AppendLine($"Chunks: {_worldManager.LoadedChunkCount} (Q:{_worldManager.GeneratorPendingCount})");
             
+            _debugStatsWindow.UpdateText(sb.ToString());
             _debugUpdateTimer = 0f;
             _frameCount = 0;
         }
@@ -243,43 +193,22 @@ protected override void OnUpdateFrame(FrameEventArgs e)
 
     private void ProcessBlockDestruction()
     {
-        var cameraPosition = _camera.Position.ToSystemNumerics();
-        var lookDirection = _camera.Front.ToSystemNumerics();
-        var hitHandler = new VoxelHitHandler
-        {
-            PlayerBodyHandle = _physicsWorld.GetPlayerState().BodyHandle,
-            Simulation = _physicsWorld.Simulation
-        };
-
-        _physicsWorld.Simulation.RayCast(cameraPosition, lookDirection, 100f, _physicsWorld.Simulation.BufferPool, ref hitHandler);
-
-        if (hitHandler.Hit)
-        {
-            var hitLocation = cameraPosition + lookDirection * hitHandler.T;
-            _worldManager.DestroyVoxelAt(hitHandler.Collidable, hitLocation, hitHandler.Normal);
-        }
+        var pos = _camera.Position.ToSystemNumerics();
+        var dir = _camera.Front.ToSystemNumerics();
+        var hit = new VoxelHitHandler { PlayerBodyHandle = _physicsWorld.GetPlayerState().BodyHandle, Simulation = _physicsWorld.Simulation };
+        _physicsWorld.Simulation.RayCast(pos, dir, 100f, _physicsWorld.Simulation.BufferPool, ref hit);
+        if (hit.Hit) _worldManager.DestroyVoxelAt(hit.Collidable, pos + dir * hit.T, hit.Normal);
     }
 
     protected override void OnRenderFrame(FrameEventArgs e)
     {
         base.OnRenderFrame(e);
         if (!_isInitialized) return;
-        
         _frameCount++; 
-
         GL.Clear(ClearBufferMask.ColorBufferBit | ClearBufferMask.DepthBufferBit);
-
         _renderer.Render(_camera);
-        
-        // Рисуем прицел только если меню закрыто
-        if (!_mainMenuWindow.IsVisible && !_settingsWindow.IsVisible)
-        {
-            _crosshair.Render();
-        }
-
-        // Рендер UI
+        if (!_mainMenuWindow.IsVisible && !_settingsWindow.IsVisible) _crosshair.Render();
         _uiManager.Render();
-
         SwapBuffers();
     }
 
