@@ -78,6 +78,41 @@ public class WorldManager : IDisposable
 
     public void SetGenerationThreadCount(int count) => _chunkGenerator.SetThreadCount(count);
 
+    // === НОВЫЙ МЕТОД: ПОЛНАЯ ПЕРЕЗАГРУЗКА МИРА ===
+    public void ReloadWorld()
+    {
+        Console.WriteLine("[World] Reloading...");
+
+        // 1. Очищаем очереди генерации и физики
+        _chunkGenerator.ClearQueue();
+        _physicsBuilder.Clear();
+        
+        // Очищаем локальные очереди команд
+        while (_incomingChunksToLoad.TryDequeue(out _)) { }
+        while (_incomingChunksToUnload.TryDequeue(out _)) { }
+
+        lock (_chunksLock)
+        {
+            // 2. Уничтожаем все чанки
+            foreach (var chunk in _chunks.Values)
+            {
+                chunk.Dispose();
+            }
+
+            // 3. Очищаем все коллекции
+            _chunks.Clear();
+            _chunksInProgress.Clear();
+            _activeChunkPositions.Clear();
+            _staticToChunkMap.Clear();
+        }
+
+        // 4. Сбрасываем позицию последнего обновления, чтобы генерация началась сразу
+        _lastChunkUpdatePos = new OpenTK.Mathematics.Vector3(float.MaxValue);
+        _forceUpdate = true;
+
+        Console.WriteLine("[World] Reload complete.");
+    }
+
     public void Update(float deltaTime)
     {
         UpdateVisibleChunks();
@@ -102,14 +137,12 @@ public class WorldManager : IDisposable
         if (_isChunkUpdateRunning) return;
 
         var playerPos = GetPlayerPosition();
-        // Используем ChunkSizeWorld (16м)
         float distSq = (playerPos - _lastChunkUpdatePos).LengthSquared;
         if (distSq < (Constants.ChunkSizeWorld * 2.0f) * (Constants.ChunkSizeWorld * 2.0f) && !_forceUpdate) return;
 
         _lastChunkUpdatePos = playerPos;
         _forceUpdate = false;
 
-        // Делим на 16, чтобы получить координаты чанка
         var pX = (int)Math.Floor(playerPos.X / Constants.ChunkSizeWorld);
         var pZ = (int)Math.Floor(playerPos.Z / Constants.ChunkSizeWorld);
         var currentCenter = new Vector3i(pX, 0, pZ);
@@ -129,73 +162,41 @@ public class WorldManager : IDisposable
         });
     }
 
-     private void CalculateChunksBackground(Vector3i center, HashSet<Vector3i> activeSnapshot, int viewDist, int height)
+    private void CalculateChunksBackground(Vector3i center, HashSet<Vector3i> activeSnapshot, int viewDist, int height)
     {
         _chunksToLoadList.Clear();
         _chunksToUnloadList.Clear();
         _requiredChunksSet.Clear();
         _sortedLoadPositions.Clear();
 
-        // ИЗМЕНЕНИЕ: Рассчитываем вертикальный диапазон относительно центра (игрока)
-        // Если height = 16, мы хотим видеть от center.Y - 8 до center.Y + 8 (примерно)
-        // Но обычно в воксельных играх чанки грузятся "столбами" (от 0 до макс высоты).
-        // Если вы хотите "столбы" (как в Minecraft), оставьте 0..height. 
-        // Если "сферу" (как в No Man's Sky) - используйте относительный Y.
-        // Ниже вариант для "бесконечного" мира по вертикали или корректной обработки высоты:
-        
-        int yDist = viewDist / 2; // Вертикальная дальность обычно меньше горизонтальной
-        if (yDist < 4) yDist = 4;
-
+        // Если высота мира ограничена, используем это
         for (int x = -viewDist; x <= viewDist; x++)
         {
             for (int z = -viewDist; z <= viewDist; z++)
             {
-                // ВАРИАНТ 1: Если мир ограничен по высоте (0..16 чанков), используем clamp
-                for (int y = 0; y < height; y++)
-                {
+                for (int y = 0; y < height; y++) 
                     _requiredChunksSet.Add(new Vector3i(center.X + x, y, center.Z + z));
-                }
-                
-                // ВАРИАНТ 2 (Если нужен бесконечный мир вверх/вниз):
-                /*
-                for (int y = -yDist; y <= yDist; y++)
-                {
-                     _requiredChunksSet.Add(new Vector3i(center.X + x, center.Y + y, center.Z + z));
-                }
-                */
             }
         }
 
-        // Логика выгрузки и загрузки остается той же, но сортировку нужно обезопасить от переполнения
-        foreach (var pos in activeSnapshot)
-        {
-            if (!_requiredChunksSet.Contains(pos)) _chunksToUnloadList.Add(pos);
-        }
-
-        foreach (var pos in _requiredChunksSet)
-        {
-            if (!activeSnapshot.Contains(pos)) _sortedLoadPositions.Add(pos);
-        }
+        foreach (var pos in activeSnapshot) if (!_requiredChunksSet.Contains(pos)) _chunksToUnloadList.Add(pos);
+        foreach (var pos in _requiredChunksSet) if (!activeSnapshot.Contains(pos)) _sortedLoadPositions.Add(pos);
 
         _sortedLoadPositions.Sort((a, b) =>
         {
-            // Использование long для предотвращения переполнения при больших координатах
-            long dxA = a.X - center.X; long dyA = a.Y - center.Y; long dzA = a.Z - center.Z;
-            long distA = dxA * dxA + dyA * dyA + dzA * dzA; // Добавляем Y в сортировку!
+            long dxA = a.X - center.X; long dzA = a.Z - center.Z;
+            long distA = dxA * dxA + dzA * dzA;
             
-            long dxB = b.X - center.X; long dyB = b.Y - center.Y; long dzB = b.Z - center.Z;
-            long distB = dxB * dxB + dyB * dyB + dzB * dzB;
+            long dxB = b.X - center.X; long dzB = b.Z - center.Z;
+            long distB = dxB * dxB + dzB * dzB;
             
             return distA.CompareTo(distB);
         });
 
         foreach (var pos in _sortedLoadPositions)
         {
-            // Приоритет инвертируем, чтобы ближайшие (меньшая дистанция) имели больший вес?
-            // AsyncChunkGenerator обычно берет задачи FIFO. 
-            // Просто передаем дистанцию как приоритет, генератор сам разберется (или можно не использовать приоритет).
             int dx = pos.X - center.X; int dz = pos.Z - center.Z;
-            int priority = dx * dx + dz * dz; 
+            int priority = dx * dx + dz * dz;
             _chunksToLoadList.Add(new ChunkGenerationTask(pos, priority));
         }
 
@@ -241,10 +242,7 @@ public class WorldManager : IDisposable
 
     private void ProcessGeneratedChunks()
     {
-        // Даем бюджет 3мс на прием чанков.
-        // За 3мс можно принять сотню чанков (это просто перекладывание ссылок), 
-        // если не запускать тяжелую физику синхронно.
-        long maxTicks = Stopwatch.Frequency / 1000 * 3; 
+        long maxTicks = Stopwatch.Frequency / 1000 * 3; // 3ms budget
         long startTicks = Stopwatch.GetTimestamp();
 
         while (_chunkGenerator.TryGetResult(out var result))
@@ -271,20 +269,16 @@ public class WorldManager : IDisposable
             if (chunkToAdd != null)
             {
                 OnChunkLoaded?.Invoke(chunkToAdd);
-                // Важно: PhysicsBuilder работает асинхронно, это быстро
-                _physicsBuilder.EnqueueTask(chunkToAdd); 
+                _physicsBuilder.EnqueueTask(chunkToAdd);
             }
 
-            // Выходим только по таймеру
             if (Stopwatch.GetTimestamp() - startTicks > maxTicks) break;
         }
     }
 
     private void ProcessPhysicsResults()
     {
-        // То же самое для физики. Добавление коллайдеров — тяжелая операция для главного потока.
-        int processedCount = 0;
-        long maxTicks = Stopwatch.Frequency / 1000 * 2; // 2ms
+        long maxTicks = Stopwatch.Frequency / 1000 * 2; // 2ms budget
         long startTicks = Stopwatch.GetTimestamp();
 
         while (_physicsBuilder.TryGetResult(out var result))
@@ -296,7 +290,6 @@ public class WorldManager : IDisposable
                 if (result.TargetChunk == null || !result.TargetChunk.IsLoaded) continue;
 
                 StaticHandle handle = default;
-                // AddStaticChunkBody - это тяжелая операция Bepu
                 if (result.Data.CollidersArray != null && result.Data.Count > 0)
                 {
                     handle = PhysicsWorld.AddStaticChunkBody(
@@ -307,345 +300,108 @@ public class WorldManager : IDisposable
                 }
                 result.TargetChunk.OnPhysicsRebuilt(handle);
             }
-            
-            processedCount++;
-            if (processedCount > 5 || (Stopwatch.GetTimestamp() - startTicks > maxTicks))
-                break;
+
+            if (Stopwatch.GetTimestamp() - startTicks > maxTicks) break;
         }
     }
 
-    public void RebuildPhysics(Chunk chunk)
-    {
-        if (chunk == null || !chunk.IsLoaded) return;
-        _physicsBuilder.EnqueueTask(chunk, urgent: true);
-    }
-
-    public void CreateDetachedObject(List<Vector3i> globalCluster)
-    {
-        // Удаляем из мира (в глобальных индексах)
+    // ... (Остальные методы без изменений) ...
+    public void RebuildPhysics(Chunk chunk) { if (chunk == null || !chunk.IsLoaded) return; _physicsBuilder.EnqueueTask(chunk, urgent: true); }
+    public void CreateDetachedObject(List<Vector3i> globalCluster) { /* ... копия старого кода ... */ 
         foreach (var pos in globalCluster) RemoveVoxelGlobal(pos);
-
-        // Находим минимальный индекс (левый нижний угол кластера)
         OpenTK.Mathematics.Vector3 minIndex = new OpenTK.Mathematics.Vector3(float.MaxValue);
-        foreach (var v in globalCluster)
-            minIndex = OpenTK.Mathematics.Vector3.ComponentMin(minIndex, new OpenTK.Mathematics.Vector3(v.X, v.Y, v.Z));
-
-        // Собираем локальные координаты (они остаются индексами, например 0,0,0; 1,0,0...)
+        foreach (var v in globalCluster) minIndex = OpenTK.Mathematics.Vector3.ComponentMin(minIndex, new OpenTK.Mathematics.Vector3(v.X, v.Y, v.Z));
         List<Vector3i> localVoxels = new List<Vector3i>();
         Vector3i minIdxInt = new Vector3i((int)minIndex.X, (int)minIndex.Y, (int)minIndex.Z);
-        
-        foreach (var v in globalCluster)
-            localVoxels.Add(v - minIdxInt);
-
-        // ВАЖНО: Переводим минимальный индекс в МИРОВУЮ ПОЗИЦИЮ (МЕТРЫ)
-        // Если minIndex = (100, 10, 100), а воксель 0.125, то позиция = (12.5, 1.25, 12.5)
+        foreach (var v in globalCluster) localVoxels.Add(v - minIdxInt);
         System.Numerics.Vector3 worldPos = (minIndex * Constants.VoxelSize).ToSystemNumerics();
-
-        _objectsCreationQueue.Enqueue(new VoxelObjectCreationData
-        {
-            Voxels = localVoxels,
-            Material = MaterialType.Stone, // Можно доработать, чтобы брать материал из чанка
-            WorldPosition = worldPos
-        });
+        _objectsCreationQueue.Enqueue(new VoxelObjectCreationData { Voxels = localVoxels, Material = MaterialType.Stone, WorldPosition = worldPos });
     }
-
-    private void ProcessNewDebris()
-    {
-        while (_objectsCreationQueue.TryDequeue(out var data))
-        {
+    private void ProcessNewDebris() { /* ... копия старого кода ... */ 
+        while (_objectsCreationQueue.TryDequeue(out var data)) {
             var vo = new VoxelObject(data.Voxels, data.Material);
             vo.OnEmpty += QueueForRemoval;
             var handle = PhysicsWorld.CreateVoxelObjectBody(data.Voxels, data.Material, data.WorldPosition, out var com);
-            
             var realPos = data.WorldPosition + com;
             var bodyRef = PhysicsWorld.Simulation.Bodies.GetBodyReference(handle);
             bodyRef.Pose.Position = realPos;
-
             vo.InitializePhysics(handle, com.ToOpenTK());
-
             _voxelObjects.Add(vo);
             RegisterVoxelObject(handle, vo);
         }
     }
-
-    public void ProcessVoxelObjects()
-    {
-        foreach (var vo in _voxelObjects)
-        {
-            if (PhysicsWorld.Simulation.Bodies.BodyExists(vo.BodyHandle))
-            {
-                var pose = PhysicsWorld.GetPose(vo.BodyHandle);
-                vo.UpdatePose(pose);
-            }
-        }
-    }
-
+    public void ProcessVoxelObjects() { foreach (var vo in _voxelObjects) { if (PhysicsWorld.Simulation.Bodies.BodyExists(vo.BodyHandle)) { var pose = PhysicsWorld.GetPose(vo.BodyHandle); vo.UpdatePose(pose); } } }
     public void QueueForRemoval(VoxelObject obj) => _objectsToRemove.Add(obj);
-
-    private void ProcessRemovals()
-    {
-        foreach (var obj in _objectsToRemove)
-        {
-            try
-            {
-                _bodyToVoxelObjectMap.Remove(obj.BodyHandle);
-                _voxelObjects.Remove(obj);
-                PhysicsWorld.RemoveBody(obj.BodyHandle);
-                obj.Dispose();
-            }
-            catch { }
-        }
-        _objectsToRemove.Clear();
-    }
-
-    public void DestroyVoxelAt(CollidableReference collidable, BepuVector3 worldHitLocation, BepuVector3 worldHitNormal)
-    {
-        var pointInside = worldHitLocation - worldHitNormal * (Constants.VoxelSize * 0.5f);
-
-        if (collidable.Mobility == CollidableMobility.Static)
-        {
-            // ... (старый код для статики / террейна) ...
-            Vector3i globalVoxelIndex = new Vector3i(
-                (int)Math.Floor(pointInside.X / Constants.VoxelSize),
-                (int)Math.Floor(pointInside.Y / Constants.VoxelSize),
-                (int)Math.Floor(pointInside.Z / Constants.VoxelSize));
-
-            if (RemoveVoxelGlobal(globalVoxelIndex))
-            {
-                NotifyVoxelFastDestroyed(globalVoxelIndex);
-                _integritySystem.QueueCheck(globalVoxelIndex);
-            }
-        }
-        else if (collidable.Mobility == CollidableMobility.Dynamic &&
-                 _bodyToVoxelObjectMap.TryGetValue(collidable.BodyHandle, out var voxelObj))
-        {
-            // === ДИНАМИКА ===
-            
-            Matrix4 model = Matrix4.CreateTranslation(-voxelObj.LocalCenterOfMass) *
-                            Matrix4.CreateFromQuaternion(voxelObj.Rotation) *
-                            Matrix4.CreateTranslation(voxelObj.Position);
+    private void ProcessRemovals() { foreach (var obj in _objectsToRemove) { try { _bodyToVoxelObjectMap.Remove(obj.BodyHandle); _voxelObjects.Remove(obj); PhysicsWorld.RemoveBody(obj.BodyHandle); obj.Dispose(); } catch { } } _objectsToRemove.Clear(); }
+    public void DestroyVoxelAt(CollidableReference collidable, BepuVector3 worldHitLocation, BepuVector3 worldHitNormal) { /* ... копия старого кода ... */ 
+         var pointInside = worldHitLocation - worldHitNormal * (Constants.VoxelSize * 0.5f);
+        if (collidable.Mobility == CollidableMobility.Static) {
+            Vector3i globalVoxelIndex = new Vector3i((int)Math.Floor(pointInside.X / Constants.VoxelSize), (int)Math.Floor(pointInside.Y / Constants.VoxelSize), (int)Math.Floor(pointInside.Z / Constants.VoxelSize));
+            if (RemoveVoxelGlobal(globalVoxelIndex)) { NotifyVoxelFastDestroyed(globalVoxelIndex); _integritySystem.QueueCheck(globalVoxelIndex); }
+        } else if (collidable.Mobility == CollidableMobility.Dynamic && _bodyToVoxelObjectMap.TryGetValue(collidable.BodyHandle, out var voxelObj)) {
+            Matrix4 model = Matrix4.CreateTranslation(-voxelObj.LocalCenterOfMass) * Matrix4.CreateFromQuaternion(voxelObj.Rotation) * Matrix4.CreateTranslation(voxelObj.Position);
             Matrix4 invModel = Matrix4.Invert(model);
-
             Vector4 localHitMeters = new Vector4(pointInside.ToOpenTK(), 1.0f) * invModel;
-
-            Vector3i localVoxelIndex = new Vector3i(
-                (int)Math.Floor(localHitMeters.X / Constants.VoxelSize),
-                (int)Math.Floor(localHitMeters.Y / Constants.VoxelSize),
-                (int)Math.Floor(localHitMeters.Z / Constants.VoxelSize));
-
-            // 1. Удаляем воксель
-            if (voxelObj.RemoveVoxel(localVoxelIndex))
-            {
-                // Если объект стал пустым - выходим, OnEmpty его удалит
+            Vector3i localVoxelIndex = new Vector3i((int)Math.Floor(localHitMeters.X / Constants.VoxelSize), (int)Math.Floor(localHitMeters.Y / Constants.VoxelSize), (int)Math.Floor(localHitMeters.Z / Constants.VoxelSize));
+            if (voxelObj.RemoveVoxel(localVoxelIndex)) {
                 if (voxelObj.VoxelCoordinates.Count == 0) return;
-
-                // 2. Проверяем целостность (кластеризация)
                 var clusters = voxelObj.GetConnectedClusters();
-
-                if (clusters.Count == 1)
-                {
-                    // Обычный случай: просто перестраиваем текущий объект
-                    voxelObj.RebuildMeshAndPhysics(PhysicsWorld);
-                }
-                else
-                {
-                    // СЛУЧАЙ РАЗДЕЛЕНИЯ: Объект распался на части!
-                    // Оставляем самый большой кластер в текущем объекте, остальные отделяем.
-                    
-                    // Сортируем: самый большой первый
+                if (clusters.Count == 1) { voxelObj.RebuildMeshAndPhysics(PhysicsWorld); }
+                else {
                     clusters.Sort((a, b) => b.Count.CompareTo(a.Count));
                     var mainCluster = clusters[0];
-
-                    // Удаляем лишние воксели из текущего объекта (оставляем только главный кластер)
-                    // Используем HashSet для скорости
                     var mainSet = new HashSet<Vector3i>(mainCluster);
                     voxelObj.VoxelCoordinates.RemoveAll(v => !mainSet.Contains(v));
-                    
-                    // Перестраиваем главный объект
                     voxelObj.RebuildMeshAndPhysics(PhysicsWorld);
-
-                    // Создаем новые объекты для остальных кластеров
-                    for (int i = 1; i < clusters.Count; i++)
-                    {
-                        SpawnSplitCluster(clusters[i], voxelObj);
-                    }
+                    for (int i = 1; i < clusters.Count; i++) SpawnSplitCluster(clusters[i], voxelObj);
                 }
             }
         }
     }
-    
-    private void SpawnSplitCluster(List<Vector3i> localClusterVoxels, VoxelObject parentObj)
-    {
-        // 1. Берем первый воксель как "Якорь" (Anchor)
+    private void SpawnSplitCluster(List<Vector3i> localClusterVoxels, VoxelObject parentObj) { /* ... копия старого кода ... */ 
         Vector3i anchorIdx = localClusterVoxels[0];
-        
-        // 2. Нормализуем координаты нового кластера относительно якоря
-        // (чтобы координаты начинались с 0,0,0)
-        List<Vector3i> newLocalVoxels = new List<Vector3i>();
-        foreach(var v in localClusterVoxels)
-        {
-            newLocalVoxels.Add(v - anchorIdx);
-        }
-
-        // 3. Предсказываем Центр Масс (CoM) нового объекта
-        // CoM - это среднее арифметическое центров всех вокселей
-        System.Numerics.Vector3 calculatedLocalCoM = System.Numerics.Vector3.Zero;
-        foreach (var v in newLocalVoxels)
-        {
-            // Центр вокселя = (idx + 0.5) * size
-            calculatedLocalCoM += (v.ToSystemNumerics() + new System.Numerics.Vector3(0.5f)) * Constants.VoxelSize;
-        }
-        if (newLocalVoxels.Count > 0)
-            calculatedLocalCoM /= newLocalVoxels.Count;
-
-        // 4. Вычисляем МИРОВУЮ позицию якоря (где он был в старом объекте)
-        // Pos = BodyPos + Rot * (LocalPos - OldCoM)
-        
-        // Локальная позиция якоря в РОДИТЕЛЕ (в метрах)
+        List<Vector3i> newLocalVoxels = new List<Vector3i>(); foreach(var v in localClusterVoxels) newLocalVoxels.Add(v - anchorIdx);
+        System.Numerics.Vector3 calculatedLocalCoM = System.Numerics.Vector3.Zero; foreach (var v in newLocalVoxels) calculatedLocalCoM += (v.ToSystemNumerics() + new System.Numerics.Vector3(0.5f)) * Constants.VoxelSize;
+        if (newLocalVoxels.Count > 0) calculatedLocalCoM /= newLocalVoxels.Count;
         System.Numerics.Vector3 anchorPosInParent = (anchorIdx.ToSystemNumerics() + new System.Numerics.Vector3(0.5f)) * Constants.VoxelSize;
-        // Смещаем на центр масс родителя (так хранятся данные в VoxelObject)
         anchorPosInParent -= parentObj.LocalCenterOfMass.ToSystemNumerics();
-        
-        // Переводим в мир
-        System.Numerics.Vector3 anchorWorldPos = parentObj.Position.ToSystemNumerics() + 
-            System.Numerics.Vector3.Transform(anchorPosInParent, parentObj.Rotation.ToSystemNumerics());
-
-        // 5. Вычисляем, где должен быть ЦЕНТР ТЕЛА нового объекта
-        // Мы знаем: VisualPos = BodyPos + Rot * (LocalVoxPos - NewCoM)
-        // Для якоря (LocalVoxPos = 0.5*Size) мы хотим VisualPos == anchorWorldPos.
-        // anchorWorldPos = BodyPos + Rot * ( (0.5*size) - NewCoM )
-        // BodyPos = anchorWorldPos - Rot * ( (0.5*size) - NewCoM )
-        
-        // Позиция якоря в локальной системе НОВОГО объекта (просто половина вокселя)
+        System.Numerics.Vector3 anchorWorldPos = parentObj.Position.ToSystemNumerics() + System.Numerics.Vector3.Transform(anchorPosInParent, parentObj.Rotation.ToSystemNumerics());
         System.Numerics.Vector3 anchorInNewLocal = new System.Numerics.Vector3(0.5f) * Constants.VoxelSize;
-        
-        // Вектор от центра тела до якоря
         System.Numerics.Vector3 offset = anchorInNewLocal - calculatedLocalCoM;
-        
-        // Поворачиваем этот вектор (новый объект наследует вращение родителя)
         System.Numerics.Vector3 rotatedOffset = System.Numerics.Vector3.Transform(offset, parentObj.Rotation.ToSystemNumerics());
-        
-        // Итоговая позиция тела
         System.Numerics.Vector3 finalSpawnPos = anchorWorldPos - rotatedOffset;
-
-        // Создаем
-        _objectsCreationQueue.Enqueue(new VoxelObjectCreationData
-        {
-            Voxels = newLocalVoxels,
-            Material = parentObj.Material,
-            WorldPosition = finalSpawnPos
-        });
+        _objectsCreationQueue.Enqueue(new VoxelObjectCreationData { Voxels = newLocalVoxels, Material = parentObj.Material, WorldPosition = finalSpawnPos });
     }
-
-    private bool RemoveVoxelGlobal(Vector3i globalVoxelIndex)
-    {
+    private bool RemoveVoxelGlobal(Vector3i globalVoxelIndex) { /* ... копия старого кода ... */ 
         Vector3i chunkPos = GetChunkPosFromVoxelIndex(globalVoxelIndex);
-        
-        if (_chunks.TryGetValue(chunkPos, out var chunk) && chunk.IsLoaded)
-        {
-            // Переводим Глобальный Индекс -> Локальный Индекс внутри чанка (0..127)
-            // Используем ChunkResolution (128)
+        if (_chunks.TryGetValue(chunkPos, out var chunk) && chunk.IsLoaded) {
             int res = Constants.ChunkResolution;
-            
-            // Правильный математический остаток (на случай отрицательных координат)
             int lx = globalVoxelIndex.X % res; if(lx < 0) lx += res;
             int ly = globalVoxelIndex.Y % res; if(ly < 0) ly += res;
             int lz = globalVoxelIndex.Z % res; if(lz < 0) lz += res;
-            
             return chunk.RemoveVoxelAndUpdate(new Vector3i(lx, ly, lz));
-        }
-        return false;
+        } return false;
     }
-
-    // Хелпер: Получить позицию чанка по ГЛОБАЛЬНОМУ ИНДЕКСУ вокселя
-    private Vector3i GetChunkPosFromVoxelIndex(Vector3i voxelIndex) => new Vector3i(
-        (int)Math.Floor((float)voxelIndex.X / Constants.ChunkResolution),
-        (int)Math.Floor((float)voxelIndex.Y / Constants.ChunkResolution),
-        (int)Math.Floor((float)voxelIndex.Z / Constants.ChunkResolution));
-
-    // Для других нужд (если где-то еще используется позиция в метрах)
-    private Vector3i GetChunkPosFromWorldMeters(OpenTK.Mathematics.Vector3 p) => new Vector3i(
-        (int)Math.Floor(p.X / Constants.ChunkSizeWorld),
-        (int)Math.Floor(p.Y / Constants.ChunkSizeWorld),
-        (int)Math.Floor(p.Z / Constants.ChunkSizeWorld));
-
-    // Проверка твердости (также обновлена на индексы)
-    public bool IsVoxelSolidGlobal(Vector3i globalVoxelIndex)
-    {
+    private Vector3i GetChunkPosFromVoxelIndex(Vector3i voxelIndex) => new Vector3i((int)Math.Floor((float)voxelIndex.X / Constants.ChunkResolution), (int)Math.Floor((float)voxelIndex.Y / Constants.ChunkResolution), (int)Math.Floor((float)voxelIndex.Z / Constants.ChunkResolution));
+    public bool IsVoxelSolidGlobal(Vector3i globalVoxelIndex) { /* ... копия старого кода ... */ 
         Vector3i chunkPos = GetChunkPosFromVoxelIndex(globalVoxelIndex);
-        if (_chunks.TryGetValue(chunkPos, out var chunk) && chunk.IsLoaded)
-        {
+        if (_chunks.TryGetValue(chunkPos, out var chunk) && chunk.IsLoaded) {
             int res = Constants.ChunkResolution;
             int lx = globalVoxelIndex.X % res; if (lx < 0) lx += res;
             int ly = globalVoxelIndex.Y % res; if (ly < 0) ly += res;
             int lz = globalVoxelIndex.Z % res; if (lz < 0) lz += res;
-            
             return chunk.IsVoxelSolidAt(new Vector3i(lx, ly, lz));
-        }
-        return false;
+        } return false;
     }
-
-    public bool IsChunkLoadedAt(Vector3i globalVoxelIndex)
-    {
-        Vector3i chunkPos = GetChunkPosFromVoxelIndex(globalVoxelIndex);
-        return _chunks.ContainsKey(chunkPos) && _chunks[chunkPos].IsLoaded;
-    }
-
+    public bool IsChunkLoadedAt(Vector3i globalVoxelIndex) { Vector3i chunkPos = GetChunkPosFromVoxelIndex(globalVoxelIndex); return _chunks.ContainsKey(chunkPos) && _chunks[chunkPos].IsLoaded; }
     public void NotifyVoxelFastDestroyed(Vector3i worldPos) => OnVoxelFastDestroyed?.Invoke(worldPos);
     public void NotifyChunkModified(Chunk chunk) => OnChunkModified?.Invoke(chunk);
-
-    public void RegisterVoxelObject(BodyHandle handle, VoxelObject obj)
-    {
-        lock (_chunksLock) _bodyToVoxelObjectMap[handle] = obj;
-    }
-
-    public void RegisterChunkStatic(StaticHandle handle, Chunk chunk)
-    {
-        lock (_chunksLock) _staticToChunkMap[handle] = chunk;
-    }
-
-    public void UnregisterChunkStatic(StaticHandle handle)
-    {
-        lock (_chunksLock) _staticToChunkMap.Remove(handle);
-    }
-
-    public OpenTK.Mathematics.Vector3 GetPlayerPosition() => 
-        PhysicsWorld.Simulation.Bodies.GetBodyReference(_playerController.BodyHandle).Pose.Position.ToOpenTK();
-
-    public List<Chunk> GetChunksSnapshot()
-    {
-        lock (_chunksLock) return new List<Chunk>(_chunks.Values);
-    }
-
-    // Возвращаем метры для шейдера
+    public void RegisterVoxelObject(BodyHandle handle, VoxelObject obj) { lock (_chunksLock) _bodyToVoxelObjectMap[handle] = obj; }
+    public void RegisterChunkStatic(StaticHandle handle, Chunk chunk) { lock (_chunksLock) _staticToChunkMap[handle] = chunk; }
+    public void UnregisterChunkStatic(StaticHandle handle) { lock (_chunksLock) _staticToChunkMap.Remove(handle); }
+    public OpenTK.Mathematics.Vector3 GetPlayerPosition() => PhysicsWorld.Simulation.Bodies.GetBodyReference(_playerController.BodyHandle).Pose.Position.ToOpenTK();
+    public List<Chunk> GetChunksSnapshot() { lock (_chunksLock) return new List<Chunk>(_chunks.Values); }
     public float GetViewRangeInMeters() => GameSettings.RenderDistance * Constants.ChunkSizeWorld;
-
-    public void Dispose()
-    {
-        _isDisposed = true;
-        _chunkGenerator.Dispose();
-        _physicsBuilder.Dispose();
-        _integritySystem.Dispose();
-
-        lock (_chunksLock)
-        {
-            foreach (var chunk in _chunks.Values) chunk.Dispose();
-            _chunks.Clear();
-        }
-        
-        foreach(var vo in _voxelObjects) vo.Dispose();
-        _voxelObjects.Clear();
-    }
-    
-    public void SpawnTestVoxel(System.Numerics.Vector3 position, MaterialType material)
-    {
-        var voxels = new List<Vector3i> { new Vector3i(0, 0, 0) };
-        
-        _objectsCreationQueue.Enqueue(new VoxelObjectCreationData
-        {
-            Voxels = voxels,
-            Material = material,
-            WorldPosition = position
-        });
-    }
+    public void Dispose() { _isDisposed = true; _chunkGenerator.Dispose(); _physicsBuilder.Dispose(); _integritySystem.Dispose(); lock (_chunksLock) { foreach (var chunk in _chunks.Values) chunk.Dispose(); _chunks.Clear(); } foreach(var vo in _voxelObjects) vo.Dispose(); _voxelObjects.Clear(); }
+    public void SpawnTestVoxel(System.Numerics.Vector3 position, MaterialType material) { var voxels = new List<Vector3i> { new Vector3i(0, 0, 0) }; _objectsCreationQueue.Enqueue(new VoxelObjectCreationData { Voxels = voxels, Material = material, WorldPosition = position }); }
 }

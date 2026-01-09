@@ -12,7 +12,6 @@ public class AsyncChunkPhysics : IDisposable
 
     private readonly Thread _workerThread;
     private volatile bool _isDisposed;
-    private Stopwatch _stopwatch = new Stopwatch(); 
 
     public AsyncChunkPhysics()
     {
@@ -30,10 +29,25 @@ public class AsyncChunkPhysics : IDisposable
         if (urgent) _urgentQueue.Enqueue(task);
         else _inputQueue.Add(task);
     }
-    
-    
 
     public bool TryGetResult(out PhysicsBuildResult result) => _outputQueue.TryDequeue(out result);
+
+    // Метод для полной очистки при перезагрузке
+    public void Clear()
+    {
+        // 1. Чистим срочную очередь (ConcurrentQueue - TryDequeue)
+        while (_urgentQueue.TryDequeue(out _)) { }
+
+        // 2. Чистим входную очередь (BlockingCollection - TryTake)
+        while (_inputQueue.TryTake(out _)) { }
+
+        // 3. Чистим выходную очередь (ConcurrentQueue - TryDequeue)
+        while (_outputQueue.TryDequeue(out var result)) 
+        {
+            // Если нужно освободить ресурсы результата (VoxelCollider[]), делаем это
+            result.Data.Dispose();
+        }
+    }
 
     private void WorkerLoop()
     {
@@ -56,44 +70,28 @@ public class AsyncChunkPhysics : IDisposable
     {
         if (chunk == null || !chunk.IsLoaded) return;
         
-        // 1. Получаем копию байтов (арендованную)
         var voxels = chunk.GetVoxelsCopy();
         if (voxels == null) return; 
 
-        // 2. Арендуем массив для конвертации в MaterialType
         var matArray = System.Buffers.ArrayPool<MaterialType>.Shared.Rent(Constants.ChunkVolume);
-        
         try
         {
-            // Быстрая конвертация byte -> MaterialType
-            for(int i = 0; i < Constants.ChunkVolume; i++) 
-            {
-                matArray[i] = (MaterialType)voxels[i];
-            }
-            
-            // Возвращаем байты сразу, они больше не нужны
+            for(int i = 0; i < Constants.ChunkVolume; i++) matArray[i] = (MaterialType)voxels[i];
             System.Buffers.ArrayPool<byte>.Shared.Return(voxels); 
             voxels = null;
 
-            // --- ЗАМЕР ВРЕМЕНИ ---
             long start = Stopwatch.GetTimestamp();
-            
-            // Передаем арендованный массив
             var data = VoxelPhysicsBuilder.GenerateColliders(matArray, chunk.Position);
-            
             long end = Stopwatch.GetTimestamp();
+
             if (PerformanceMonitor.IsEnabled) 
-            {
                 PerformanceMonitor.Record(ThreadType.ChunkPhys, end - start);
-            }
-            // ---------------------
 
             _outputQueue.Enqueue(new PhysicsBuildResult(chunk, data));
         }
         finally
         {
-            // Обязательно возвращаем массивы, даже при ошибке
-            if (voxels != null) System.Buffers.ArrayPool<byte>.Shared.Return(voxels);
+            if(voxels != null) System.Buffers.ArrayPool<byte>.Shared.Return(voxels);
             System.Buffers.ArrayPool<MaterialType>.Shared.Return(matArray);
         }
     }

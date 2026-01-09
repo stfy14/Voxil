@@ -14,7 +14,7 @@ public static class Constants
     // 0.5f   = 32^3
     // 0.25f  = 64^3
     // 0.125f = 128^3
-    public const float VoxelSize = 0.25f; 
+    public const float VoxelSize = 1f; 
 
     // ==========================================
     // АВТОМАТИЧЕСКИЕ ВЫЧИСЛЕНИЯ (НЕ ТРОГАТЬ)

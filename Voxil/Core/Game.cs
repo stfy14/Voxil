@@ -161,8 +161,33 @@ public class Game : GameWindow
         }
 
         // Settings Hotkeys
-        if (_input.IsKeyPressed(Keys.O)) GameSettings.RenderDistance = Math.Max(4, GameSettings.RenderDistance - 4);
-        if (_input.IsKeyPressed(Keys.P)) GameSettings.RenderDistance = Math.Min(128, GameSettings.RenderDistance + 4);
+        bool distChanged = false;
+        
+        if (_input.IsKeyPressed(Keys.O)) 
+        { 
+            GameSettings.RenderDistance = Math.Max(4, GameSettings.RenderDistance - 4);
+            distChanged = true;
+        }
+        if (_input.IsKeyPressed(Keys.P)) 
+        { 
+            GameSettings.RenderDistance = Math.Min(128, GameSettings.RenderDistance + 4);
+            distChanged = true;
+        }
+
+        if (distChanged)
+        {
+            Console.WriteLine($"[Game] Changing Render Distance to {GameSettings.RenderDistance}. Reloading...");
+            
+            // 1. Сбрасываем мир (удаляем чанки, физику, очереди)
+            _worldManager.ReloadWorld();
+            
+            // 2. Пересоздаем буферы GPU под новый размер
+            _renderer.ResizeBuffers();
+            
+            // 3. Форсируем перерисовку шейдера (для обновления define uRenderDistance, если он не uniform)
+            // Но у нас он uniform, так что не обязательно, но для чистоты можно
+            _renderer.ReloadShader();
+        }
 
         if (_input.IsKeyPressed(Keys.K)) { GameSettings.GenerationThreads = Math.Max(1, GameSettings.GenerationThreads - 1); _worldManager.SetGenerationThreadCount(GameSettings.GenerationThreads); }
         if (_input.IsKeyPressed(Keys.L)) { GameSettings.GenerationThreads = Math.Min(16, GameSettings.GenerationThreads + 1); _worldManager.SetGenerationThreadCount(GameSettings.GenerationThreads); }
