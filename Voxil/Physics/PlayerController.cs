@@ -23,8 +23,8 @@ public class PlayerController
     private bool _isFlying = false;
 
     // Скорости для полета (можно вынести в Settings, но для простоты тут)
-    private const float FlySpeedNormal = 15.0f;
-    private const float FlySpeedFast = 50.0f;
+    private const float FlySpeedNormal = 50.0f;
+    private const float FlySpeedFast = 200.0f;
 
     public PlayerController(PhysicsWorld physicsWorld, Camera camera, System.Numerics.Vector3 startPosition)
     {
