@@ -16,6 +16,12 @@ public class AsyncChunkPhysics : IDisposable
     private bool[] _visitedBuffer;
     private VoxelCollider[] _scratchColliders;
 
+    // --- ДОБАВЛЕНО: СВОЙСТВА ДЛЯ СЧЕТЧИКОВ ---
+    public int UrgentCount => _urgentQueue.Count;
+    public int PendingCount => _inputQueue.Count;
+    public int ResultsCount => _outputQueue.Count;
+    // ------------------------------------------
+
     public AsyncChunkPhysics()
     {
         _workerThread = new Thread(WorkerLoop)
@@ -83,16 +89,12 @@ public class AsyncChunkPhysics : IDisposable
 
             long start = Stopwatch.GetTimestamp();
             
-            // Используем буферы
             int count = VoxelPhysicsBuilder.GenerateColliders(matArray, _visitedBuffer, _scratchColliders);
             
-            // Создаем структуру с правильным именем
             PhysicsBuildResultData finalData = new PhysicsBuildResultData();
-            
             if (count > 0)
             {
                 finalData.Count = count;
-                // Компактный массив для отправки
                 finalData.CollidersArray = new VoxelCollider[count];
                 Array.Copy(_scratchColliders, finalData.CollidersArray, count);
             }

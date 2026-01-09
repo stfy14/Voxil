@@ -8,7 +8,7 @@
 public static class GameSettings
 {
     // Дальность прорисовки (в чанках)
-    public static int RenderDistance = 4;
+    public static int RenderDistance = 42;
     
     // Лимит загрузки чанков в GPU за кадр
     public static int GpuUploadSpeed = 1000;

@@ -9,6 +9,7 @@ public class InputManager
     private Vector2 _lastMousePosition;
     private bool _firstMouseMove = true;
 
+    // ... (Свойства клавиш: MoveForward, Jump и т.д. оставляем как есть) ...
     public Keys MoveForward { get; set; } = Keys.W;
     public Keys MoveBackward { get; set; } = Keys.S;
     public Keys MoveLeft { get; set; } = Keys.A;
@@ -17,7 +18,6 @@ public class InputManager
     public Keys Crouch { get; set; } = Keys.LeftShift;
     public Keys Sprint { get; set; } = Keys.LeftControl;
     public Keys Exit { get; set; } = Keys.Escape;
-
     public float MouseSensitivity { get; set; } = 0.1f;
 
     public void Update(KeyboardState keyboardState, MouseState mouseState)
@@ -26,26 +26,13 @@ public class InputManager
         _mouseState = mouseState;
     }
 
-    public bool IsKeyDown(Keys key) => _keyboardState.IsKeyDown(key);
-    public bool IsKeyPressed(Keys key) => _keyboardState.IsKeyPressed(key);
-
-    public Vector2 GetMovementInput()
+    // --- НОВЫЙ МЕТОД ---
+    // Вызываем его, когда скрываем курсор, чтобы не было рывка камеры
+    public void ResetMouseDelta()
     {
-        Vector2 movement = Vector2.Zero;
-        if (IsKeyDown(MoveForward)) movement.Y += 1;
-        if (IsKeyDown(MoveBackward)) movement.Y -= 1;
-        if (IsKeyDown(MoveLeft)) movement.X -= 1;
-        if (IsKeyDown(MoveRight)) movement.X += 1;
-
-        if (movement.LengthSquared > 0)
-            movement.Normalize();
-        return movement;
+        _firstMouseMove = true;
     }
-
-    public bool IsJumpPressed() => IsKeyDown(Jump);
-    public bool IsCrouchPressed() => IsKeyDown(Crouch);
-    public bool IsSprintPressed() => IsKeyDown(Sprint);
-    public bool IsExitPressed() => IsKeyDown(Exit);
+    // -------------------
 
     public Vector2 GetMouseDelta()
     {
@@ -62,5 +49,22 @@ public class InputManager
         return delta * MouseSensitivity;
     }
 
+    // Остальные методы (IsKeyDown и т.д.) без изменений
+    public bool IsKeyDown(Keys key) => _keyboardState.IsKeyDown(key);
+    public bool IsKeyPressed(Keys key) => _keyboardState.IsKeyPressed(key);
+    public Vector2 GetMovementInput()
+    {
+        Vector2 movement = Vector2.Zero;
+        if (IsKeyDown(MoveForward)) movement.Y += 1;
+        if (IsKeyDown(MoveBackward)) movement.Y -= 1;
+        if (IsKeyDown(MoveLeft)) movement.X -= 1;
+        if (IsKeyDown(MoveRight)) movement.X += 1;
+        if (movement.LengthSquared > 0) movement.Normalize();
+        return movement;
+    }
+    public bool IsJumpPressed() => IsKeyDown(Jump);
+    public bool IsCrouchPressed() => IsKeyDown(Crouch);
+    public bool IsSprintPressed() => IsKeyDown(Sprint);
+    public bool IsExitPressed() => IsKeyDown(Exit);
     public bool IsMouseButtonPressed(MouseButton button) => _mouseState.IsButtonPressed(button);
 }

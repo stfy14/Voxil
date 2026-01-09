@@ -4,36 +4,33 @@ using System;
 public static class Constants
 {
     // ==========================================
-    // НАСТРОЙКИ (МЕНЯТЬ ТОЛЬКО ЗДЕСЬ)
+    // НАСТРОЙКИ
     // ==========================================
     
-    // Размер чанка в метрах
-    public const int ChunkSizeWorld = 16; 
-
-    // Размер одного вокселя в метрах
-    // 0.5f   = 32^3
-    // 0.25f  = 64^3
-    // 0.125f = 128^3
+    // Размер вокселя
     public const float VoxelSize = 1f; 
 
-    // ==========================================
-    // АВТОМАТИЧЕСКИЕ ВЫЧИСЛЕНИЯ (НЕ ТРОГАТЬ)
-    // ==========================================ц
+    // ЖЕЛАЕМОЕ РАЗРЕШЕНИЕ ЧАНКА (вокеслей на сторону)
+    // 32 - очень быстро
+    // 64 - норма (для 0.125f)
+    // 128 - тяжело для CPU (то, что у вас сейчас)
+    private const int TargetResolution = 32; 
 
-    // Разрешение чанка (сколько вокселей на сторону)
+    // ==========================================
+    // АВТОМАТИЧЕСКИЕ ВЫЧИСЛЕНИЯ
+    // ==========================================
+    
+    // Размер чанка в метрах ТЕПЕРЬ ВЫЧИСЛЯЕТСЯ
+    public const int ChunkSizeWorld = (int)(TargetResolution * VoxelSize); 
+
+    // Разрешение чанка
     public const int ChunkResolution = (int)(ChunkSizeWorld / VoxelSize);
 
     // Объем чанка
     public const int ChunkVolume = ChunkResolution * ChunkResolution * ChunkResolution;
 
-    // Вокселей на метр (для шейдера)
     public const float VoxelsPerMeter = 1.0f / VoxelSize;
 
-    // Сдвиг битов и маска для быстрой математики (эквивалент деления и остатка)
-    // Math.Log2 возвращает double, приводим к int.
-    // Например: для 128 это будет 7, для 64 это 6.
     public static readonly int BitShift = (int)Math.Log2(ChunkResolution);
-    
-    // Маска: для 128 это 127 (1111111), для 64 это 63.
     public const int BitMask = ChunkResolution - 1;
 }
