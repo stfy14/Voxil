@@ -1,36 +1,21 @@
 ﻿// --- START OF FILE include/lighting.glsl ---
 
-// =============================================================================
-//                              LIGHTING SETTINGS
-// =============================================================================
 #define AO_STRENGTH 0.6
-#define SOFT_SHADOW_RADIUS 0.01  // Вернул к 0.06 (оптимально для вокселей)
+#define SOFT_SHADOW_RADIUS 0.01
 #define SHADOW_BIAS 0.003
-// =============================================================================
 
-// Функция проверки вокселя для AO и освещения
 bool IsSolidVoxelSpace(ivec3 pos) {
     ivec3 boundMin = ivec3(uBoundMinX, uBoundMinY, uBoundMinZ) * VOXEL_RESOLUTION;
     ivec3 boundMax = ivec3(uBoundMaxX, uBoundMaxY, uBoundMaxZ) * VOXEL_RESOLUTION;
-
     if (any(lessThan(pos, boundMin)) || any(greaterThanEqual(pos, boundMax))) return false;
-
-    ivec3 chunkCoord = pos >> BIT_SHIFT; // BIT_SHIFT = log2(VOXEL_RESOLUTION)
-
-    // Читаем слот чанка из таблицы страниц
+    ivec3 chunkCoord = pos >> BIT_SHIFT;
     uint chunkSlot = imageLoad(uPageTable, chunkCoord & (PAGE_TABLE_SIZE - 1)).r;
-
     if (chunkSlot == 0xFFFFFFFFu) return false;
-
-    // Вычисляем локальный индекс вокселя
     ivec3 local = pos & BIT_MASK;
     int idx = local.x + VOXEL_RESOLUTION * (local.y + VOXEL_RESOLUTION * local.z);
 
-    // !!! ВАЖНО: Используем GetVoxelData для поддержки 4 банков памяти !!!
-    // GetVoxelData определена в tracing.glsl, который включен ДО lighting.glsl
+    // ИСПОЛЬЗУЕМ GetVoxelData
     uint matID = GetVoxelData(chunkSlot, idx);
-
-    // ID 0 = воздух, ID 4 = вода (вода не считается твердой для AO, чтобы не затемнять дно)
     return (matID != 0u && matID != 4u);
 }
 
@@ -46,109 +31,57 @@ float CalculateAO(vec3 hitPos, vec3 normal) {
     vec3 aoRayOrigin = hitPos + normal * 0.005;
     vec3 voxelPos = aoRayOrigin * VOXELS_PER_METER;
     ivec3 ipos = ivec3(floor(voxelPos));
-
     ivec3 n = ivec3(normal);
     vec3 localPos = fract(voxelPos);
-
     ivec3 t, b;
     vec2 uvSurf;
-
-    if (abs(n.y) > 0.5) {
-        t = ivec3(1, 0, 0); b = ivec3(0, 0, 1); uvSurf = localPos.xz;
-    } else if (abs(n.x) > 0.5) {
-        t = ivec3(0, 0, 1); b = ivec3(0, 1, 0); uvSurf = localPos.zy;
-    } else {
-        t = ivec3(1, 0, 0); b = ivec3(0, 1, 0); uvSurf = localPos.xy;
-    }
-
+    if (abs(n.y) > 0.5) { t = ivec3(1, 0, 0); b = ivec3(0, 0, 1); uvSurf = localPos.xz; }
+    else if (abs(n.x) > 0.5) { t = ivec3(0, 0, 1); b = ivec3(0, 1, 0); uvSurf = localPos.zy; }
+    else { t = ivec3(1, 0, 0); b = ivec3(0, 1, 0); uvSurf = localPos.xy; }
     float occ00 = GetCornerOcclusion(ipos, -t, -b);
     float occ10 = GetCornerOcclusion(ipos,  t, -b);
     float occ01 = GetCornerOcclusion(ipos, -t,  b);
     float occ11 = GetCornerOcclusion(ipos,  t,  b);
-
     vec2 smoothUV = uvSurf * uvSurf * (3.0 - 2.0 * uvSurf);
     float finalOcc = mix(mix(occ00, occ10, smoothUV.x), mix(occ01, occ11, smoothUV.x), smoothUV.y);
-
     float ao = clamp(pow(0.5, finalOcc) + (IGN(gl_FragCoord.xy) - 0.5) * 0.1, 0.0, 1.0);
     return mix(1.0, ao, AO_STRENGTH);
 }
 
-// ----------------------------------------------------------------------------
-// Shadow Helpers
-// ----------------------------------------------------------------------------
-
 float CalculateSoftShadow(vec3 hitPos, vec3 normal, vec3 sunDir) {
     float distToCam = length(hitPos - uCamPos);
     vec3 shadowOrigin = hitPos + normal * SHADOW_BIAS;
-
-    // --- LOD LOGIC ---
     int maxSamples = uSoftShadowSamples;
     int effectiveSamples = maxSamples;
     float currentRadius = SOFT_SHADOW_RADIUS;
-
-    if (distToCam > 80.0) {
-        effectiveSamples = 2; // Минимум сэмплов
-        // ВАЖНО: Мы НЕ увеличиваем радиус. При 2 сэмплах большой радиус = шум.
-        // Оставляем радиус маленьким. Тень будет "узкой", но с мягкими краями (gradient),
-        // а не "жесткой" (как hard shadow).
-        currentRadius *= 0.5;
-    } else if (distToCam > 40.0) {
-        effectiveSamples = max(4, maxSamples / 4);
-        // Здесь сэмплов чуть больше, можно держать стандартный радиус
-        currentRadius *= 1.0;
-    } else if (distToCam > 15.0) {
-        effectiveSamples = max(8, maxSamples / 2);
-        currentRadius *= 1.0;
-    }
-
+    if (distToCam > 80.0) { effectiveSamples = 2; currentRadius *= 0.5; }
+    else if (distToCam > 40.0) { effectiveSamples = max(4, maxSamples / 4); currentRadius *= 1.0; }
+    else if (distToCam > 15.0) { effectiveSamples = max(8, maxSamples / 2); currentRadius *= 1.0; }
     if (effectiveSamples < 1) effectiveSamples = 1;
-
     vec3 up = abs(sunDir.y) < 0.999 ? vec3(0, 1, 0) : vec3(0, 0, 1);
     vec3 right = normalize(cross(sunDir, up));
     up = cross(right, sunDir);
-
     float totalVisibility = 0.0;
-    // Используем IGN вместо random для более приятного шума
     float noiseVal = IGN(gl_FragCoord.xy);
-
-    // Дальность луча тени (для оптимизации)
     float maxShadowDist = 200.0;
-
     for (int k = 0; k < effectiveSamples; k++) {
-        // Золотой угол для равномерного распределения даже малого кол-ва сэмплов
         float angle = (float(k) + noiseVal) * 2.39996;
-
-        // Квадратный корень для равномерного распределения по площади диска
         float r = sqrt(float(k) + 0.5) / sqrt(float(effectiveSamples));
-
         vec2 offset = vec2(cos(angle), sin(angle)) * r * currentRadius;
         vec3 offsetDir = right * offset.x + up * offset.y;
         vec3 shadowDir = normalize(sunDir + offsetDir);
-
         bool hit = false;
-
-        // Пропускаем динамику на очень больших дистанциях для скорости (опционально)
         if (distToCam < 150.0) {
             float tDyn = 100000.0; int idDyn = -1; vec3 nDyn = vec3(0);
-            if (uObjectCount > 0 && TraceDynamicRay(shadowOrigin, shadowDir, maxShadowDist, tDyn, idDyn, nDyn)) {
-                hit = true;
-            }
+            int dummy = 0;
+            if (uObjectCount > 0 && TraceDynamicRay(shadowOrigin, shadowDir, maxShadowDist, tDyn, idDyn, nDyn, dummy)) hit = true;
         }
-
         if (!hit) {
-            float tStatic = 100000.0;
-            uint matID = 0u;
-            // Трассировка статики с оптимизацией
-            if (TraceShadowRay(shadowOrigin, shadowDir, maxShadowDist, tStatic, matID)) {
-                hit = true;
-            }
+            float tHit = 0.0; uint matID = 0u;
+            if (TraceShadowRay(shadowOrigin, shadowDir, maxShadowDist, tHit, matID)) hit = true;
         }
-
-        if (!hit) {
-            totalVisibility += 1.0;
-        }
+        if (!hit) totalVisibility += 1.0;
     }
-
     return smoothstep(0.0, 1.0, totalVisibility / float(effectiveSamples));
 }
 

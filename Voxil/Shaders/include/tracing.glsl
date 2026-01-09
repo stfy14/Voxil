@@ -1,32 +1,75 @@
 ﻿// --- START OF FILE include/tracing.glsl ---
 
+// Маски (Binding 5)
 layout(std430, binding = 5) buffer MaskSSBO { uvec2 packedMasks[]; };
 
-// 4 БАНКА ВОКСЕЛЕЙ
-layout(std430, binding = 1) buffer VoxelSSBO0 { uint packedVoxels0[]; };
-layout(std430, binding = 6) buffer VoxelSSBO1 { uint packedVoxels1[]; };
-layout(std430, binding = 7) buffer VoxelSSBO2 { uint packedVoxels2[]; };
-layout(std430, binding = 8) buffer VoxelSSBO3 { uint packedVoxels3[]; };
+// Динамические банки вокселей (Binding 10+)
+#if VOXEL_BANKS >= 1
+layout(std430, binding = 10) buffer VoxelSSBO0 { uint b0[]; };
+#endif
+#if VOXEL_BANKS >= 2
+layout(std430, binding = 11) buffer VoxelSSBO1 { uint b1[]; };
+#endif
+#if VOXEL_BANKS >= 3
+layout(std430, binding = 12) buffer VoxelSSBO2 { uint b2[]; };
+#endif
+#if VOXEL_BANKS >= 4
+layout(std430, binding = 13) buffer VoxelSSBO3 { uint b3[]; };
+#endif
+#if VOXEL_BANKS >= 5
+layout(std430, binding = 14) buffer VoxelSSBO4 { uint b4[]; };
+#endif
+#if VOXEL_BANKS >= 6
+layout(std430, binding = 15) buffer VoxelSSBO5 { uint b5[]; };
+#endif
+#if VOXEL_BANKS >= 7
+layout(std430, binding = 16) buffer VoxelSSBO6 { uint b6[]; };
+#endif
+#if VOXEL_BANKS >= 8
+layout(std430, binding = 17) buffer VoxelSSBO7 { uint b7[]; };
+#endif
 
 #define BLOCK_SIZE 4
 #define BLOCKS_PER_AXIS (VOXEL_RESOLUTION / BLOCK_SIZE) 
 #define VOXELS_IN_UINT 4 
 
-// Функция для безопасного чтения из нужного банка
+// === ЧТЕНИЕ ВОКСЕЛЯ ===
 uint GetVoxelData(uint chunkSlot, int voxelIdx) {
-    uint bank = chunkSlot % 4u;
-    uint localSlot = chunkSlot / 4u;
+    uint bank = chunkSlot % uint(VOXEL_BANKS);
+    uint localSlot = chunkSlot / uint(VOXEL_BANKS);
 
-    // Пересчет смещения внутри банка
-    uint offset = localSlot * (uint(VOXEL_RESOLUTION)*uint(VOXEL_RESOLUTION)*uint(VOXEL_RESOLUTION) / uint(VOXELS_IN_UINT)) + (voxelIdx >> 2);
+    uint chunkSizeUint = (uint(VOXEL_RESOLUTION)*uint(VOXEL_RESOLUTION)*uint(VOXEL_RESOLUTION)) / uint(VOXELS_IN_UINT);
+    uint offset = localSlot * chunkSizeUint + (uint(voxelIdx) >> 2u);
 
-    // Выборка из банка
     uint rawVal = 0u;
-    if (bank == 0u) rawVal = packedVoxels0[offset];
-    else if (bank == 1u) rawVal = packedVoxels1[offset];
-    else if (bank == 2u) rawVal = packedVoxels2[offset];
-    else rawVal = packedVoxels3[offset];
-
+    #if VOXEL_BANKS == 1
+        rawVal = b0[offset];
+    #else
+        switch(bank) {
+        case 0u: rawVal = b0[offset]; break;
+                 #if VOXEL_BANKS >= 2
+            case 1u: rawVal = b1[offset]; break;
+                 #endif
+            #if VOXEL_BANKS >= 3
+            case 2u: rawVal = b2[offset]; break;
+                 #endif
+            #if VOXEL_BANKS >= 4
+            case 3u: rawVal = b3[offset]; break;
+                 #endif
+            #if VOXEL_BANKS >= 5
+            case 4u: rawVal = b4[offset]; break;
+                 #endif
+            #if VOXEL_BANKS >= 6
+            case 5u: rawVal = b5[offset]; break;
+                 #endif
+            #if VOXEL_BANKS >= 7
+            case 6u: rawVal = b6[offset]; break;
+                 #endif
+            #if VOXEL_BANKS >= 8
+            case 7u: rawVal = b7[offset]; break;
+                 #endif
+        }
+    #endif
     uint shift = (uint(voxelIdx) & 3u) * 8u;
     return (rawVal >> shift) & 0xFFu;
 }
@@ -41,7 +84,7 @@ vec2 IntersectAABB(vec3 ro, vec3 invRd, vec3 boxMin, vec3 boxMax) {
     return vec2(tNear, tFar);
 }
 
-// ... TraceDynamicRay ОСТАЕТСЯ БЕЗ ИЗМЕНЕНИЙ (он не использует воксельные буферы) ...
+// === ДИНАМИКА ===
 bool TraceDynamicRay(vec3 ro, vec3 rd, float maxDist, inout float tHit, inout int outObjID, inout vec3 outLocalNormal, inout int steps) {
     tHit = maxDist;
     bool hitAny = false;
@@ -52,13 +95,16 @@ bool TraceDynamicRay(vec3 ro, vec3 rd, float maxDist, inout float tHit, inout in
     vec3 tmin = min(t0, t1), tmax = max(t0, t1);
     float tEnter = max(max(tmin.x, tmin.y), tmin.z);
     float tExit = min(min(tmax.x, tmax.y), tmax.z);
+
     if (tExit < max(0.0, tEnter) || tEnter > maxDist) return false;
+
     float tStart = max(0.0, tEnter);
     vec3 currPos = gridSpaceRo + rd * (tStart * uGridStep + 0.001);
     ivec3 mapPos = ivec3(floor(currPos));
     ivec3 stepDir = ivec3(sign(rd));
     vec3 deltaDist = abs(uGridStep * invRd);
     vec3 sideDist = (sign(rd) * (vec3(mapPos) - currPos) + (0.5 + 0.5 * sign(rd))) * deltaDist;
+
     for (int i = 0; i < 128; i++) {
         steps++;
         if (any(lessThan(mapPos, ivec3(0))) || any(greaterThanEqual(mapPos, ivec3(uGridSize)))) break;
@@ -97,8 +143,7 @@ bool TraceDynamicRay(vec3 ro, vec3 rd, float maxDist, inout float tHit, inout in
     int dummy = 0; return TraceDynamicRay(ro, rd, maxDist, tHit, outObjID, outLocalNormal, dummy);
 }
 
-// === ОБНОВЛЕННАЯ ТРАССИРОВКА СТАТИКИ ===
-
+// === 4. СТАТИКА (Рендер) ===
 bool TraceStaticRay(vec3 ro, vec3 rd, float maxDist, float tStart, inout float tHit, inout uint matID, inout vec3 normal, inout int steps) {
     float tCurrent = max(0.0, tStart);
     vec3 rayOrigin = ro + rd * (tCurrent + 0.001);
@@ -138,13 +183,11 @@ bool TraceStaticRay(vec3 ro, vec3 rd, float maxDist, float tStart, inout float t
             for (int s = 0; s < 512; s++) {
                 steps++;
                 if (((vMapPos.x | vMapPos.y | vMapPos.z) & ~BIT_MASK) != 0) break;
-
                 ivec3 bMapPos = vMapPos / BLOCK_SIZE;
                 int blockIdx = bMapPos.x + BLOCKS_PER_AXIS * (bMapPos.y + BLOCKS_PER_AXIS * bMapPos.z);
                 uvec2 maskVal = packedMasks[maskBaseOffset + blockIdx];
 
                 if (maskVal.x == 0u && maskVal.y == 0u) {
-                    // Empty block skip
                     for(int k=0; k<64; k++) {
                         vMask = (vSideDist.x < vSideDist.y) ? ((vSideDist.x < vSideDist.z) ? vec3(1,0,0) : vec3(0,0,1)) : ((vSideDist.y < vSideDist.z) ? vec3(0,1,0) : vec3(0,0,1));
                         vSideDist += vMask * vDeltaDist;
@@ -160,12 +203,9 @@ bool TraceStaticRay(vec3 ro, vec3 rd, float maxDist, float tStart, inout float t
                         int lz = vMapPos.z % BLOCK_SIZE;
                         int bitIdx = lx + BLOCK_SIZE * (ly + BLOCK_SIZE * lz);
                         bool hasVoxel = (bitIdx < 32) ? ((maskVal.x & (1u << bitIdx)) != 0u) : ((maskVal.y & (1u << (bitIdx - 32))) != 0u);
-
                         if (hasVoxel) {
-                            // ИСПОЛЬЗУЕМ НОВУЮ ФУНКЦИЮ ЧТЕНИЯ
                             int idx = vMapPos.x + VOXEL_RESOLUTION * (vMapPos.y + VOXEL_RESOLUTION * vMapPos.z);
                             uint mat = GetVoxelData(chunkSlot, idx);
-
                             if (mat != 0u) {
                                 float tRel = (length(vMask) > 0.5) ? dot(vMask, vSideDist - vDeltaDist) : 0.0;
                                 tHit = tCurrent + (tRel / VOXELS_PER_METER);
@@ -182,7 +222,6 @@ bool TraceStaticRay(vec3 ro, vec3 rd, float maxDist, float tStart, inout float t
                         if (((vMapPos.x | vMapPos.y | vMapPos.z) & ~BIT_MASK) != 0) break;
                     }
                 }
-                if (((vMapPos.x | vMapPos.y | vMapPos.z) & ~BIT_MASK) != 0) break;
             }
         }
         cMask = (cSideDist.x < cSideDist.y) ? ((cSideDist.x < cSideDist.z) ? vec3(1,0,0) : vec3(0,0,1)) : ((cSideDist.y < cSideDist.z) ? vec3(0,1,0) : vec3(0,0,1));
@@ -192,12 +231,11 @@ bool TraceStaticRay(vec3 ro, vec3 rd, float maxDist, float tStart, inout float t
     }
     return false;
 }
-
 bool TraceStaticRay(vec3 ro, vec3 rd, float maxDist, float tStart, inout float tHit, inout uint matID, inout vec3 normal) {
     int d = 0; return TraceStaticRay(ro, rd, maxDist, tStart, tHit, matID, normal, d);
 }
 
-// Также обновляем TraceShadowRay, чтобы он использовал GetVoxelData
+// === 5. ТЕНИ / ВОДА ===
 bool TraceShadowRay(vec3 ro, vec3 rd, float maxDist, inout float tHit, inout uint matID) {
     vec3 pStart = ro + rd * 0.001;
     ivec3 cMapPos = ivec3(floor(pStart / float(CHUNK_SIZE)));
@@ -211,7 +249,6 @@ bool TraceShadowRay(vec3 ro, vec3 rd, float maxDist, inout float tHit, inout uin
     cSideDist *= abs(1.0 / rd);
     vec3 cMask = vec3(0);
     float tCurrentRel = 0.0;
-
     ivec3 bMin = ivec3(uBoundMinX, uBoundMinY, uBoundMinZ);
     ivec3 bMax = ivec3(uBoundMaxX, uBoundMaxY, uBoundMaxZ);
 
@@ -220,17 +257,12 @@ bool TraceShadowRay(vec3 ro, vec3 rd, float maxDist, inout float tHit, inout uin
         if (any(lessThan(cMapPos, bMin)) || any(greaterThanEqual(cMapPos, bMax))) break;
 
         uint chunkSlot = imageLoad(uPageTable, cMapPos & (PAGE_TABLE_SIZE - 1)).r;
-
         if (chunkSlot != 0xFFFFFFFFu) {
-            // Маски всегда лежат в Binding 5 (MaskSSBO), тут смещение не менялось
             uint maskBaseOffset = chunkSlot * (uint(BLOCKS_PER_AXIS)*uint(BLOCKS_PER_AXIS)*uint(BLOCKS_PER_AXIS));
-
             vec3 chunkOrigin = vec3(cMapPos) * float(CHUNK_SIZE);
             vec3 pLocal = clamp((pStart + rd * tCurrentRel) - chunkOrigin, 0.0, float(CHUNK_SIZE) - 0.0001);
             vec3 pVoxel = pLocal * VOXELS_PER_METER;
             ivec3 vMapPos = ivec3(floor(pVoxel));
-
-            // Логика DDA внутри чанка
             vec3 vDeltaDist = abs(1.0 / rd);
             vec3 vSideDist;
             vSideDist.x = (rd.x > 0.0) ? (float(vMapPos.x + 1) - pVoxel.x) : (pVoxel.x - float(vMapPos.x));
@@ -241,40 +273,31 @@ bool TraceShadowRay(vec3 ro, vec3 rd, float maxDist, inout float tHit, inout uin
 
             for(int sanity = 0; sanity < 512; sanity++) {
                 if (((vMapPos.x | vMapPos.y | vMapPos.z) & ~BIT_MASK) != 0) break;
-
                 ivec3 bMapPos = vMapPos / BLOCK_SIZE;
                 int blockIdx = bMapPos.x + BLOCKS_PER_AXIS * (bMapPos.y + BLOCKS_PER_AXIS * bMapPos.z);
                 uvec2 maskVal = packedMasks[maskBaseOffset + blockIdx];
 
                 if (maskVal.x == 0u && maskVal.y == 0u) {
-                    // Пустой блок 4x4x4 - пропускаем
                     for(int s=0; s<64; s++) {
                         vMask = (vSideDist.x < vSideDist.y) ? ((vSideDist.x < vSideDist.z) ? vec3(1,0,0) : vec3(0,0,1)) : ((vSideDist.y < vSideDist.z) ? vec3(0,1,0) : vec3(0,0,1));
                         vSideDist += vMask * vDeltaDist;
                         vMapPos += ivec3(vMask) * cStepDir;
                         if (vMapPos / BLOCK_SIZE != bMapPos) break;
-                        if (((vMapPos.x | vMapPos.y | vMapPos.z) & ~BIT_MASK) != 0) { break; }
+                        if (((vMapPos.x | vMapPos.y | vMapPos.z) & ~BIT_MASK) != 0) break;
                     }
                 }
                 else {
-                    // Есть воксели - проверяем побитово
                     for(int s=0; s<64; s++) {
                         int lx = vMapPos.x % BLOCK_SIZE;
                         int ly = vMapPos.y % BLOCK_SIZE;
                         int lz = vMapPos.z % BLOCK_SIZE;
                         int bitIdx = lx + BLOCK_SIZE * (ly + BLOCK_SIZE * lz);
-
-                        bool hasVoxel = (bitIdx < 32)
-                        ? ((maskVal.x & (1u << bitIdx)) != 0u)
-                        : ((maskVal.y & (1u << (bitIdx - 32))) != 0u);
-
+                        bool hasVoxel = (bitIdx < 32) ? ((maskVal.x & (1u << bitIdx)) != 0u) : ((maskVal.y & (1u << (bitIdx - 32))) != 0u);
                         if (hasVoxel) {
                             int idx = vMapPos.x + VOXEL_RESOLUTION * (vMapPos.y + VOXEL_RESOLUTION * vMapPos.z);
-
-                            // !!! ВАЖНО: ИСПОЛЬЗУЕМ GetVoxelData ВМЕСТО packedVoxels[] !!!
+                            // ИСПОЛЬЗУЕМ GetVoxelData
                             uint m = GetVoxelData(chunkSlot, idx);
-
-                            // ID 0 = воздух, ID 4 = вода (вода обычно не отбрасывает жесткую тень)
+                            // ID 4 = Вода
                             if (m != 0u && m != 4u) {
                                 float tRelVoxel = (length(vMask) > 0.5) ? dot(vMask, vSideDist - vDeltaDist) : 0.0;
                                 tHit = tCurrentRel + (tRelVoxel / VOXELS_PER_METER);
@@ -282,18 +305,16 @@ bool TraceShadowRay(vec3 ro, vec3 rd, float maxDist, inout float tHit, inout uin
                                 return true;
                             }
                         }
-
                         vMask = (vSideDist.x < vSideDist.y) ? ((vSideDist.x < vSideDist.z) ? vec3(1,0,0) : vec3(0,0,1)) : ((vSideDist.y < vSideDist.z) ? vec3(0,1,0) : vec3(0,0,1));
                         vSideDist += vMask * vDeltaDist;
                         vMapPos += ivec3(vMask) * cStepDir;
                         if (vMapPos / BLOCK_SIZE != bMapPos) break;
-                        if (((vMapPos.x | vMapPos.y | vMapPos.z) & ~BIT_MASK) != 0) { break; }
+                        if (((vMapPos.x | vMapPos.y | vMapPos.z) & ~BIT_MASK) != 0) break;
                     }
                 }
                 if (((vMapPos.x | vMapPos.y | vMapPos.z) & ~BIT_MASK) != 0) break;
             }
         }
-
         cMask = (cSideDist.x < cSideDist.y) ? ((cSideDist.x < cSideDist.z) ? vec3(1,0,0) : vec3(0,0,1)) : ((cSideDist.y < cSideDist.z) ? vec3(0,1,0) : vec3(0,0,1));
         cSideDist += cMask * cDeltaDist;
         cMapPos += ivec3(cMask) * cStepDir;

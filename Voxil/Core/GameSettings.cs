@@ -17,7 +17,7 @@ public static class GameSettings
     public static int GpuUploadSpeed = 2000;
     
     // Кол-во потоков генерации мира (Bepu).
-    public static int GenerationThreads = 2;
+    public static int GenerationThreads = 1;
     
     // Кол-во потоков физики (Bepu). 
     public static int PhysicsThreads = 1;

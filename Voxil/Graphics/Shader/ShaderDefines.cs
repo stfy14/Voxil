@@ -19,7 +19,7 @@ public static class ShaderDefines
        #define BIT_SHIFT {Constants.BitShift}
        #define BIT_MASK {Constants.BitMask}
        #define HARD_SHADOW_STEPS {hardSteps}
-       #define SOFT_SHADOW_STEPS 32
+       #define SOFT_SHADOW_STEPS 8
     ");
 
         // Вставляем настройки пользователя
