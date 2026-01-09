@@ -4,24 +4,23 @@ using System.Collections.Generic;
 public class ShaderSystem : IDisposable
 {
     public Shader RaycastShader { get; private set; }
-    
-    // Событие, чтобы уведомить рендерер о том, что шейдер изменился (например, поменялись ID uniform-ов)
     public event Action OnShaderReloaded;
 
     public void Compile(int voxelBanksCount)
     {
-        // Удаляем старый, если был
         RaycastShader?.Dispose();
-
         var defines = new List<string>();
 
-        // 1. Критически важные системные настройки
+        // 1. Системные
         defines.Add($"VOXEL_BANKS {voxelBanksCount}");
 
-        // 2. Графические настройки
+        // 2. Настройки графики
         if (GameSettings.UseProceduralWater) defines.Add("WATER_MODE_PROCEDURAL");
         if (GameSettings.EnableAO) defines.Add("ENABLE_AO");
+        
+        // --- ВАЖНЫЙ ФИКС: ДОБАВЛЕНА ПЕРЕДАЧА НАСТРОЙКИ ПРОЗРАЧНОСТИ ---
         if (GameSettings.EnableWaterTransparency) defines.Add("ENABLE_WATER_TRANSPARENCY");
+        
         if (GameSettings.BeamOptimization) defines.Add("ENABLE_BEAM_OPTIMIZATION");
 
         switch (GameSettings.CurrentShadowMode)
@@ -30,7 +29,7 @@ public class ShaderSystem : IDisposable
             case ShadowMode.Soft: defines.Add("SHADOW_MODE_SOFT"); break;
         }
 
-        Console.WriteLine($"[ShaderSystem] Compiling with {voxelBanksCount} banks...");
+        Console.WriteLine($"[ShaderSystem] Compiling with defines: {string.Join(", ", defines)}");
 
         try
         {
@@ -40,7 +39,6 @@ public class ShaderSystem : IDisposable
         catch (Exception ex)
         {
             Console.WriteLine($"[ShaderSystem] CRITICAL ERROR: {ex.Message}");
-            // Здесь можно загрузить "розовый" фоллбэк-шейдер, чтобы игра не крашилась
         }
     }
 
