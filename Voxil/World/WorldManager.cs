@@ -91,15 +91,19 @@ public class WorldManager : IDisposable
     {
         ClearAndStopWorld();
 
-        // Перезапускаем все с нуля
         Console.WriteLine("[World] Restarting scheduler...");
+    
+        // Сбрасываем позицию игрока, чтобы форсировать перезагрузку
         lock (_playerPosLock)
         {
             _currentPlayerChunkPos = new(int.MaxValue);
             _positionChangedDirty = true;
         }
     
+        // Пересоздаем токен отмены
         _schedulerCts = new CancellationTokenSource();
+    
+        // Запускаем новый поток планировщика
         _schedulerThread = new Thread(SchedulerLoop)
         {
             IsBackground = true,
@@ -107,50 +111,64 @@ public class WorldManager : IDisposable
             Priority = ThreadPriority.AboveNormal
         };
         _schedulerThread.Start();
+    
+        Console.WriteLine("[World] Scheduler restarted.");
     }
     
     // ДОБАВЬ ЭТОТ НОВЫЙ МЕТОД В WorldManager.cs
+    
     public void ClearAndStopWorld()
     {
         Console.WriteLine("[World] Stopping and clearing world state...");
 
-        // 1. Останавливаем всю фоновую работу
+        // 1. СНАЧАЛА останавливаем фоновый поток
         _schedulerCts.Cancel();
         if (_schedulerThread != null && _schedulerThread.IsAlive)
         {
-            _schedulerThread.Join();
+            _schedulerThread.Join(1000); // Даем 1 секунду на завершение
         }
 
-        // 2. Вычищаем все асинхронные очереди
+        // 2. Чистим все асинхронные очереди
         _chunkGenerator.ClearQueue();
         _physicsBuilder.Clear();
+    
+        // 3. Освобождаем все возвращаемые массивы из генератора
         while (_chunkGenerator.TryGetResult(out var result)) 
         {
-            if(result.Voxels != null) System.Buffers.ArrayPool<MaterialType>.Shared.Return(result.Voxels);
+            if(result.Voxels != null) 
+                System.Buffers.ArrayPool<MaterialType>.Shared.Return(result.Voxels);
         }
+    
+        // 4. Чистим результаты физики
         while (_physicsBuilder.TryGetResult(out _)) { }
+    
+        // 5. Чистим очередь выгрузки
         while (_unloadQueue.TryDequeue(out _)) { }
 
-        // 3. ГРАМОТНО выгружаем чанки, чтобы рендерер получил уведомления
+        // 6. ВАЖНО: Выгружаем чанки с уведомлением рендерера
         lock (_chunksLock)
         {
             if (_chunks.Count > 0)
             {
+                Console.WriteLine($"[World] Unloading {_chunks.Count} chunks...");
                 var keysToUnload = new List<Vector3i>(_chunks.Keys);
                 foreach (var pos in keysToUnload)
                 {
-                    UnloadChunk(pos);
+                    UnloadChunk(pos); // Это вызовет OnChunkUnloaded
                 }
             }
         }
     
-        // 4. Очищаем все CPU-данные
+        // 7. Финальная очистка CPU-данных
         lock (_chunksLock)
         {
             _chunks.Clear();
             _chunksInProgress.Clear();
             _staticToChunkMap.Clear();
+            _bodyToVoxelObjectMap.Clear();
         }
+    
+        Console.WriteLine("[World] World cleared.");
     }
 
     public void Update(float deltaTime)

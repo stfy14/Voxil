@@ -35,6 +35,10 @@ public class Game : GameWindow
     private SettingsWindow _settingsWindow;
     private MainMenuWindow _mainMenuWindow;
     private DebugStatsWindow _debugStatsWindow;
+    
+    private int _reallocationDelayFrames;
+    
+    
 
     public Game(GameWindowSettings gameWindowSettings, NativeWindowSettings nativeWindowSettings)
         : base(gameWindowSettings, nativeWindowSettings)
@@ -95,41 +99,49 @@ public class Game : GameWindow
         Console.WriteLine("[Game] Initialization Complete.");
     }
 
-    protected override void OnUpdateFrame(FrameEventArgs e)
+protected override void OnUpdateFrame(FrameEventArgs e)
 {
     base.OnUpdateFrame(e);
     if (!_isInitialized) return;
 
-    // =========================================================================
-    // === НАЧАЛО ИЗМЕНЕНИЙ: ДВУХКАДРОВАЯ ПЕРЕЗАГРУЗКА ========================
-    // =========================================================================
-    // Проверяем, не была ли в прошлом кадре запрошена перезагрузка ресурсов.
-    // Это вторая фаза нашего плана, которая выполняется в следующем кадре,
-    // чтобы дать драйверу время освободить память.
-    if (_renderer.IsReallocationPending())
-    {
-        // 1. Физически пересоздаем буферы на GPU с новым размером.
-        _renderer.PerformReallocation();
-
-        // 2. Теперь, когда рендерер готов, перезапускаем WorldManager,
-        // чтобы он начал загружать чанки в новые, чистые буферы.
-        _worldManager.ReloadWorld();
-    }
-    // =========================================================================
-    // === КОНЕЦ ИЗМЕНЕНИЙ =====================================================
-    // =========================================================================
-
+    // 1. ОБЪЯВЛЯЕМ DELTATIME ОДИН РАЗ В САМОМ НАЧАЛЕ
     float deltaTime = (float)e.Time;
 
-    // 1. Обновление UI
+    // 2. СНАЧАЛА ОБНОВЛЯЕМ UI (Здесь вызывается ImGui.NewFrame)
     _uiManager.Update(this, deltaTime);
 
-    // 2. Логика состояния курсора (ИСПРАВЛЕНА)
+    // =========================================================================
+    // === ЛОГИКА ПЕРЕЗАГРУЗКИ (Вставляем ПОСЛЕ UI)
+    // =========================================================================
+    if (_renderer.IsReallocationPending())
+    {
+        _reallocationDelayFrames++;
+        
+        // Ждем 3 кадра
+        if (_reallocationDelayFrames >= 3)
+        {
+            _renderer.PerformReallocation();
+            _worldManager.ReloadWorld();
+            _renderer.ReloadShader(); // Обновляем шейдеры
+            
+            _reallocationDelayFrames = 0;
+            Console.WriteLine("[Game] Reallocation completed.");
+            
+            GC.Collect();
+        }
+        else
+        {
+            // Прерываем обновление игры, но UI уже отрисован (см. пункт 2)
+            return; 
+        }
+    }
+    // =========================================================================
+
+    // 3. Логика состояния курсора
     bool isMenuOpen = _mainMenuWindow.IsVisible || _settingsWindow.IsVisible;
 
     if (isMenuOpen)
     {
-        // Если меню открыто, курсор должен быть обычным
         if (CursorState != CursorState.Normal)
         {
             CursorState = CursorState.Normal;
@@ -137,27 +149,23 @@ public class Game : GameWindow
     }
     else
     {
-        // Если меню закрыто, курсор должен быть захвачен
         if (CursorState != CursorState.Grabbed)
         {
             CursorState = CursorState.Grabbed;
-            // Сбрасываем дельту ТОЛЬКО ОДИН РАЗ в момент захвата,
-            // чтобы камеру не дернуло.
             _input.ResetMouseDelta(); 
         }
     }
 
-    // 3. Ввод
+    // 4. Ввод
     _input.Update(KeyboardState, MouseState);
 
-    // Escape: Тоглим меню
     if (_input.IsKeyPressed(Keys.Escape))
     {
         if (_settingsWindow.IsVisible) _settingsWindow.Toggle();
         else _mainMenuWindow.Toggle();
     }
 
-    // 4. Игровой процесс (только если меню закрыто)
+    // 5. Игровой процесс (только если меню закрыто)
     if (!isMenuOpen)
     {
         if (_input.IsKeyPressed(Keys.F3))
@@ -172,7 +180,7 @@ public class Game : GameWindow
         }
 
         _testManager.Update(deltaTime, _input);
-        _playerController.Update(_input, deltaTime); // Камера двигается здесь
+        _playerController.Update(_input, deltaTime);
         
         if (_input.IsMouseButtonPressed(MouseButton.Left)) 
         {
@@ -180,15 +188,19 @@ public class Game : GameWindow
         }
     }
 
-    // 5. Обновление мира
-    _worldManager.Update(deltaTime);
-    _physicsWorld.Update(deltaTime);
-    _renderer.Update(deltaTime);
+    // 6. Обновление мира (только если НЕ в процессе перезагрузки)
+    // Так как выше стоит return, дополнительная проверка тут не обязательна, но и не мешает
+    if (!_renderer.IsReallocationPending())
+    {
+        _worldManager.Update(deltaTime);
+        _physicsWorld.Update(deltaTime);
+        _renderer.Update(deltaTime);
+    }
 
-    // 6. Дебаг текст
+    // 7. Дебаг текст
     UpdateDebugStats(deltaTime);
 }
-
+    
     private void UpdateDebugStats(float deltaTime)
     {
         if (!_debugStatsWindow.IsVisible || !PerformanceMonitor.IsEnabled) return;

@@ -110,22 +110,31 @@ public class GpuRaycastingRenderer : IDisposable
     public void RequestReallocation()
     {
         Console.WriteLine("[Renderer] Reallocation requested. Cleaning up old buffers...");
-        CleanupBuffers(); // Просто удаляем все и ничего не создаем
+        CleanupBuffers(); // Удаляем старые буферы
+    
+        // КРИТИЧЕСКИ ВАЖНО: Принудительная очистка памяти
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        GC.Collect();
+    
+        Console.WriteLine("[Renderer] Garbage collection completed. Waiting for GPU driver...");
         _reallocationPending = true;
+        _currentCapacity = 0;
     }
 
     // НОВЫЙ МЕТОД: Возвращает состояние флага
     public bool IsReallocationPending() => _reallocationPending;
-
-    // НОВЫЙ МЕТОД: Выполняет вторую фазу - создание
+    
     public void PerformReallocation()
     {
         if (!_reallocationPending) return;
 
         Console.WriteLine("[Renderer] Performing reallocation of new buffers...");
-        InitializeBuffers(); // Теперь создаем новые буферы
+        InitializeBuffers(); // Создаем новые буферы с правильным размером
         ReloadShader();
         _reallocationPending = false;
+    
+        Console.WriteLine($"[Renderer] Reallocation complete. New capacity: {_currentCapacity}");
     }
 
     public long CalculateMemoryBytesForDistance(int distance)
@@ -144,150 +153,99 @@ public class GpuRaycastingRenderer : IDisposable
 
 public void InitializeBuffers()
 {
-    ClearGlErrors();
-
-    // 1. Считаем сколько реально нужно чанков для текущей дистанции
+    // 1. Считаем нужный размер
     int dist = Math.Max(GameSettings.RenderDistance, 4);
-    int maxDist = dist + 2; 
+    int maxDist = dist + 2;
     int requestedChunks = (maxDist * 2 + 1) * (maxDist * 2 + 1) * WorldManager.WorldHeightChunks;
 
-    // 2. Рассчитываем размер одного чанка (Воксели + Маски)
-    long bytesPerChunkVoxel = PackedChunkSizeInInts * 4;
-    long bytesPerChunkMask = ChunkMaskSizeInUlongs * 8;
-    long totalBytesPerChunk = bytesPerChunkVoxel + bytesPerChunkMask;
+    Console.WriteLine($"[Renderer] InitializeBuffers called. Requested: {requestedChunks}, Current: {_currentCapacity}");
 
-    // 3. Проверяем доступную VRAM (оставляем резерв системе)
-    long totalVramBytes = (long)TotalVramMb * 1024 * 1024;
-    long systemReserved = 1024L * 1024 * 1024; // Уменьшим резерв до 1ГБ, если памяти мало
-    if (TotalVramMb > 8000) systemReserved = 2048L * 1024 * 1024; // Для мощных карт резерв больше
-
-    long availableForChunks = Math.Max(512 * 1024 * 1024, totalVramBytes - systemReserved);
-    int maxPossibleChunksByVram = (int)(availableForChunks / totalBytesPerChunk);
-
-    // 4. ЛИМИТЫ БУФЕРА
-    // Стандартный лимит OpenGL драйверов часто около 2GB (int.MaxValue) или 4GB (uint.MaxValue).
-    // Попробуем разрешить выделение вплоть до физического лимита VRAM, 
-    // но если драйвер выкинет ошибку, поймаем это в try-catch.
-    
-    // Индексация в шейдере обычно идет через int/uint. 
-    // Максимальное кол-во uint элементов = uint.MaxValue (4GB данных, если stride=1 байт, или 16GB если stride=4 байта).
-    // Так как мы адресуем массив uint[], теоретический потолок шейдера ~16ГБ.
-    long maxAddressable = (long)int.MaxValue; // Безопасный предел для индексации (около 2 млрд чанков * размер - это много)
-    
-    // Итоговая емкость: берем столько, сколько просит игра, но не больше, чем влезает в VRAM
-    int finalCapacity = Math.Min(requestedChunks, maxPossibleChunksByVram);
-
-    Console.WriteLine($"[Renderer] Req: {requestedChunks}. VramCap: {maxPossibleChunksByVram}. Final: {finalCapacity}");
-
-    // --- ИСПРАВЛЕНИЕ 1: Логика повторного использования ---
-    // Мы пересоздаем буферы, если:
-    // 1. Их еще нет (_voxelSsbo == 0)
-    // 2. Требуемый размер БОЛЬШЕ текущего (нужно расширить)
-    // 3. Требуемый размер ЗНАЧИТЕЛЬНО МЕНЬШЕ текущего (например, на 20%, чтобы освободить память)
-    // Если же разница небольшая, оставляем как есть, чтобы не дергать память при мелких изменениях.
-    
-    bool needRealloc = (_voxelSsbo == 0);
-    
-    if (!needRealloc)
+    // 2. Если размер не изменился И буферы уже созданы, не делаем ничего
+    if (_voxelSsbo != 0 && _currentCapacity == requestedChunks)
     {
-        if (finalCapacity > _currentCapacity) 
-        {
-            needRealloc = true; // Нужно больше места
-        }
-        else if (finalCapacity < _currentCapacity * 0.8f) 
-        {
-            needRealloc = true; // Мы используем менее 80% выделенного, давайте ужмемся
-        }
-    }
-
-    if (!needRealloc)
-    {
-        Console.WriteLine($"[Renderer] Reusing buffers. Cap: {_currentCapacity}, Req: {finalCapacity}");
-        ResetAllocationLogic(_currentCapacity); // Просто сбрасываем данные, но не перевыделяем память
-        return; 
-    }
-
-    // --- ПОЛНАЯ ПЕРЕСТРОЙКА ---
-    Console.WriteLine($"[Renderer] Reallocating buffers to {finalCapacity} chunks...");
-    
-    CleanupBuffers();
-    GL.Finish(); 
-    GC.Collect();
-    GC.WaitForPendingFinalizers();
-
-    // Создаем текстуру таблицы страниц
-    _pageTableTexture = GL.GenTexture();
-    GL.BindTexture(TextureTarget.Texture3D, _pageTableTexture);
-    GL.TexImage3D(TextureTarget.Texture3D, 0, PixelInternalFormat.R32ui, PT_X, PT_Y, PT_Z, 0, PixelFormat.RedInteger, PixelType.UnsignedInt, _cpuPageTable);
-    // ... параметры текстуры (фильтрация и т.д. как было) ...
-    GL.TexParameter(TextureTarget.Texture3D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Nearest);
-    GL.TexParameter(TextureTarget.Texture3D, TextureParameterName.TextureMagFilter, (int)TextureMinFilter.Nearest);
-    
-    // --- ИСПРАВЛЕНИЕ 2: Попытка выделить большую память с откатом ---
-    bool allocationSuccess = false;
-    int attemptCapacity = finalCapacity;
-
-    while (!allocationSuccess && attemptCapacity > 100)
-    {
-        try 
-        { 
-            long vBytes = (long)attemptCapacity * bytesPerChunkVoxel;
-            long mBytes = (long)attemptCapacity * bytesPerChunkMask;
-
-            // Проверка на жесткий лимит драйвера (подстраховка)
-            // Если мы пытаемся выделить > 2GB одним куском, C# враппер может кинуть ошибку, 
-            // либо OpenGL вернет OutOfMemory.
-            Console.WriteLine($"[Renderer] Trying alloc: Voxels={(vBytes/1024.0/1024.0):F2} MB");
-
-            _voxelSsbo = GL.GenBuffer();
-            GL.BindBuffer(BufferTarget.ShaderStorageBuffer, _voxelSsbo);
-            GL.BufferData(BufferTarget.ShaderStorageBuffer, (IntPtr)vBytes, IntPtr.Zero, BufferUsageHint.DynamicDraw); 
-            GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 1, _voxelSsbo);
-            
-            var err = GL.GetError();
-            if (err != ErrorCode.NoError) throw new Exception($"GL Error VoxelAlloc: {err}");
-
-            _maskSsbo = GL.GenBuffer();
-            GL.BindBuffer(BufferTarget.ShaderStorageBuffer, _maskSsbo);
-            GL.BufferData(BufferTarget.ShaderStorageBuffer, (IntPtr)mBytes, IntPtr.Zero, BufferUsageHint.DynamicDraw);
-            GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 5, _maskSsbo);
-
-            err = GL.GetError();
-            if (err != ErrorCode.NoError) throw new Exception($"GL Error MaskAlloc: {err}");
-
-            // Если дошли сюда - успех
-            allocationSuccess = true;
-            _currentCapacity = attemptCapacity;
-            CurrentAllocatedBytes = vBytes + mBytes;
-            Console.WriteLine($"[Renderer] Success! Allocated {(CurrentAllocatedBytes/1024/1024)} MB");
-        }
-        catch (Exception ex) 
-        { 
-            Console.WriteLine($"[WARNING] Allocation failed for {attemptCapacity} chunks: {ex.Message}");
-            
-            // Очищаем то, что успели создать криво
-            if (_voxelSsbo != 0) { GL.DeleteBuffer(_voxelSsbo); _voxelSsbo = 0; }
-            if (_maskSsbo != 0) { GL.DeleteBuffer(_maskSsbo); _maskSsbo = 0; }
-            ClearGlErrors();
-
-            // Уменьшаем аппетиты. 
-            // Если упали на >4GB, пробуем спуститься до безопасных 3.5GB (~100.000 чанков макс для 32KB чанка)
-            // Или просто делим пополам.
-            if (attemptCapacity > 110000) attemptCapacity = 110000; // Попытка упасть до ~3.5GB
-            else attemptCapacity = (int)(attemptCapacity * 0.75f); // Иначе просто уменьшаем на 25%
-        }
-    }
-
-    if (!allocationSuccess)
-    {
-        Console.WriteLine("[FATAL] Could not allocate GPU memory even for minimal settings.");
-        _currentCapacity = 0;
+        Console.WriteLine($"[Renderer] Buffer size matches. No reallocation needed.");
         return;
     }
 
+    // 3. Расчет памяти
+    long bytesPerChunkVoxel = PackedChunkSizeInInts * 4;
+    long bytesPerChunkMask = ChunkMaskSizeInUlongs * 8;
+    int finalCapacity = requestedChunks;
+    
+    long vBytes = (long)finalCapacity * bytesPerChunkVoxel;
+    long mBytes = (long)finalCapacity * bytesPerChunkMask;
+    long totalMB = (vBytes + mBytes) / 1024 / 1024;
+
+    Console.WriteLine($"[Renderer] Target memory: {totalMB} MB ({finalCapacity} chunks)");
+
+    // 4. Если хендлы еще не созданы (первый запуск)
+    if (_voxelSsbo == 0)
+    {
+        Console.WriteLine("[Renderer] First-time allocation. Creating GPU objects...");
+        _voxelSsbo = GL.GenBuffer();
+        _maskSsbo = GL.GenBuffer();
+        _pageTableTexture = GL.GenTexture();
+        
+        Console.WriteLine($"[Renderer] Created: VoxelSSBO={_voxelSsbo}, MaskSSBO={_maskSsbo}, PageTable={_pageTableTexture}");
+        
+        CreateAuxBuffers();
+    }
+    else
+    {
+        Console.WriteLine("[Renderer] Reusing existing GPU object handles.");
+    }
+
+    // 5. Обновляем capacity
+    _currentCapacity = finalCapacity;
+    CurrentAllocatedBytes = vBytes + mBytes;
+
+    // 6. Переопределяем VOXEL SSBO
+    Console.WriteLine($"[Renderer] Allocating Voxel SSBO: {(vBytes / 1024.0 / 1024.0):F2} MB");
+    GL.BindBuffer(BufferTarget.ShaderStorageBuffer, _voxelSsbo);
+    GL.BufferData(BufferTarget.ShaderStorageBuffer, (IntPtr)vBytes, IntPtr.Zero, BufferUsageHint.DynamicDraw);
+    
+    // Проверка ошибок
+    ErrorCode err = GL.GetError();
+    if (err != ErrorCode.NoError)
+    {
+        Console.WriteLine($"[Renderer] ERROR allocating Voxel SSBO: {err}");
+    }
+    
+    GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 1, _voxelSsbo);
+
+    // 7. Переопределяем MASK SSBO
+    Console.WriteLine($"[Renderer] Allocating Mask SSBO: {(mBytes / 1024.0 / 1024.0):F2} MB");
+    GL.BindBuffer(BufferTarget.ShaderStorageBuffer, _maskSsbo);
+    GL.BufferData(BufferTarget.ShaderStorageBuffer, (IntPtr)mBytes, IntPtr.Zero, BufferUsageHint.DynamicDraw);
+    
+    err = GL.GetError();
+    if (err != ErrorCode.NoError)
+    {
+        Console.WriteLine($"[Renderer] ERROR allocating Mask SSBO: {err}");
+    }
+    
+    GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 5, _maskSsbo);
+
+    // 8. Переопределяем текстуру таблицы страниц
+    Console.WriteLine("[Renderer] Updating PageTable texture...");
+    GL.BindTexture(TextureTarget.Texture3D, _pageTableTexture);
+    GL.TexImage3D(TextureTarget.Texture3D, 0, PixelInternalFormat.R32ui, PT_X, PT_Y, PT_Z, 0, 
+                  PixelFormat.RedInteger, PixelType.UnsignedInt, _cpuPageTable);
+    
+    GL.TexParameter(TextureTarget.Texture3D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Nearest);
+    GL.TexParameter(TextureTarget.Texture3D, TextureParameterName.TextureMagFilter, (int)TextureMinFilter.Nearest);
+    GL.TexParameter(TextureTarget.Texture3D, TextureParameterName.TextureWrapS, (int)TextureWrapMode.ClampToEdge);
+    GL.TexParameter(TextureTarget.Texture3D, TextureParameterName.TextureWrapT, (int)TextureWrapMode.ClampToEdge);
+    GL.TexParameter(TextureTarget.Texture3D, TextureParameterName.TextureWrapR, (int)TextureWrapMode.ClampToEdge);
+    
+    // 9. Flush для применения изменений
+    GL.Flush();
+    
+    // 10. Сбрасываем CPU-состояние
     ResetAllocationLogic(_currentCapacity);
-    CreateAuxBuffers();
     _pageTableDirty = true;
+    
+    Console.WriteLine($"[Renderer] Buffer initialization complete. Final capacity: {_currentCapacity}");
 }
 
     private void ResetAllocationLogic(int capacity)
@@ -331,54 +289,119 @@ public void InitializeBuffers()
     }
 
     private void CleanupBuffers()
-        {
-        // 1. Сброс основного состояния OpenGL
-        GL.UseProgram(0);
-        GL.BindVertexArray(0);
-        GL.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
+{
+    Console.WriteLine("[Renderer] Starting buffer cleanup...");
+    
+    // 1. Сброс основного состояния OpenGL
+    GL.UseProgram(0);
+    GL.BindVertexArray(0);
+    GL.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
 
-        // 2. Отвязываем все текстуры от всех известных юнитов
-        // Пройдемся по нескольким юнитам на всякий случай
-        for (int i = 0; i < 8; i++) // 8 юнитов - обычно более чем достаточно
-        {
-            GL.ActiveTexture(TextureUnit.Texture0 + i);
-            GL.BindTexture(TextureTarget.Texture2D, 0);
-            GL.BindTexture(TextureTarget.Texture3D, 0);
-        }
-        
-        // 3. ЯВНО отвязываем буферы от ИНДЕКСИРОВАННЫХ слотов (биндингов)
-        GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 1, 0); // _voxelSsbo
-        GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 2, 0); // _dynamicObjectsBuffer
-        GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 3, 0); // _linkedListSsbo
-        GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 5, 0); // _maskSsbo
-        GL.BindBufferBase(BufferRangeTarget.AtomicCounterBuffer, 4, 0); // _atomicCounterBuffer
-
-        // 4. ЯВНО отвязываем текстуры от слотов IMAGE
-        GL.BindImageTexture(0, 0, 0, false, 0, TextureAccess.ReadOnly, SizedInternalFormat.R32ui); // _pageTableTexture
-        GL.BindImageTexture(1, 0, 0, false, 0, TextureAccess.ReadOnly, SizedInternalFormat.R32i); // _gridHeadTexture
-
-        // 5. Теперь, когда все отвязано, удаляем сами объекты
-        if (_pageTableTexture != 0) GL.DeleteTexture(_pageTableTexture);
-        if (_voxelSsbo != 0) GL.DeleteBuffer(_voxelSsbo);
-        if (_maskSsbo != 0) GL.DeleteBuffer(_maskSsbo);
-        
-        if (_gridHeadTexture != 0) GL.DeleteTexture(_gridHeadTexture);
-        if (_linkedListSsbo != 0) GL.DeleteBuffer(_linkedListSsbo);
-        if (_atomicCounterBuffer != 0) GL.DeleteBuffer(_atomicCounterBuffer);
-        if (_dynamicObjectsBuffer != 0) GL.DeleteBuffer(_dynamicObjectsBuffer);
-        if (_beamFbo != 0) GL.DeleteFramebuffer(_beamFbo);
-        if (_beamTexture != 0) GL.DeleteTexture(_beamTexture);
-
-        // 6. Сбрасываем наши хендлы в C#
-        _pageTableTexture = 0; _voxelSsbo = 0; _maskSsbo = 0;
-        _gridHeadTexture = 0; _linkedListSsbo = 0; _atomicCounterBuffer = 0; _dynamicObjectsBuffer = 0; _beamFbo = 0; _beamTexture = 0;
-        
-        CurrentAllocatedBytes = 0;
-        _currentCapacity = 0;
-
-        // 7. Ждем, пока GPU обработает все команды отвязки и удаления.
-        GL.Finish(); 
+    // 2. Отвязываем все текстуры от всех юнитов
+    for (int i = 0; i < 16; i++) // 16 юнитов для надежности
+    {
+        GL.ActiveTexture(TextureUnit.Texture0 + i);
+        GL.BindTexture(TextureTarget.Texture2D, 0);
+        GL.BindTexture(TextureTarget.Texture3D, 0);
     }
+    
+    // 3. КРИТИЧЕСКИ ВАЖНО: Отвязываем все SSBO
+    for (int i = 0; i < 8; i++)
+    {
+        GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, i, 0);
+    }
+    
+    // 4. Отвязываем Atomic Counter Buffer
+    GL.BindBufferBase(BufferRangeTarget.AtomicCounterBuffer, 4, 0);
+    
+    // 5. Отвязываем Image Units
+    for (int i = 0; i < 8; i++)
+    {
+        GL.BindImageTexture(i, 0, 0, false, 0, TextureAccess.ReadOnly, SizedInternalFormat.R8);
+    }
+    
+    // 6. ДОПОЛНИТЕЛЬНО: Отвязываем буферы от таргетов
+    GL.BindBuffer(BufferTarget.ShaderStorageBuffer, 0);
+    GL.BindBuffer(BufferTarget.AtomicCounterBuffer, 0);
+    GL.BindBuffer(BufferTarget.ArrayBuffer, 0);
+    GL.BindBuffer(BufferTarget.ElementArrayBuffer, 0);
+    
+    // 7. Сбрасываем текущую активную текстуру
+    GL.ActiveTexture(TextureUnit.Texture0);
+    
+    // 8. ВАЖНО: Flush + Finish перед удалением
+    GL.Flush();
+    GL.Finish();
+    
+    Console.WriteLine("[Renderer] OpenGL state reset. Deleting GPU objects...");
+
+    // 9. Теперь удаляем объекты (ОСНОВНЫЕ БУФЕРЫ)
+    if (_pageTableTexture != 0)
+    {
+        Console.WriteLine($"[Renderer] Deleting PageTable texture (ID: {_pageTableTexture})");
+        GL.DeleteTexture(_pageTableTexture);
+        _pageTableTexture = 0;
+    }
+    
+    if (_voxelSsbo != 0)
+    {
+        Console.WriteLine($"[Renderer] Deleting Voxel SSBO (ID: {_voxelSsbo})");
+        GL.DeleteBuffer(_voxelSsbo);
+        _voxelSsbo = 0;
+    }
+    
+    if (_maskSsbo != 0)
+    {
+        Console.WriteLine($"[Renderer] Deleting Mask SSBO (ID: {_maskSsbo})");
+        GL.DeleteBuffer(_maskSsbo);
+        _maskSsbo = 0;
+    }
+    
+    // 10. Удаляем вспомогательные буферы
+    if (_gridHeadTexture != 0)
+    {
+        GL.DeleteTexture(_gridHeadTexture);
+        _gridHeadTexture = 0;
+    }
+    if (_linkedListSsbo != 0)
+    {
+        GL.DeleteBuffer(_linkedListSsbo);
+        _linkedListSsbo = 0;
+    }
+    if (_atomicCounterBuffer != 0)
+    {
+        GL.DeleteBuffer(_atomicCounterBuffer);
+        _atomicCounterBuffer = 0;
+    }
+    if (_dynamicObjectsBuffer != 0)
+    {
+        GL.DeleteBuffer(_dynamicObjectsBuffer);
+        _dynamicObjectsBuffer = 0;
+    }
+    if (_beamFbo != 0)
+    {
+        GL.DeleteFramebuffer(_beamFbo);
+        _beamFbo = 0;
+    }
+    if (_beamTexture != 0)
+    {
+        GL.DeleteTexture(_beamTexture);
+        _beamTexture = 0;
+    }
+
+    // 11. Финальный Flush + Finish
+    GL.Flush();
+    GL.Finish();
+    
+    // 12. Сбрасываем счетчики
+    CurrentAllocatedBytes = 0;
+    _currentCapacity = 0;
+    
+    Console.WriteLine("[Renderer] All GPU objects deleted. Waiting for driver to release memory...");
+    
+    // 13. КРИТИЧЕСКИ ВАЖНО: Даем драйверу время на освобождение
+    System.Threading.Thread.Sleep(50); // 50ms задержка
+}
     
     // ... (Standard methods follow) ...
     public void ResizeBuffers() { InitializeBuffers(); }

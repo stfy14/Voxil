@@ -68,17 +68,19 @@ public class SettingsWindow : IUIWindow
             }
             // -----------------------------------
 
-            // В классе SettingsWindow
+            // Найдите этот блок кода:
             if (ImGui.Button("Apply Render Distance"))
             {
-                // 1. Устанавливаем новую настройку
                 GameSettings.RenderDistance = _renderDist;
 
-                // 2. СНАЧАЛА полностью и грамотно очищаем мир на CPU.
-                // Это уведомит рендерер, и он очистит свое состояние (словари).
-                _worldManager.ClearAndStopWorld();
-
-                // 3. ЗАПУСКАЕМ ПЕРВУЮ ФАЗУ: только удаление GPU-ресурсов.
+                // --- БЫЛО (УДАЛИТЬ) ---
+                // _renderer.ResizeBuffers(); 
+                // _worldManager.ReloadWorld(); 
+                // _renderer.ReloadShader();
+                // _renderer.UploadAllVisibleChunks();
+    
+                // --- СТАЛО (ДОБАВИТЬ) ---
+                // Мы запускаем процесс очистки -> ожидания -> выделения
                 _renderer.RequestReallocation();
             }
 
