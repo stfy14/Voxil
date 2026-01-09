@@ -118,7 +118,7 @@ protected override void OnUpdateFrame(FrameEventArgs e)
         _reallocationDelayFrames++;
         
         // Ждем 3 кадра
-        if (_reallocationDelayFrames >= 3)
+        if (_reallocationDelayFrames >= 15)
         {
             _renderer.PerformReallocation();
             _worldManager.ReloadWorld();

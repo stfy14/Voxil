@@ -25,100 +25,94 @@ public class SettingsWindow : IUIWindow
     public void Toggle() => IsVisible = !IsVisible;
 
     public void Draw()
-    {
-        if (!IsVisible) return;
+{
+    if (!IsVisible) return;
 
-        ImGui.SetNextWindowSize(new System.Numerics.Vector2(400, 500), ImGuiCond.FirstUseEver);
-        
-        if (ImGui.Begin("Game Settings", ref _isVisible))
-        {
-            ImGui.Text("Graphics");
-            ImGui.Separator();
-
-            // --- VRAM Display ---
-            long totalVramBytes = (long)_renderer.TotalVramMb * 1024 * 1024;
-            long safeBudget = Math.Max(0, totalVramBytes - (2500L * 1024 * 1024));
-
-            long futureBytes = _renderer.CalculateMemoryBytesForDistance(_renderDist);
-            long currentBytes = _renderer.CurrentAllocatedBytes;
-
-            bool danger = futureBytes > safeBudget;
-            
-            if (danger) ImGui.PushStyleColor(ImGuiCol.SliderGrab, new System.Numerics.Vector4(1, 0, 0, 1));
-            
-            if (ImGui.SliderInt("Render Distance", ref _renderDist, 4, 128)) { }
-            
-            if (danger) ImGui.PopStyleColor();
-
-            float futureMb = futureBytes / (1024f * 1024f);
-            float currentMb = currentBytes / (1024f * 1024f);
-            float budgetMb = safeBudget / (1024f * 1024f);
-
-            // Show current usage vs predicted usage
-            ImGui.TextDisabled($"Allocated Now: {currentMb:F0} MB");
-            
-            if (danger)
-            {
-                ImGui.TextColored(new System.Numerics.Vector4(1, 0.3f, 0.3f, 1), 
-                    $"Request: {futureMb:F0} MB (Limit: {budgetMb:F0})");
-            }
-            else
-            {
-                ImGui.Text($"Request: {futureMb:F0} MB / {budgetMb:F0} MB");
-            }
-            // -----------------------------------
-
-            // Найдите этот блок кода:
-            if (ImGui.Button("Apply Render Distance"))
-            {
-                GameSettings.RenderDistance = _renderDist;
-
-                // --- БЫЛО (УДАЛИТЬ) ---
-                // _renderer.ResizeBuffers(); 
-                // _worldManager.ReloadWorld(); 
-                // _renderer.ReloadShader();
-                // _renderer.UploadAllVisibleChunks();
+    ImGui.SetNextWindowSize(new System.Numerics.Vector2(400, 500), ImGuiCond.FirstUseEver);
     
-                // --- СТАЛО (ДОБАВИТЬ) ---
-                // Мы запускаем процесс очистки -> ожидания -> выделения
-                _renderer.RequestReallocation();
-            }
+    // 1. Вызываем Begin. Он вернет true, если окно развернуто, и false, если свернуто.
+    bool isExpanded = ImGui.Begin("Game Settings", ref _isVisible);
 
-            ImGui.Spacing();
-            ImGui.Text("Shadows Mode:");
-            if (ImGui.RadioButton("None", GameSettings.CurrentShadowMode == ShadowMode.None)) 
-            { GameSettings.CurrentShadowMode = ShadowMode.None; _renderer.ReloadShader(); }
-            ImGui.SameLine();
-            if (ImGui.RadioButton("Hard", GameSettings.CurrentShadowMode == ShadowMode.Hard)) 
-            { GameSettings.CurrentShadowMode = ShadowMode.Hard; _renderer.ReloadShader(); }
-            ImGui.SameLine();
-            if (ImGui.RadioButton("Soft", GameSettings.CurrentShadowMode == ShadowMode.Soft)) 
-            { GameSettings.CurrentShadowMode = ShadowMode.Soft; _renderer.ReloadShader(); }
+    // 2. Рисуем содержимое ТОЛЬКО если окно развернуто
+    if (isExpanded)
+    {
+        ImGui.Text("Graphics");
+        ImGui.Separator();
 
-            if (GameSettings.CurrentShadowMode == ShadowMode.Soft)
-            {
-                if (ImGui.SliderInt("Soft Samples", ref _shadowSamples, 2, 64))
-                    GameSettings.SoftShadowSamples = _shadowSamples;
-            }
+        // --- VRAM Display ---
+        long totalVramBytes = (long)_renderer.TotalVramMb * 1024 * 1024;
+        long safeBudget = Math.Max(0, totalVramBytes - (2500L * 1024 * 1024));
 
-            ImGui.Spacing();
-            ImGui.Text("Effects");
-            bool ao = GameSettings.EnableAO;
-            if (ImGui.Checkbox("Ambient Occlusion", ref ao)) { GameSettings.EnableAO = ao; _renderer.ReloadShader(); }
-            bool water = GameSettings.UseProceduralWater;
-            if (ImGui.Checkbox("Procedural Water", ref water)) { GameSettings.UseProceduralWater = water; _renderer.ReloadShader(); }
-            bool trans = GameSettings.EnableWaterTransparency;
-            if (ImGui.Checkbox("Water Transparency", ref trans)) { GameSettings.EnableWaterTransparency = trans; _renderer.ReloadShader(); }
-            bool beam = GameSettings.BeamOptimization;
-            if (ImGui.Checkbox("Beam Optimization", ref beam)) { GameSettings.BeamOptimization = beam; _renderer.ReloadShader(); }
+        long futureBytes = _renderer.CalculateMemoryBytesForDistance(_renderDist);
+        long currentBytes = _renderer.CurrentAllocatedBytes;
 
-            ImGui.Separator();
-            ImGui.Text("Stats");
-            if (ImGui.Button("Reset Counters")) PerformanceMonitor.GetDataAndReset(1.0);
+        bool danger = futureBytes > safeBudget;
+        
+        if (danger) ImGui.PushStyleColor(ImGuiCol.SliderGrab, new System.Numerics.Vector4(1, 0, 0, 1));
+        
+        if (ImGui.SliderInt("Render Distance", ref _renderDist, 4, 128)) { }
+        
+        if (danger) ImGui.PopStyleColor();
 
-            ImGui.End();
+        float futureMb = futureBytes / (1024f * 1024f);
+        float currentMb = currentBytes / (1024f * 1024f);
+        float budgetMb = safeBudget / (1024f * 1024f);
+
+        ImGui.TextDisabled($"Allocated Now: {currentMb:F0} MB");
+        
+        if (danger)
+        {
+            ImGui.TextColored(new System.Numerics.Vector4(1, 0.3f, 0.3f, 1), 
+                $"Request: {futureMb:F0} MB (Limit: {budgetMb:F0})");
         }
+        else
+        {
+            ImGui.Text($"Request: {futureMb:F0} MB / {budgetMb:F0} MB");
+        }
+
+        if (ImGui.Button("Apply Render Distance"))
+        {
+            GameSettings.RenderDistance = _renderDist;
+            _renderer.RequestReallocation();
+        }
+
+        ImGui.Spacing();
+        ImGui.Text("Shadows Mode:");
+        if (ImGui.RadioButton("None", GameSettings.CurrentShadowMode == ShadowMode.None)) 
+        { GameSettings.CurrentShadowMode = ShadowMode.None; _renderer.ReloadShader(); }
+        ImGui.SameLine();
+        if (ImGui.RadioButton("Hard", GameSettings.CurrentShadowMode == ShadowMode.Hard)) 
+        { GameSettings.CurrentShadowMode = ShadowMode.Hard; _renderer.ReloadShader(); }
+        ImGui.SameLine();
+        if (ImGui.RadioButton("Soft", GameSettings.CurrentShadowMode == ShadowMode.Soft)) 
+        { GameSettings.CurrentShadowMode = ShadowMode.Soft; _renderer.ReloadShader(); }
+
+        if (GameSettings.CurrentShadowMode == ShadowMode.Soft)
+        {
+            if (ImGui.SliderInt("Soft Samples", ref _shadowSamples, 2, 64))
+                GameSettings.SoftShadowSamples = _shadowSamples;
+        }
+
+        ImGui.Spacing();
+        ImGui.Text("Effects");
+        bool ao = GameSettings.EnableAO;
+        if (ImGui.Checkbox("Ambient Occlusion", ref ao)) { GameSettings.EnableAO = ao; _renderer.ReloadShader(); }
+        bool water = GameSettings.UseProceduralWater;
+        if (ImGui.Checkbox("Procedural Water", ref water)) { GameSettings.UseProceduralWater = water; _renderer.ReloadShader(); }
+        bool trans = GameSettings.EnableWaterTransparency;
+        if (ImGui.Checkbox("Water Transparency", ref trans)) { GameSettings.EnableWaterTransparency = trans; _renderer.ReloadShader(); }
+        bool beam = GameSettings.BeamOptimization;
+        if (ImGui.Checkbox("Beam Optimization", ref beam)) { GameSettings.BeamOptimization = beam; _renderer.ReloadShader(); }
+
+        ImGui.Separator();
+        ImGui.Text("Stats");
+        if (ImGui.Button("Reset Counters")) PerformanceMonitor.GetDataAndReset(1.0);
     }
+    
+    // ВАЖНО: ImGui.End() теперь находится ЗДЕСЬ, за пределами if (isExpanded).
+    // Он будет вызван всегда, даже если окно свернуто.
+    ImGui.End();
+}
 }
 
 // ... (MainMenuWindow is standard) ...

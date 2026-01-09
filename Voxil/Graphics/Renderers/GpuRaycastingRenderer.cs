@@ -42,7 +42,7 @@ public class GpuRaycastingRenderer : IDisposable
     private const int OBJ_GRID_SIZE = 256;
     private float _gridCellSize;
 
-    private Stack<int> _freeSlots = new Stack<int>();
+    private Queue<int> _freeSlots = new Queue<int>();
     private Dictionary<Vector3i, int> _allocatedChunks = new Dictionary<Vector3i, int>();
     private ConcurrentQueue<Chunk> _uploadQueue = new ConcurrentQueue<Chunk>();
     private HashSet<Vector3i> _chunksPendingUpload = new HashSet<Vector3i>();
@@ -252,7 +252,8 @@ public void InitializeBuffers()
     {
         _freeSlots.Clear();
         _allocatedChunks.Clear();
-        for (int i = 0; i < capacity; i++) _freeSlots.Push(i);
+        // Теперь Enqueue вместо Push
+        for (int i = 0; i < capacity; i++) _freeSlots.Enqueue(i);
         
         Array.Fill(_cpuPageTable, 0xFFFFFFFF);
         _chunksPendingUpload.Clear();
@@ -405,13 +406,65 @@ public void InitializeBuffers()
     
     // ... (Standard methods follow) ...
     public void ResizeBuffers() { InitializeBuffers(); }
-    public void UnloadChunk(Vector3i chunkPos) { if (_allocatedChunks.TryGetValue(chunkPos, out int slotIndex)) { _freeSlots.Push(slotIndex); _allocatedChunks.Remove(chunkPos); _cpuPageTable[GetPageTableIndex(chunkPos)] = 0xFFFFFFFF; _pageTableDirty = true; lock(_chunksPendingUpload) { _chunksPendingUpload.Remove(chunkPos); } if (_freeSlots.Count > 100) _memoryFullWarned = false; } }
-    public void NotifyChunkLoaded(Chunk chunk) { if (chunk == null || !chunk.IsLoaded) return; if (chunk.SolidCount == 0) return; if (!_allocatedChunks.ContainsKey(chunk.Position)) { if (_freeSlots.Count > 0) { int slot = _freeSlots.Pop(); _allocatedChunks[chunk.Position] = slot; _cpuPageTable[GetPageTableIndex(chunk.Position)] = (uint)slot; _pageTableDirty = true; } else { if (!_memoryFullWarned) { Console.WriteLine($"[Renderer] GPU Memory FULL! Cannot upload chunk {chunk.Position}. Capacity: {_currentCapacity}"); _memoryFullWarned = true; } return; } } lock(_chunksPendingUpload) { if (_chunksPendingUpload.Add(chunk.Position)) { _uploadQueue.Enqueue(chunk); } } }
+    public void UnloadChunk(Vector3i chunkPos) 
+    { 
+        if (_allocatedChunks.TryGetValue(chunkPos, out int slotIndex)) 
+        { 
+            // ИСПРАВЛЕНИЕ: Push -> Enqueue
+            _freeSlots.Enqueue(slotIndex); 
+            
+            _allocatedChunks.Remove(chunkPos); 
+            _cpuPageTable[GetPageTableIndex(chunkPos)] = 0xFFFFFFFF; 
+            _pageTableDirty = true; 
+            
+            lock(_chunksPendingUpload) 
+            { 
+                _chunksPendingUpload.Remove(chunkPos); 
+            } 
+            
+            if (_freeSlots.Count > 100) _memoryFullWarned = false; 
+        } 
+    }
+    public void NotifyChunkLoaded(Chunk chunk) 
+    { 
+        if (chunk == null || !chunk.IsLoaded) return; 
+        if (chunk.SolidCount == 0) return; 
+        
+        if (!_allocatedChunks.ContainsKey(chunk.Position)) 
+        { 
+            if (_freeSlots.Count > 0) 
+            { 
+                // ИСПРАВЛЕНИЕ: Pop -> Dequeue
+                int slot = _freeSlots.Dequeue(); 
+                
+                _allocatedChunks[chunk.Position] = slot; 
+                _cpuPageTable[GetPageTableIndex(chunk.Position)] = (uint)slot; 
+                _pageTableDirty = true; 
+            } 
+            else 
+            { 
+                if (!_memoryFullWarned) 
+                { 
+                    Console.WriteLine($"[Renderer] GPU Memory FULL! Cannot upload chunk {chunk.Position}. Capacity: {_currentCapacity}"); 
+                    _memoryFullWarned = true; 
+                } 
+                return; 
+            } 
+        } 
+        
+        lock(_chunksPendingUpload) 
+        { 
+            if (_chunksPendingUpload.Add(chunk.Position)) 
+            { 
+                _uploadQueue.Enqueue(chunk); 
+            } 
+        } 
+    }
     public void Update(float deltaTime) { _totalTime += deltaTime; int uploadLimit = 2000; while (uploadLimit > 0 && _uploadQueue.TryDequeue(out var chunk)) { bool isStillAllocated = false; int slot = -1; if (_allocatedChunks.TryGetValue(chunk.Position, out slot)) { lock(_chunksPendingUpload) { if (_chunksPendingUpload.Contains(chunk.Position)) { _chunksPendingUpload.Remove(chunk.Position); isStillAllocated = true; } } } if (isStillAllocated && chunk.IsLoaded) { UploadChunkVoxels(chunk, slot); uploadLimit--; } } if (_pageTableDirty) { GL.BindTexture(TextureTarget.Texture3D, _pageTableTexture); GL.TexSubImage3D(TextureTarget.Texture3D, 0, 0, 0, 0, PT_X, PT_Y, PT_Z, PixelFormat.RedInteger, PixelType.UnsignedInt, _cpuPageTable); _pageTableDirty = false; } UpdateDynamicObjectsAndGrid(); }
     private void UploadChunkVoxels(Chunk chunk, int offset) { long start = Stopwatch.GetTimestamp(); chunk.ReadDataUnsafe((srcVoxels, srcMasks) => { if (srcVoxels == null) return; System.Buffer.BlockCopy(srcVoxels, 0, _chunkUploadBuffer, 0, Constants.ChunkVolume); IntPtr gpuOffset = (IntPtr)((long)offset * PackedChunkSizeInInts * sizeof(uint)); GL.BindBuffer(BufferTarget.ShaderStorageBuffer, _voxelSsbo); GL.BufferSubData(BufferTarget.ShaderStorageBuffer, gpuOffset, PackedChunkSizeInInts * sizeof(uint), _chunkUploadBuffer); if (srcMasks != null) { System.Buffer.BlockCopy(srcMasks, 0, _maskUploadBuffer, 0, ChunkMaskSizeInUlongs * sizeof(ulong)); IntPtr maskGpuOffset = (IntPtr)((long)offset * ChunkMaskSizeInUlongs * sizeof(ulong)); GL.BindBuffer(BufferTarget.ShaderStorageBuffer, _maskSsbo); GL.BufferSubData(BufferTarget.ShaderStorageBuffer, maskGpuOffset, ChunkMaskSizeInUlongs * sizeof(ulong), _maskUploadBuffer); } }); if (PerformanceMonitor.IsEnabled) { long end = Stopwatch.GetTimestamp(); PerformanceMonitor.Record(ThreadType.GpuRender, end - start); } }
     private int GetPageTableIndex(Vector3i chunkPos) => (chunkPos.X & MASK_X) + PT_X * ((chunkPos.Y & MASK_Y) + PT_Y * (chunkPos.Z & MASK_Z));
     private void UpdateDynamicObjectsAndGrid() { var voxelObjects = _worldManager.GetAllVoxelObjects(); int count = voxelObjects.Count; if (count > _tempGpuObjectsArray.Length) { Array.Resize(ref _tempGpuObjectsArray, count + 1024); GL.BindBuffer(BufferTarget.ShaderStorageBuffer, _dynamicObjectsBuffer); GL.BufferData(BufferTarget.ShaderStorageBuffer, _tempGpuObjectsArray.Length * Marshal.SizeOf<GpuDynamicObject>(), IntPtr.Zero, BufferUsageHint.DynamicDraw); } if (count > 0) { var options = new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount }; Parallel.For(0, count, options, i => { var vo = voxelObjects[i]; Matrix4 model = Matrix4.CreateTranslation(-vo.LocalCenterOfMass) * Matrix4.CreateFromQuaternion(vo.Rotation) * Matrix4.CreateTranslation(vo.Position); var col = MaterialRegistry.GetColor(vo.Material); _tempGpuObjectsArray[i] = new GpuDynamicObject { Model = model, InvModel = Matrix4.Invert(model), Color = new Vector4(col.r, col.g, col.b, 1.0f), BoxMin = new Vector4(vo.LocalBoundsMin, 0), BoxMax = new Vector4(vo.LocalBoundsMax, 0) }; }); GL.BindBuffer(BufferTarget.ShaderStorageBuffer, _dynamicObjectsBuffer); GL.BufferSubData(BufferTarget.ShaderStorageBuffer, IntPtr.Zero, count * Marshal.SizeOf<GpuDynamicObject>(), _tempGpuObjectsArray); } float snap = _gridCellSize; Vector3 playerPos = _worldManager.GetPlayerPosition(); Vector3 snappedCenter = new Vector3((float)Math.Floor(playerPos.X / snap) * snap, (float)Math.Floor(playerPos.Y / snap) * snap, (float)Math.Floor(playerPos.Z / snap) * snap); float halfExtent = (OBJ_GRID_SIZE * _gridCellSize) / 2.0f; _lastGridOrigin = snappedCenter - new Vector3(halfExtent); uint zero = 0; GL.BindBuffer(BufferTarget.AtomicCounterBuffer, _atomicCounterBuffer); GL.BufferSubData(BufferTarget.AtomicCounterBuffer, IntPtr.Zero, sizeof(uint), ref zero); GL.ClearTexImage(_gridHeadTexture, 0, PixelFormat.RedInteger, PixelType.Int, IntPtr.Zero); if (count > 0) { _gridComputeShader.Use(); _gridComputeShader.SetInt("uObjectCount", count); _gridComputeShader.SetVector3("uGridOrigin", _lastGridOrigin); _gridComputeShader.SetFloat("uGridStep", _gridCellSize); _gridComputeShader.SetInt("uGridSize", OBJ_GRID_SIZE); GL.BindImageTexture(1, _gridHeadTexture, 0, true, 0, TextureAccess.ReadWrite, SizedInternalFormat.R32i); GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 2, _dynamicObjectsBuffer); GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 3, _linkedListSsbo); GL.BindBufferBase(BufferRangeTarget.AtomicCounterBuffer, 4, _atomicCounterBuffer); GL.DispatchCompute((count + 63) / 64, 1, 1); GL.MemoryBarrier(MemoryBarrierFlags.ShaderImageAccessBarrierBit | MemoryBarrierFlags.AtomicCounterBarrierBit | MemoryBarrierFlags.ShaderStorageBarrierBit); } }
-    public void Render(Camera camera) { _shader.Use(); _shader.SetVector3("uCamPos", camera.Position); var view = camera.GetViewMatrix(); var proj = camera.GetProjectionMatrix(); _shader.SetMatrix4("uView", view); _shader.SetMatrix4("uProjection", proj); _shader.SetMatrix4("uInvView", Matrix4.Invert(view)); _shader.SetMatrix4("uInvProjection", Matrix4.Invert(proj)); _shader.SetFloat("uRenderDistance", _worldManager.GetViewRangeInMeters()); _shader.SetInt("uMaxRaySteps", (int)(GameSettings.RenderDistance * 3) + 32); _shader.SetVector3("uSunDir", Vector3.Normalize(new Vector3(0.2f, 0.4f, 0.8f))); _shader.SetFloat("uTime", _totalTime); _shader.SetInt("uSoftShadowSamples", GameSettings.SoftShadowSamples); Vector3 camPos = camera.Position; int chunkSz = Constants.ChunkSizeWorld; int camCx = (int)Math.Floor(camPos.X / chunkSz); int camCy = (int)Math.Floor(camPos.Y / chunkSz); int camCz = (int)Math.Floor(camPos.Z / chunkSz); int range = GameSettings.RenderDistance; int rangeBias = 1; _shader.SetInt("uBoundMinX", camCx - range - rangeBias); _shader.SetInt("uBoundMinY", 0); _shader.SetInt("uBoundMinZ", camCz - range - rangeBias); _shader.SetInt("uBoundMaxX", camCx + range + 1 + rangeBias); _shader.SetInt("uBoundMaxY", WorldManager.WorldHeightChunks); _shader.SetInt("uBoundMaxZ", camCz + range + 1 + rangeBias); GL.BindImageTexture(0, _pageTableTexture, 0, true, 0, TextureAccess.ReadOnly, SizedInternalFormat.R32ui); GL.BindImageTexture(1, _gridHeadTexture, 0, true, 0, TextureAccess.ReadOnly, SizedInternalFormat.R32i); GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 1, _voxelSsbo); GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 2, _dynamicObjectsBuffer); GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 3, _linkedListSsbo); GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 5, _maskSsbo); _shader.SetTexture("uNoiseTexture", _noiseTexture, TextureUnit.Texture0); _shader.SetVector3("uGridOrigin", _lastGridOrigin); _shader.SetFloat("uGridStep", _gridCellSize); _shader.SetInt("uGridSize", OBJ_GRID_SIZE); _shader.SetInt("uObjectCount", _worldManager.GetAllVoxelObjects().Count); GL.BindVertexArray(_quadVao); if (GameSettings.BeamOptimization) { GL.BindFramebuffer(FramebufferTarget.Framebuffer, _beamFbo); GL.Viewport(0, 0, _beamWidth, _beamHeight); GL.Clear(ClearBufferMask.ColorBufferBit); _shader.SetInt("uIsBeamPass", 1); GL.Disable(EnableCap.DepthTest); GL.DrawArrays(PrimitiveType.TriangleStrip, 0, 4); } GL.BindFramebuffer(FramebufferTarget.Framebuffer, 0); if (GameSettings.BeamOptimization) GL.Viewport(0, 0, _beamWidth * BeamDivisor, _beamHeight * BeamDivisor); else GL.Viewport(0, 0, _beamWidth * BeamDivisor, _beamHeight * BeamDivisor); _shader.SetInt("uIsBeamPass", 0); _shader.SetTexture("uBeamTexture", _beamTexture, TextureUnit.Texture1); GL.DrawArrays(PrimitiveType.TriangleStrip, 0, 4); GL.Enable(EnableCap.DepthTest); GL.BindVertexArray(0); }
+    public void Render(Camera camera) { _shader.Use(); _shader.SetVector3("uCamPos", camera.Position); var view = camera.GetViewMatrix(); var proj = camera.GetProjectionMatrix(); _shader.SetMatrix4("uView", view); _shader.SetMatrix4("uProjection", proj); _shader.SetMatrix4("uInvView", Matrix4.Invert(view)); _shader.SetMatrix4("uInvProjection", Matrix4.Invert(proj)); _shader.SetFloat("uRenderDistance", _worldManager.GetViewRangeInMeters()); _shader.SetInt("uMaxRaySteps", (int)(GameSettings.RenderDistance * 3) + 64); _shader.SetVector3("uSunDir", Vector3.Normalize(new Vector3(0.2f, 0.4f, 0.8f))); _shader.SetFloat("uTime", _totalTime); _shader.SetInt("uSoftShadowSamples", GameSettings.SoftShadowSamples); Vector3 camPos = camera.Position; int chunkSz = Constants.ChunkSizeWorld; int camCx = (int)Math.Floor(camPos.X / chunkSz); int camCy = (int)Math.Floor(camPos.Y / chunkSz); int camCz = (int)Math.Floor(camPos.Z / chunkSz); int range = GameSettings.RenderDistance; int rangeBias = 1; _shader.SetInt("uBoundMinX", camCx - range - rangeBias); _shader.SetInt("uBoundMinY", 0); _shader.SetInt("uBoundMinZ", camCz - range - rangeBias); _shader.SetInt("uBoundMaxX", camCx + range + 1 + rangeBias); _shader.SetInt("uBoundMaxY", WorldManager.WorldHeightChunks); _shader.SetInt("uBoundMaxZ", camCz + range + 1 + rangeBias); GL.BindImageTexture(0, _pageTableTexture, 0, true, 0, TextureAccess.ReadOnly, SizedInternalFormat.R32ui); GL.BindImageTexture(1, _gridHeadTexture, 0, true, 0, TextureAccess.ReadOnly, SizedInternalFormat.R32i); GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 1, _voxelSsbo); GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 2, _dynamicObjectsBuffer); GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 3, _linkedListSsbo); GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 5, _maskSsbo); _shader.SetTexture("uNoiseTexture", _noiseTexture, TextureUnit.Texture0); _shader.SetVector3("uGridOrigin", _lastGridOrigin); _shader.SetFloat("uGridStep", _gridCellSize); _shader.SetInt("uGridSize", OBJ_GRID_SIZE); _shader.SetInt("uObjectCount", _worldManager.GetAllVoxelObjects().Count); GL.BindVertexArray(_quadVao); if (GameSettings.BeamOptimization) { GL.BindFramebuffer(FramebufferTarget.Framebuffer, _beamFbo); GL.Viewport(0, 0, _beamWidth, _beamHeight); GL.Clear(ClearBufferMask.ColorBufferBit); _shader.SetInt("uIsBeamPass", 1); GL.Disable(EnableCap.DepthTest); GL.DrawArrays(PrimitiveType.TriangleStrip, 0, 4); } GL.BindFramebuffer(FramebufferTarget.Framebuffer, 0); if (GameSettings.BeamOptimization) GL.Viewport(0, 0, _beamWidth * BeamDivisor, _beamHeight * BeamDivisor); else GL.Viewport(0, 0, _beamWidth * BeamDivisor, _beamHeight * BeamDivisor); _shader.SetInt("uIsBeamPass", 0); _shader.SetTexture("uBeamTexture", _beamTexture, TextureUnit.Texture1); GL.DrawArrays(PrimitiveType.TriangleStrip, 0, 4); GL.Enable(EnableCap.DepthTest); GL.BindVertexArray(0); }
     public void OnResize(int width, int height) { ResizeBeamBuffer(width, height); GL.Viewport(0, 0, width, height); }
     private void ResizeBeamBuffer(int screenWidth, int screenHeight) { _beamWidth = screenWidth / BeamDivisor; _beamHeight = screenHeight / BeamDivisor; if (_beamWidth < 1) _beamWidth = 1; if (_beamHeight < 1) _beamHeight = 1; GL.BindTexture(TextureTarget.Texture2D, _beamTexture); GL.TexImage2D(TextureTarget.Texture2D, 0, PixelInternalFormat.R32f, _beamWidth, _beamHeight, 0, PixelFormat.Red, PixelType.Float, IntPtr.Zero); GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Nearest); GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMinFilter.Nearest); GL.BindTexture(TextureTarget.Texture2D, 0); GL.BindFramebuffer(FramebufferTarget.Framebuffer, _beamFbo); GL.FramebufferTexture2D(FramebufferTarget.Framebuffer, FramebufferAttachment.ColorAttachment0, TextureTarget.Texture2D, _beamTexture, 0); GL.BindFramebuffer(FramebufferTarget.Framebuffer, 0); }
     public void ReloadShader() { _shader?.Dispose(); var defines = new List<string>(); if (GameSettings.UseProceduralWater) defines.Add("WATER_MODE_PROCEDURAL"); if (GameSettings.EnableAO) defines.Add("ENABLE_AO"); if (GameSettings.EnableWaterTransparency) defines.Add("ENABLE_WATER_TRANSPARENCY"); if (GameSettings.BeamOptimization) defines.Add("ENABLE_BEAM_OPTIMIZATION"); switch (GameSettings.CurrentShadowMode) { case ShadowMode.Hard: defines.Add("SHADOW_MODE_HARD"); break; case ShadowMode.Soft: defines.Add("SHADOW_MODE_SOFT"); break; } try { _shader = new Shader("Shaders/raycast.vert", "Shaders/raycast.frag", defines); } catch (Exception ex) { Console.WriteLine($"[Renderer] Shader Error: {ex.Message}"); } }
