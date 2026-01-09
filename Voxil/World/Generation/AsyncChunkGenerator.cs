@@ -5,12 +5,15 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Threading;
 
-// Вспомогательный класс очереди с приоритетом
+// Очередь с приоритетом (меньшее число = выше приоритет)
 public class BlockingPriorityQueue<T>
 {
     private readonly PriorityQueue<T, int> _queue = new PriorityQueue<T, int>();
     private readonly object _lock = new object();
     private bool _isCompleted = false;
+
+    // Свойство для проверки размера очереди
+    public int Count { get { lock(_lock) return _queue.Count; } }
 
     public void Enqueue(T item, int priority)
     {
@@ -18,7 +21,7 @@ public class BlockingPriorityQueue<T>
         {
             if (_isCompleted) return;
             _queue.Enqueue(item, priority);
-            Monitor.PulseAll(_lock);
+            Monitor.Pulse(_lock);
         }
     }
 
@@ -46,37 +49,26 @@ public class BlockingPriorityQueue<T>
         }
     }
 
-    public void Clear()
-    {
-        lock (_lock)
-        {
-            _queue.Clear();
-        }
-    }
-
-    public void CompleteAdding()
-    {
-        lock (_lock)
-        {
-            _isCompleted = true;
-            Monitor.PulseAll(_lock);
-        }
-    }
+    public void Clear() { lock (_lock) { _queue.Clear(); } }
+    public void CompleteAdding() { lock (_lock) { _isCompleted = true; Monitor.PulseAll(_lock); } }
 }
 
 public class AsyncChunkGenerator : IDisposable
 {
     private readonly IWorldGenerator _generator;
     
-    // Используем нашу кастомную очередь
+    // Входная очередь с приоритетом
     private readonly BlockingPriorityQueue<ChunkGenerationTask> _inputQueue = new();
     
-    // Выходная очередь стандартная
+    // Выходная очередь
     private readonly BlockingCollection<ChunkGenerationResult> _outputQueue = new(new ConcurrentQueue<ChunkGenerationResult>(), 64);
     
     private readonly List<Thread> _threads = new();
     private CancellationTokenSource _threadsCts = new();
     private volatile bool _isDisposed;
+
+    // Публичный счетчик задач в ожидании
+    public int PendingCount => _inputQueue.Count;
 
     public AsyncChunkGenerator(int seed, int threadCount)
     {
@@ -87,27 +79,18 @@ public class AsyncChunkGenerator : IDisposable
     public void EnqueueTask(Vector3i position, int priority)
     {
         if (!_isDisposed)
-        {
             _inputQueue.Enqueue(new ChunkGenerationTask(position, priority), priority);
-        }
     }
 
-    public bool TryGetResult(out ChunkGenerationResult result)
-    {
-        return _outputQueue.TryTake(out result);
-    }
+    public bool TryGetResult(out ChunkGenerationResult result) => _outputQueue.TryTake(out result);
 
-    // Метод для очистки очередей при перезагрузке мира
     public void ClearQueue()
     {
-        // 1. Чистим входную очередь (задачи, которые еще не взяли в работу)
         _inputQueue.Clear();
-
-        // 2. Чистим выходную очередь (результаты, которые еще не забрал WorldManager)
         while (_outputQueue.TryTake(out var result))
         {
-            // Важно вернуть память в пул!
-            System.Buffers.ArrayPool<MaterialType>.Shared.Return(result.Voxels);
+            if (result.Voxels != null)
+                System.Buffers.ArrayPool<MaterialType>.Shared.Return(result.Voxels);
         }
     }
 
@@ -125,7 +108,7 @@ public class AsyncChunkGenerator : IDisposable
         {
             var t = new Thread(() => WorkerLoop(_threadsCts.Token))
             {
-                IsBackground = true, Priority = ThreadPriority.Lowest, Name = $"GenThread_{i}"
+                IsBackground = true, Priority = ThreadPriority.BelowNormal, Name = $"GenThread_{i}"
             };
             t.Start();
             _threads.Add(t);
@@ -134,11 +117,14 @@ public class AsyncChunkGenerator : IDisposable
 
     private void WorkerLoop(CancellationToken token)
     {
-        try
+        MaterialType[] voxels = null;
+        while (!token.IsCancellationRequested)
         {
-            while (_inputQueue.TryDequeue(out var task, token))
+            try
             {
-                var voxels = System.Buffers.ArrayPool<MaterialType>.Shared.Rent(Constants.ChunkVolume);
+                if (!_inputQueue.TryDequeue(out var task, token)) break;
+
+                voxels = System.Buffers.ArrayPool<MaterialType>.Shared.Rent(Constants.ChunkVolume);
                 
                 long start = Stopwatch.GetTimestamp();
                 _generator.GenerateChunk(task.Position, voxels);
@@ -146,24 +132,20 @@ public class AsyncChunkGenerator : IDisposable
 
                 if (PerformanceMonitor.IsEnabled) PerformanceMonitor.Record(ThreadType.Generation, end - start);
 
-                try
-                {
-                    _outputQueue.Add(new ChunkGenerationResult(task.Position, voxels), token);
-                }
-                catch (OperationCanceledException)
-                {
-                    System.Buffers.ArrayPool<MaterialType>.Shared.Return(voxels);
-                    break;
-                }
-                catch (InvalidOperationException)
-                {
-                    System.Buffers.ArrayPool<MaterialType>.Shared.Return(voxels);
-                    break;
-                }
+                _outputQueue.Add(new ChunkGenerationResult(task.Position, voxels), token);
+                voxels = null; 
+            }
+            catch (OperationCanceledException) { break; }
+            catch (Exception ex) 
+            { 
+                Console.WriteLine($"[Gen] Error: {ex.Message}");
+                try { _outputQueue.Add(new ChunkGenerationResult(default, null), token); } catch {}
+            }
+            finally
+            {
+                if (voxels != null) { System.Buffers.ArrayPool<MaterialType>.Shared.Return(voxels); voxels = null; }
             }
         }
-        catch (OperationCanceledException) { }
-        catch (Exception ex) { Console.WriteLine($"[Gen] Error: {ex.Message}"); }
     }
 
     public void Dispose()
@@ -171,15 +153,9 @@ public class AsyncChunkGenerator : IDisposable
         if (_isDisposed) return;
         _isDisposed = true;
         _threadsCts.Cancel();
-        
         _inputQueue.CompleteAdding();
-
         foreach (var t in _threads) if (t.IsAlive) t.Join(100);
-
-        // Дочищаем остатки
-        while (_outputQueue.TryTake(out var leftovers))
-            System.Buffers.ArrayPool<MaterialType>.Shared.Return(leftovers.Voxels);
-
+        ClearQueue();
         _outputQueue.Dispose();
         _threadsCts.Dispose();
     }

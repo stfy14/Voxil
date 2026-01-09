@@ -12,7 +12,6 @@ using BepuVector3 = System.Numerics.Vector3;
 
 public class WorldManager : IDisposable
 {
-    // Основные компоненты
     public PhysicsWorld PhysicsWorld { get; }
     private readonly PlayerController _playerController;
     private readonly AsyncChunkGenerator _chunkGenerator;
@@ -27,16 +26,14 @@ public class WorldManager : IDisposable
     private readonly ConcurrentQueue<VoxelObjectCreationData> _objectsCreationQueue = new();
     private readonly List<VoxelObject> _objectsToRemove = new();
 
-    // === АРХИТЕКТУРА ИТЕРАТИВНОГО ПЛАНИРОВАНИЯ ===
+    // Планировщик
     private Thread _schedulerThread;
     private CancellationTokenSource _schedulerCts = new CancellationTokenSource();
-    private readonly ConcurrentQueue<ChunkGenerationTask> _loadQueue = new();
     private readonly ConcurrentQueue<Vector3i> _unloadQueue = new();
     
-    // Отслеживание состояния чанков
     private readonly object _chunksLock = new();
+    // InProgress гарантирует, что мы не добавим одну задачу дважды
     private readonly HashSet<Vector3i> _chunksInProgress = new();
-    private readonly HashSet<Vector3i> _activeChunkPositions = new();
 
     private Vector3i _currentPlayerChunkPos = new(int.MaxValue);
     private readonly object _playerPosLock = new object();
@@ -44,7 +41,6 @@ public class WorldManager : IDisposable
     
     private bool _isDisposed = false;
 
-    // События
     public event Action<Chunk> OnChunkLoaded;
     public event Action<Chunk> OnChunkModified;
     public event Action<Vector3i> OnChunkUnloaded;
@@ -74,7 +70,6 @@ public class WorldManager : IDisposable
         _schedulerThread.Start();
     }
     
-    // --- ПУБЛИЧНЫЕ МЕТОДЫ ---
     public void SetGenerationThreadCount(int count) => _chunkGenerator.SetThreadCount(count);
 
     public void ReloadWorld()
@@ -83,7 +78,6 @@ public class WorldManager : IDisposable
         _chunkGenerator.ClearQueue();
         _physicsBuilder.Clear();
         
-        ClearLoadQueue();
         while (_unloadQueue.TryDequeue(out _)) { }
 
         lock (_chunksLock)
@@ -91,7 +85,6 @@ public class WorldManager : IDisposable
             foreach (var chunk in _chunks.Values) chunk.Dispose();
             _chunks.Clear();
             _chunksInProgress.Clear();
-            _activeChunkPositions.Clear();
             _staticToChunkMap.Clear();
         }
 
@@ -100,13 +93,11 @@ public class WorldManager : IDisposable
             _currentPlayerChunkPos = new(int.MaxValue);
             _positionChangedDirty = true;
         }
-        
         Console.WriteLine("[World] Reload complete.");
     }
 
     public void Update(float deltaTime)
     {
-        // 1. Обновляем позицию игрока для планировщика
         var playerPos = GetPlayerPosition();
         var currentChunkPos = new Vector3i((int)Math.Floor(playerPos.X / Constants.ChunkSizeWorld), 0, (int)Math.Floor(playerPos.Z / Constants.ChunkSizeWorld));
         
@@ -116,19 +107,16 @@ public class WorldManager : IDisposable
             {
                 _currentPlayerChunkPos = currentChunkPos;
                 _positionChangedDirty = true;
-                ClearLoadQueue();
+                // Мы НЕ очищаем очередь принудительно.
+                // Мы полагаемся на то, что очередь короткая (см. SchedulerLoop).
             }
         }
 
-        // 2. Обработка очередей
         ApplyUnloads();
-        ApplyLoads();
         
-        // 3. Прием результатов
         ProcessGeneratedChunks();
         ProcessPhysicsResults();
         
-        // 4. Логика объектов
         ProcessNewDebris();
         ProcessVoxelObjects();
         ProcessRemovals();
@@ -136,13 +124,10 @@ public class WorldManager : IDisposable
         _memoryLogTimer += deltaTime;
         if (_memoryLogTimer >= 5.0f)
         {
-            Console.WriteLine($"[World] Chunks: {_chunks.Count}, InProgress: {_chunksInProgress.Count}, LoadQueue: {_loadQueue.Count}");
             _memoryLogTimer = 0f;
         }
     }
     
-    // --- ЛОГИКА ПЛАНИРОВЩИКА (Фоновый поток) ---
-
     private void SchedulerLoop()
     {
         Vector3i lastScheduledCenter = new(int.MaxValue);
@@ -152,32 +137,45 @@ public class WorldManager : IDisposable
             Vector3i center;
             lock(_playerPosLock) center = _currentPlayerChunkPos;
             
-            int viewDist = GameSettings.RenderDistance;
-            
             if (center != lastScheduledCenter)
             {
                 lastScheduledCenter = center;
                 ScheduleUnloads();
             }
 
+            int viewDist = GameSettings.RenderDistance;
+            bool dirty = false;
+
+            // Цикл от ближних к дальним (R = 0, 1, 2...)
             for (int r = 0; r <= viewDist; r++)
             {
-                if (_positionChangedDirty)
-                {
-                    _positionChangedDirty = false;
-                    break; 
-                }
+                if (_positionChangedDirty) { dirty = true; break; }
 
-                while (_loadQueue.Count > 200) 
+                // --- САМОЕ ВАЖНОЕ ИЗМЕНЕНИЕ ---
+                // Мы не даем планировщику забить очередь тысячами дальних чанков.
+                // Если в очереди уже есть 100 задач, мы ждем.
+                // Как только вы сдвинетесь, _positionChangedDirty станет true, этот цикл прервется,
+                // и планировщик снова начнет добавлять задачи с R=0 (самые близкие).
+                // Так как очередь короткая (всего 100), новые задачи R=0 сразу попадут в работу.
+                while (_chunkGenerator.PendingCount > 100) 
                 {
-                    if (_positionChangedDirty || _schedulerCts.IsCancellationRequested) break;
-                    Thread.Sleep(1);
+                    if (_positionChangedDirty || _schedulerCts.IsCancellationRequested) { dirty = true; break; }
+                    Thread.Sleep(2);
                 }
+                if (dirty) break;
 
                 ProcessRing(center, r, WorldHeightChunks);
             }
             
-            Thread.Sleep(5);
+            if (_positionChangedDirty)
+            {
+                lock(_playerPosLock) _positionChangedDirty = false;
+                // Немедленный перезапуск
+            }
+            else
+            {
+                Thread.Sleep(20);
+            }
         }
     }
 
@@ -186,17 +184,19 @@ public class WorldManager : IDisposable
         Vector3i center;
         lock (_playerPosLock) center = _currentPlayerChunkPos;
         int viewDist = GameSettings.RenderDistance;
-        int distSqLimit = viewDist * viewDist;
+        int safeUnloadDistSq = (viewDist + 2) * (viewDist + 2);
 
-        List<Vector3i> activeKeys;
-        lock(_chunksLock) activeKeys = new List<Vector3i>(_activeChunkPositions);
-
-        foreach(var pos in activeKeys)
+        lock(_chunksLock)
         {
-            int dx = pos.X - center.X;
-            int dz = pos.Z - center.Z;
-            if (dx * dx + dz * dz > distSqLimit + 24) 
-                _unloadQueue.Enqueue(pos);
+            foreach(var pos in _chunks.Keys)
+            {
+                int dx = pos.X - center.X;
+                int dz = pos.Z - center.Z;
+                if (dx * dx + dz * dz > safeUnloadDistSq) 
+                {
+                    _unloadQueue.Enqueue(pos);
+                }
+            }
         }
     }
 
@@ -225,59 +225,39 @@ public class WorldManager : IDisposable
     
     private void TrySchedule(Vector3i pos)
     {
-        bool alreadyProcessing;
         lock (_chunksLock)
         {
-            alreadyProcessing = _activeChunkPositions.Contains(pos) || _chunksInProgress.Contains(pos);
+            if (_chunks.ContainsKey(pos)) return;
+            if (_chunksInProgress.Contains(pos)) return;
+            _chunksInProgress.Add(pos);
         }
 
-        if (!alreadyProcessing)
-        {
-            Vector3i center;
-            lock (_playerPosLock) center = _currentPlayerChunkPos;
-            int dx = pos.X - center.X;
-            int dz = pos.Z - center.Z;
-            
-            _loadQueue.Enqueue(new ChunkGenerationTask(pos, dx * dx + dz * dz));
-        }
+        Vector3i center;
+        lock (_playerPosLock) center = _currentPlayerChunkPos;
+        int dx = pos.X - center.X;
+        int dz = pos.Z - center.Z;
+        int distSq = dx * dx + dz * dz;
+
+        // Отправляем с ПРИОРИТЕТОМ = ДИСТАНЦИЯ^2.
+        // Близкие (маленькое число) встают в начало очереди.
+        _chunkGenerator.EnqueueTask(pos, distSq);
     }
 
-    // --- ГЛАВНЫЙ ПОТОК (UPDATE) ---
+    private void ApplyUnloads() { while (_unloadQueue.TryDequeue(out var pos)) UnloadChunk(pos); }
 
-    private void ApplyUnloads()
-    {
-        while (_unloadQueue.TryDequeue(out var pos)) UnloadChunk(pos);
-    }
-
-    private void ApplyLoads()
-    {
-        int maxInFlight = 4096; 
-        int currentlyProcessing;
-        lock(_chunksLock) currentlyProcessing = _chunksInProgress.Count;
-        
-        int slotsAvailable = maxInFlight - currentlyProcessing;
-        
-        while(slotsAvailable > 0 && _loadQueue.TryDequeue(out var task))
-        {
-            lock (_chunksLock)
-            {
-                if (!_activeChunkPositions.Contains(task.Position) && !_chunksInProgress.Contains(task.Position))
-                {
-                    _chunksInProgress.Add(task.Position);
-                    _activeChunkPositions.Add(task.Position);
-                    _chunkGenerator.EnqueueTask(task.Position, task.Priority);
-                    slotsAvailable--;
-                }
+    private void UnloadChunk(Vector3i position) 
+    { 
+        lock (_chunksLock) 
+        { 
+            if (_chunks.TryGetValue(position, out var chunk)) 
+            { 
+                chunk.Dispose(); 
+                _chunks.Remove(position); 
+                OnChunkUnloaded?.Invoke(position); 
             }
-        }
+            _chunksInProgress.Remove(position);
+        } 
     }
-
-    private void ClearLoadQueue()
-    {
-        while (_loadQueue.TryDequeue(out _)) { }
-    }
-
-    private void UnloadChunk(Vector3i position) { lock (_chunksLock) { if (_chunks.TryGetValue(position, out var chunk)) { chunk.Dispose(); _chunks.Remove(position); OnChunkUnloaded?.Invoke(position); } } _activeChunkPositions.Remove(position); }
     
     private void ProcessGeneratedChunks() 
     { 
@@ -286,19 +266,33 @@ public class WorldManager : IDisposable
         
         while (_chunkGenerator.TryGetResult(out var result)) 
         { 
+            if (result.Voxels == null)
+            {
+                lock(_chunksLock) _chunksInProgress.Remove(result.Position);
+                continue;
+            }
+
             lock(_chunksLock) _chunksInProgress.Remove(result.Position);
-            
-            if (!_activeChunkPositions.Contains(result.Position)) { System.Buffers.ArrayPool<MaterialType>.Shared.Return(result.Voxels); continue; } 
             
             Chunk chunkToAdd = null; 
             lock (_chunksLock) 
             { 
-                if (!_chunks.ContainsKey(result.Position)) 
-                { 
-                    chunkToAdd = new Chunk(result.Position, this); 
-                    chunkToAdd.SetDataFromArray(result.Voxels); 
-                    _chunks[result.Position] = chunkToAdd; 
-                } 
+                // Опционально: проверка дистанции перед загрузкой (чтобы не грузить то, от чего уже убежали)
+                Vector3i center;
+                lock(_playerPosLock) center = _currentPlayerChunkPos;
+                int dx = result.Position.X - center.X;
+                int dz = result.Position.Z - center.Z;
+                int loadLimit = GameSettings.RenderDistance + 3; 
+
+                if (dx*dx + dz*dz <= loadLimit*loadLimit)
+                {
+                     if (!_chunks.ContainsKey(result.Position)) 
+                     { 
+                         chunkToAdd = new Chunk(result.Position, this); 
+                         chunkToAdd.SetDataFromArray(result.Voxels); 
+                         _chunks[result.Position] = chunkToAdd; 
+                     }
+                }
             } 
             
             System.Buffers.ArrayPool<MaterialType>.Shared.Return(result.Voxels); 
@@ -306,13 +300,14 @@ public class WorldManager : IDisposable
             if (chunkToAdd != null) 
             { 
                 OnChunkLoaded?.Invoke(chunkToAdd); 
-                _physicsBuilder.EnqueueTask(chunkToAdd); 
+                _physicsBuilder.EnqueueTask(chunkToAdd, urgent: true); 
             } 
             
             if (Stopwatch.GetTimestamp() - startTicks > maxTicks) break; 
         } 
     }
     
+    // Boilerplate (без изменений)
     private void ProcessPhysicsResults() { long maxTicks = Stopwatch.Frequency / 1000 * 3; long startTicks = Stopwatch.GetTimestamp(); while (_physicsBuilder.TryGetResult(out var result)) { if (!result.IsValid) continue; using (result.Data) { if (result.TargetChunk == null || !result.TargetChunk.IsLoaded) continue; StaticHandle handle = default; if (result.Data.CollidersArray != null && result.Data.Count > 0) { handle = PhysicsWorld.AddStaticChunkBody( (result.TargetChunk.Position * Constants.ChunkSizeWorld).ToSystemNumerics(), result.Data.CollidersArray, result.Data.Count ); } result.TargetChunk.OnPhysicsRebuilt(handle); } if (Stopwatch.GetTimestamp() - startTicks > maxTicks) break; } }
     private void ProcessNewDebris() { while (_objectsCreationQueue.TryDequeue(out var data)) { var vo = new VoxelObject(data.Voxels, data.Material); vo.OnEmpty += QueueForRemoval; var handle = PhysicsWorld.CreateVoxelObjectBody(data.Voxels, data.Material, data.WorldPosition, out var com); var realPos = data.WorldPosition + com; var bodyRef = PhysicsWorld.Simulation.Bodies.GetBodyReference(handle); bodyRef.Pose.Position = realPos; vo.InitializePhysics(handle, com.ToOpenTK()); _voxelObjects.Add(vo); RegisterVoxelObject(handle, vo); } }
     private void ProcessVoxelObjects() { foreach (var vo in _voxelObjects) { if (PhysicsWorld.Simulation.Bodies.BodyExists(vo.BodyHandle)) { var pose = PhysicsWorld.GetPose(vo.BodyHandle); vo.UpdatePose(pose); } } }
@@ -321,8 +316,6 @@ public class WorldManager : IDisposable
     public void Dispose() { if (_isDisposed) return; _isDisposed = true; _schedulerCts.Cancel(); if (_schedulerThread.IsAlive) _schedulerThread.Join(); _chunkGenerator.Dispose(); _physicsBuilder.Dispose(); _integritySystem.Dispose(); lock (_chunksLock) { foreach (var chunk in _chunks.Values) chunk.Dispose(); _chunks.Clear(); } foreach(var vo in _voxelObjects) vo.Dispose(); _voxelObjects.Clear(); }
     public List<Chunk> GetChunksSnapshot() { lock (_chunksLock) return new List<Chunk>(_chunks.Values); }
     public float GetViewRangeInMeters() => GameSettings.RenderDistance * Constants.ChunkSizeWorld;
-    
-    // === ВОССТАНОВЛЕННЫЕ МЕТОДЫ ===
     public void RebuildPhysics(Chunk chunk) { if (chunk == null || !chunk.IsLoaded) return; _physicsBuilder.EnqueueTask(chunk, urgent: true); }
     public void CreateDetachedObject(List<Vector3i> globalCluster) { foreach (var pos in globalCluster) RemoveVoxelGlobal(pos); OpenTK.Mathematics.Vector3 minIndex = new OpenTK.Mathematics.Vector3(float.MaxValue); foreach (var v in globalCluster) minIndex = OpenTK.Mathematics.Vector3.ComponentMin(minIndex, new OpenTK.Mathematics.Vector3(v.X, v.Y, v.Z)); List<Vector3i> localVoxels = new List<Vector3i>(); Vector3i minIdxInt = new Vector3i((int)minIndex.X, (int)minIndex.Y, (int)minIndex.Z); foreach (var v in globalCluster) localVoxels.Add(v - minIdxInt); System.Numerics.Vector3 worldPos = (minIndex * Constants.VoxelSize).ToSystemNumerics(); _objectsCreationQueue.Enqueue(new VoxelObjectCreationData { Voxels = localVoxels, Material = MaterialType.Stone, WorldPosition = worldPos }); }
     public void QueueForRemoval(VoxelObject obj) => _objectsToRemove.Add(obj);

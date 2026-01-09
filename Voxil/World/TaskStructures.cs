@@ -1,10 +1,9 @@
 ﻿using OpenTK.Mathematics;
 
-// Задача для генератора: какую позицию генерировать и с каким приоритетом
 public readonly struct ChunkGenerationTask
 {
     public readonly Vector3i Position;
-    public readonly int Priority;
+    public readonly int Priority; // Дистанция^2
 
     public ChunkGenerationTask(Vector3i pos, int priority)
     {
@@ -13,7 +12,6 @@ public readonly struct ChunkGenerationTask
     }
 }
 
-// Результат работы генератора: позиция и сырые данные вокселей
 public readonly struct ChunkGenerationResult
 {
     public readonly Vector3i Position;
@@ -26,29 +24,21 @@ public readonly struct ChunkGenerationResult
     }
 }
 
-// Задача для физического строителя: какой чанк обрабатывать
+// Физика без изменений
 public readonly struct PhysicsBuildTask
 {
     public readonly Chunk ChunkToProcess;
     public bool IsValid => ChunkToProcess != null;
-
-    public PhysicsBuildTask(Chunk chunk)
-    {
-        ChunkToProcess = chunk;
-    }
+    public PhysicsBuildTask(Chunk chunk) { ChunkToProcess = chunk; }
 }
 
-// Результат построения физики: чанк и рассчитанные коллайдеры
 public readonly struct PhysicsBuildResult
 {
     public readonly Chunk TargetChunk;
-    public readonly PhysicsBuildResultData Data; // Эта структура определена в VoxelPhysicsBuilder.cs
+    public readonly PhysicsBuildResultData Data;
     public readonly bool IsValid;
-
-    public PhysicsBuildResult(Chunk chunk, PhysicsBuildResultData data)
-    {
-        TargetChunk = chunk;
-        Data = data;
-        IsValid = chunk != null;
+    public PhysicsBuildResult(Chunk chunk, PhysicsBuildResultData data) 
+    { 
+        TargetChunk = chunk; Data = data; IsValid = chunk != null; 
     }
 }
