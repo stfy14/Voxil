@@ -164,18 +164,23 @@ public class WorldManager : IDisposable
 
         _mainThreadStopwatch.Restart();
 
-        // Бюджет теперь вычисляется на основе глобальных настроек
         double targetFrameTimeMs = 1000.0 / GameSettings.TargetFPSForBudgeting;
-        double budgetMs = targetFrameTimeMs * GameSettings.WorldUpdateBudgetPercentage;
+        double totalBudget = targetFrameTimeMs * GameSettings.WorldUpdateBudgetPercentage;
 
         ApplyUnloads();
-        ProcessGeneratedChunks(budgetMs); 
 
-        if (_mainThreadStopwatch.Elapsed.TotalMilliseconds < budgetMs)
-        {
-            ProcessPhysicsResults(budgetMs);
-        }
+        // ИЗМЕНЕНИЕ: Делим бюджет пополам (или в другой пропорции).
+        // Главное — дать физике гарантированное время на исполнение.
+        double physicsBudget = totalBudget * 0.6; // Физике побольше приоритета, чтобы быстрее видеть мир
+        double genBudget = totalBudget * 0.4;
+
+        // Сначала обрабатываем физику (чтобы готовые чанки сразу попали на экран)
+        ProcessPhysicsResults(physicsBudget);
         
+        // Потом обрабатываем новые сгенерированные данные
+        // Убираем зависимость одного от другого через `if`
+        ProcessGeneratedChunks(genBudget);
+
         ProcessNewDebris();
         ProcessVoxelObjects();
         ProcessRemovals();
@@ -185,54 +190,71 @@ public class WorldManager : IDisposable
     }
     
     private void SchedulerLoop()
+{
+    Vector3i lastScheduledCenter = new(int.MaxValue);
+    while (!_schedulerCts.IsCancellationRequested)
     {
-        Vector3i lastScheduledCenter = new(int.MaxValue);
-        while (!_schedulerCts.IsCancellationRequested)
+        Vector3i center;
+        lock(_playerPosLock) center = _currentPlayerChunkPos;
+        
+        if (center.X == int.MaxValue)
         {
-            Vector3i center;
-            lock(_playerPosLock) center = _currentPlayerChunkPos;
-            
-            if (center.X == int.MaxValue)
+            Thread.Sleep(100); // Можно спать подольше, если игрок еще не в мире
+            continue;
+        }
+
+        bool positionChanged = false;
+        if (center != lastScheduledCenter)
+        {
+            lastScheduledCenter = center;
+            ScheduleUnloads();
+            positionChanged = true;
+        }
+
+        // ИЗМЕНЕНИЕ: Убираем флаг `dirty` и используем `positionChanged`
+        if (positionChanged)
+        {
+            lock(_playerPosLock) _positionChangedDirty = false;
+        }
+
+        int viewDist = GameSettings.RenderDistance;
+        int scheduledCount = 0;
+
+        for (int r = 0; r <= viewDist; r++)
+        {
+            // ИЗМЕНЕНИЕ: Главное исправление.
+            // Вместо жесткой блокировки, мы просто прекращаем планирование НА ЭТОТ ТИК,
+            // если видим, что система уже перегружена задачами.
+            // На следующей итерации (через несколько миллисекунд) он попробует снова.
+            if (_chunkGenerator.PendingCount > 150)
             {
-                Thread.Sleep(10);
-                continue;
+                break; // Прервать цикл for, а не блокировать поток
             }
 
-            if (center != lastScheduledCenter)
-            {
-                lastScheduledCenter = center;
-                ScheduleUnloads();
-            }
+            // Проверка на смену позиции игрока нужна, чтобы прервать
+            // долгое планирование, если игрок быстро переместился.
+            if (_positionChangedDirty) break;
 
-            int viewDist = GameSettings.RenderDistance;
-            bool dirty = false;
-            int scheduledCount = 0;
-
-            for (int r = 0; r <= viewDist; r++)
-            {
-                if (_positionChangedDirty) { dirty = true; break; }
-                while (_chunkGenerator.PendingCount > 150) 
-                {
-                    if (_positionChangedDirty || _schedulerCts.IsCancellationRequested) { dirty = true; break; }
-                    Thread.Sleep(2);
-                }
-                if (dirty) break;
-                bool added = false;
-                ProcessRing(center, r, WorldHeightChunks, viewDist, ref added);
-                if (added) scheduledCount++;
-            }
-            
-            if (_positionChangedDirty)
-            {
-                lock(_playerPosLock) _positionChangedDirty = false;
-            }
-            else
-            {
-                if (scheduledCount == 0) Thread.Sleep(30);
-                else Thread.Sleep(1);
-            }
+            bool addedInRing = false;
+            ProcessRing(center, r, WorldHeightChunks, viewDist, ref addedInRing);
+            if (addedInRing) scheduledCount++;
+        }
+        
+        // Логика сна в конце для контроля частоты работы планировщика
+        if (scheduledCount == 0)
+        {
+            // Если ничего не запланировали (мир загружен или очередь полна),
+            // ждем подольше перед следующей проверкой.
+            Thread.Sleep(30);
+        }
+        else
+        {
+            // Если мы добавили задачи, ждем совсем немного,
+            // чтобы уступить процессорное время потокам-генераторам.
+            Thread.Sleep(1);
         }
     }
+}
 
     private void ScheduleUnloads()
     {
@@ -339,7 +361,8 @@ public class WorldManager : IDisposable
             
             if (chunkToAdd != null) 
             { 
-                OnChunkLoaded?.Invoke(chunkToAdd); 
+                // ИЗМЕНЕНИЕ: Событие OnChunkLoaded убрано отсюда.
+                // Теперь мы просто отправляем чанк на построение физики.
                 _physicsBuilder.EnqueueTask(chunkToAdd, urgent: true); 
             } 
 
@@ -365,6 +388,9 @@ public class WorldManager : IDisposable
                 );
             }
             result.TargetChunk.OnPhysicsRebuilt(handle);
+
+            // ИЗМЕНЕНИЕ: Вызываем OnChunkLoaded здесь, когда чанк полностью готов (с данными и физикой).
+            OnChunkLoaded?.Invoke(result.TargetChunk);
 
             // --- И только ПОТОМ проверяем бюджет, перед тем как взять СЛЕДУЮЩИЙ ---
             if (_mainThreadStopwatch.Elapsed.TotalMilliseconds >= budgetMs) break;

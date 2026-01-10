@@ -13,7 +13,7 @@ public static class GameSettings
 {
     // === ГРАФИКА ===
     public static int RenderDistance = 32;
-    public static int GpuUploadSpeed = 2000;
+    public static int GpuUploadSpeed = 5000;
     public static bool UseProceduralWater = false; 
     public static bool EnableWaterTransparency = false; 
     public static ShadowMode CurrentShadowMode = ShadowMode.None;
