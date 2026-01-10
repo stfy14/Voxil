@@ -52,8 +52,8 @@ void main() {
     if (hit) {
         vec3 hitPos = uCamPos + rayDir * tFinal;
 
-        // === ТВОЯ ОРИГИНАЛЬНАЯ ЛОГИКА ВОДЫ ===
-        if (!isDynamic && matID == 4u) {
+        // === ТВОЯ ОРИГИНАЛЬНАЯ ЛОГИКА ВОДЫ (ОТРУБИЛ К ХУЯМ ВЕРНУТЬ НА 4u)===
+        if (!isDynamic && matID == 999u) {
             vec3 waterNormal = get_water_normal_photon(hitPos, normal, hitPos.xz, vec2(0), 1.0, false);
             vec3 reflDir = reflect(rayDir, waterNormal);
 

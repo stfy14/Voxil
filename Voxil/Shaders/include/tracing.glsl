@@ -37,16 +37,39 @@ uint GetVoxelData(uint chunkSlot, int voxelIdx) {
     uint chunkSizeUint = (uint(VOXEL_RESOLUTION)*uint(VOXEL_RESOLUTION)*uint(VOXEL_RESOLUTION)) / uint(VOXELS_IN_UINT);
     uint offset = localSlot * chunkSizeUint + (uint(voxelIdx) >> 2u);
     uint rawVal = 0u;
+
     #if VOXEL_BANKS == 1
         rawVal = b0[offset];
     #else
-        switch(bank) {
-        case 0u: rawVal = b0[offset]; break; case 1u: rawVal = b1[offset]; break;
-        case 2u: rawVal = b2[offset]; break; case 3u: rawVal = b3[offset]; break;
-        case 4u: rawVal = b4[offset]; break; case 5u: rawVal = b5[offset]; break;
-        case 6u: rawVal = b6[offset]; break; case 7u: rawVal = b7[offset]; break;
-    }
+        // ИСПРАВЛЕННЫЙ SWITCH С ПРОВЕРКАМИ ПРЕПРОЦЕССОРА
+    switch(bank) {
+            #if VOXEL_BANKS >= 1
+        case 0u: rawVal = b0[offset]; break;
+            #endif
+        #if VOXEL_BANKS >= 2
+        case 1u: rawVal = b1[offset]; break;
+            #endif
+        #if VOXEL_BANKS >= 3
+        case 2u: rawVal = b2[offset]; break;
+            #endif
+        #if VOXEL_BANKS >= 4
+        case 3u: rawVal = b3[offset]; break;
+            #endif
+        #if VOXEL_BANKS >= 5
+        case 4u: rawVal = b4[offset]; break;
+            #endif
+        #if VOXEL_BANKS >= 6
+        case 5u: rawVal = b5[offset]; break;
+            #endif
+        #if VOXEL_BANKS >= 7
+        case 6u: rawVal = b6[offset]; break;
+            #endif
+        #if VOXEL_BANKS >= 8
+        case 7u: rawVal = b7[offset]; break;
+            #endif
+        }
     #endif
+
     uint shift = (uint(voxelIdx) & 3u) * 8u;
     return (rawVal >> shift) & 0xFFu;
 }
@@ -79,7 +102,7 @@ bool TraceDynamicRay(vec3 ro, vec3 rd, float maxDist, inout float tHit, inout in
     vec3 deltaDist = abs(uGridStep * invRd);
     vec3 sideDist = (sign(rd) * (vec3(mapPos) - currPos) + (0.5 + 0.5 * sign(rd))) * deltaDist;
 
-    for (int i = 0; i < 128; i++) {
+    for (int i = 0; i < 512; i++) {
         steps++;
         if (any(lessThan(mapPos, ivec3(0))) || any(greaterThanEqual(mapPos, ivec3(uGridSize)))) break;
         int nodeIndex = imageLoad(uObjectGridHead, mapPos).r;

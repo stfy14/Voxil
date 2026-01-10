@@ -48,7 +48,7 @@ public class GpuRaycastingRenderer : IDisposable
 
     private const int PT_X = 512, PT_Y = 16, PT_Z = 512;
     private const int MASK_X = PT_X - 1, MASK_Y = PT_Y - 1, MASK_Z = PT_Z - 1;
-    private const int OBJ_GRID_SIZE = 256;
+    private const int OBJ_GRID_SIZE = 512;
     private float _gridCellSize;
 
     // Используем Queue для последовательной выдачи слотов (0, 1, 2...)
