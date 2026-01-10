@@ -71,10 +71,10 @@ public class SettingsWindow : IUIWindow
             ImGui.Spacing();
             ImGui.Text("Effects");
             bool ao = GameSettings.EnableAO; if (ImGui.Checkbox("Ambient Occlusion", ref ao)) { GameSettings.EnableAO = ao; _renderer.ReloadShader(); }
-            bool water = GameSettings.UseProceduralWater; if (ImGui.Checkbox("Procedural Water", ref water)) { GameSettings.UseProceduralWater = water; _renderer.ReloadShader(); }
-            bool trans = GameSettings.EnableWaterTransparency; if (ImGui.Checkbox("Water Transparency", ref trans)) { GameSettings.EnableWaterTransparency = trans; _renderer.ReloadShader(); }
-            bool beam = GameSettings.BeamOptimization; if (ImGui.Checkbox("Beam Optimization", ref beam)) { GameSettings.BeamOptimization = beam; _renderer.ReloadShader(); }
-            bool heatmap = GameSettings.ShowDebugHeatmap; if (ImGui.Checkbox("Debug Heatmap (Cost)", ref heatmap)) { GameSettings.ShowDebugHeatmap = heatmap; }
+            bool water = GameSettings.UseProceduralWater; if (ImGui.Checkbox("Procedural Water (Disable)", ref water)) { GameSettings.UseProceduralWater = water; _renderer.ReloadShader(); }
+            bool trans = GameSettings.EnableWaterTransparency; if (ImGui.Checkbox("Water Transparency (Disable)", ref trans)) { GameSettings.EnableWaterTransparency = trans; _renderer.ReloadShader(); }
+            bool beam = GameSettings.BeamOptimization; if (ImGui.Checkbox("Beam Optimization (May increase/reduce FPS)", ref beam)) { GameSettings.BeamOptimization = beam; _renderer.ReloadShader(); }
+            bool heatmap = GameSettings.ShowDebugHeatmap; if (ImGui.Checkbox("Debug Heatmap (Debug)", ref heatmap)) { GameSettings.ShowDebugHeatmap = heatmap; }
 
             // --- Секция CPU & Threads ---
             ImGui.Spacing();

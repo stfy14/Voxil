@@ -16,12 +16,12 @@ public static class GameSettings
     public static int GpuUploadSpeed = 5000;
     public static bool UseProceduralWater = false; 
     public static bool EnableWaterTransparency = false; 
-    public static ShadowMode CurrentShadowMode = ShadowMode.None;
-    public static bool EnableAO = false;              
+    public static ShadowMode CurrentShadowMode = ShadowMode.Soft;
+    public static bool EnableAO = true;              
     public static int SoftShadowSamples = 8; 
     
     // === ОПТИМИЗАЦИЯ ===
-    public static bool BeamOptimization = true;
+    public static bool BeamOptimization = false;
     public static bool ShowDebugHeatmap = false;
 
     // === ПОТОКИ И ПРОИЗВОДИТЕЛЬНОСТЬ (CPU) ===

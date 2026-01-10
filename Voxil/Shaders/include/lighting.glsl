@@ -5,17 +5,47 @@
 #define SHADOW_BIAS 0.003
 
 bool IsSolidVoxelSpace(ivec3 pos) {
+    // 1. Проверка границ мира
     ivec3 boundMin = ivec3(uBoundMinX, uBoundMinY, uBoundMinZ) * VOXEL_RESOLUTION;
     ivec3 boundMax = ivec3(uBoundMaxX, uBoundMaxY, uBoundMaxZ) * VOXEL_RESOLUTION;
     if (any(lessThan(pos, boundMin)) || any(greaterThanEqual(pos, boundMax))) return false;
+
+    // 2. Проверка Page Table (есть ли чанк)
     ivec3 chunkCoord = pos >> BIT_SHIFT;
     uint chunkSlot = imageLoad(uPageTable, chunkCoord & (PAGE_TABLE_SIZE - 1)).r;
     if (chunkSlot == 0xFFFFFFFFu) return false;
-    ivec3 local = pos & BIT_MASK;
-    int idx = local.x + VOXEL_RESOLUTION * (local.y + VOXEL_RESOLUTION * local.z);
 
-    // ИСПОЛЬЗУЕМ GetVoxelData
+    // 3. ОПТИМИЗАЦИЯ: Проверка Bitmask (есть ли блок 4x4)
+    // Этого не было. Мы избегаем чтения GetVoxelData для пустого воздуха.
+
+    // Вычисляем локальные координаты
+    ivec3 local = pos & BIT_MASK; // 0..31
+    ivec3 bMapPos = local / BLOCK_SIZE; // 0..7
+    int blockIdx = bMapPos.x + BLOCKS_PER_AXIS * (bMapPos.y + BLOCKS_PER_AXIS * bMapPos.z);
+
+    // Читаем маску
+    uint maskBaseOffset = chunkSlot * (uint(BLOCKS_PER_AXIS)*uint(BLOCKS_PER_AXIS)*uint(BLOCKS_PER_AXIS));
+    uvec2 maskVal = packedMasks[maskBaseOffset + blockIdx];
+
+    // Если блок 4x4 полностью пуст - выходим сразу
+    if (maskVal.x == 0u && maskVal.y == 0u) return false;
+
+    // Проверяем конкретный бит
+    int lx = local.x % BLOCK_SIZE;
+    int ly = local.y % BLOCK_SIZE;
+    int lz = local.z % BLOCK_SIZE;
+    int bitIdx = lx + BLOCK_SIZE * (ly + BLOCK_SIZE * lz);
+
+    bool hasVoxel = (bitIdx < 32) ? ((maskVal.x & (1u << bitIdx)) != 0u) : ((maskVal.y & (1u << (bitIdx - 32))) != 0u);
+
+    if (!hasVoxel) return false;
+
+    // 4. Только если бит установлен, читаем тип материала (чтобы игнорировать воду)
+    int idx = local.x + VOXEL_RESOLUTION * (local.y + VOXEL_RESOLUTION * local.z);
     uint matID = GetVoxelData(chunkSlot, idx);
+
+    // Игнорируем воду (ID 4) для AO, чтобы под водой не было черноты на дне,
+    // и чтобы сама вода не затеняла берег.
     return (matID != 0u && matID != 4u);
 }
 

@@ -37,7 +37,10 @@ public class GpuRaycastingRenderer : IDisposable
     private int _beamTexture;
     private int _beamWidth;
     private int _beamHeight;
-    private const int BeamDivisor = 2;
+    private const int BeamDivisor = 4;
+    
+    private int _windowWidth;
+    private int _windowHeight;
 
     private const int ChunkVol = Constants.ChunkVolume;
     private const int PackedChunkSizeInInts = ChunkVol / 4;
@@ -234,7 +237,15 @@ public class GpuRaycastingRenderer : IDisposable
         if (_linkedListSsbo == 0) { _linkedListSsbo = GL.GenBuffer(); GL.BindBuffer(BufferTarget.ShaderStorageBuffer, _linkedListSsbo); GL.BufferData(BufferTarget.ShaderStorageBuffer, 2*1024*1024*8, IntPtr.Zero, BufferUsageHint.DynamicDraw); GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 3, _linkedListSsbo); }
         if (_atomicCounterBuffer == 0) { _atomicCounterBuffer = GL.GenBuffer(); GL.BindBuffer(BufferTarget.AtomicCounterBuffer, _atomicCounterBuffer); GL.BufferData(BufferTarget.AtomicCounterBuffer, 4, IntPtr.Zero, BufferUsageHint.DynamicDraw); GL.BindBufferBase(BufferRangeTarget.AtomicCounterBuffer, 4, _atomicCounterBuffer); }
         if (_dynamicObjectsBuffer == 0) { _dynamicObjectsBuffer = GL.GenBuffer(); GL.BindBuffer(BufferTarget.ShaderStorageBuffer, _dynamicObjectsBuffer); GL.BufferData(BufferTarget.ShaderStorageBuffer, 4096 * Marshal.SizeOf<GpuDynamicObject>(), IntPtr.Zero, BufferUsageHint.DynamicDraw); GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 2, _dynamicObjectsBuffer); }
-        if (_beamFbo == 0) _beamFbo = GL.GenFramebuffer(); if (_beamTexture == 0) _beamTexture = GL.GenTexture();
+        if (_beamTexture == 0) 
+        { 
+            _beamTexture = GL.GenTexture(); 
+            GL.BindTexture(TextureTarget.Texture2D, _beamTexture);
+            // Используем R32F для хранения дистанции (float)
+            GL.TexImage2D(TextureTarget.Texture2D, 0, PixelInternalFormat.R32f, _beamWidth, _beamHeight, 0, PixelFormat.Red, PixelType.Float, IntPtr.Zero);
+            GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Nearest);
+            GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMinFilter.Nearest);
+        }
     }
 
     private void CleanupBuffers()
@@ -468,21 +479,72 @@ private void UpdateDynamicObjectsAndGrid()
 
         GL.BindVertexArray(_quadVao); 
         
-        if (GameSettings.BeamOptimization) { 
-            GL.BindFramebuffer(FramebufferTarget.Framebuffer, _beamFbo); GL.Viewport(0, 0, _beamWidth, _beamHeight); GL.Clear(ClearBufferMask.ColorBufferBit); 
-            shader.SetInt("uIsBeamPass", 1); GL.Disable(EnableCap.DepthTest); GL.DrawArrays(PrimitiveType.TriangleStrip, 0, 4); 
-        } 
+        // --- ПРОХОД 1: BEAM OPTIMIZATION (Низкое разрешение) ---
+        if (GameSettings.BeamOptimization) 
+        { 
+            // Если текстура была удалена при ресайзе, создаем её заново (R32F)
+            if (_beamTexture == 0) 
+            { 
+                _beamTexture = GL.GenTexture(); 
+                GL.BindTexture(TextureTarget.Texture2D, _beamTexture);
+                GL.TexImage2D(TextureTarget.Texture2D, 0, PixelInternalFormat.R32f, _beamWidth, _beamHeight, 0, PixelFormat.Red, PixelType.Float, IntPtr.Zero);
+                GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Nearest);
+                GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMinFilter.Nearest);
+            }
+
+            GL.BindFramebuffer(FramebufferTarget.Framebuffer, _beamFbo);
+            // Привязываем текстуру к FBO
+            GL.FramebufferTexture2D(FramebufferTarget.Framebuffer, FramebufferAttachment.ColorAttachment0, TextureTarget.Texture2D, _beamTexture, 0);
+
+            // Устанавливаем маленький Viewport
+            GL.Viewport(0, 0, _beamWidth, _beamHeight); 
+            // Чистим буфер дистанции значением "далеко" (например 10000)
+            GL.ClearColor(10000.0f, 0, 0, 1);
+            GL.Clear(ClearBufferMask.ColorBufferBit); 
         
+            shader.SetInt("uIsBeamPass", 1); 
+            GL.Disable(EnableCap.DepthTest); 
+            GL.DrawArrays(PrimitiveType.TriangleStrip, 0, 4); 
+        } 
+    
+        // --- ПРОХОД 2: MAIN PASS (Полное разрешение) ---
         GL.BindFramebuffer(FramebufferTarget.Framebuffer, 0); 
-        GL.Viewport(0, 0, _beamWidth * BeamDivisor, _beamHeight * BeamDivisor); 
+    
+        // ИСПРАВЛЕНИЕ: Используем сохраненные реальные размеры окна!
+        GL.Viewport(0, 0, _windowWidth, _windowHeight); 
+    
         shader.SetInt("uIsBeamPass", 0); 
+        // Передаем текстуру с результатами первого прохода
         shader.SetTexture("uBeamTexture", _beamTexture, TextureUnit.Texture1); 
+    
         GL.DrawArrays(PrimitiveType.TriangleStrip, 0, 4); 
+    
         GL.Enable(EnableCap.DepthTest); 
         GL.BindVertexArray(0); 
     }
     
-    public void OnResize(int w, int h) { _beamWidth = w/2; _beamHeight = h/2; GL.Viewport(0,0,w,h); }
+    public void OnResize(int w, int h) 
+    { 
+        // Запоминаем РЕАЛЬНЫЕ размеры
+        _windowWidth = w;
+        _windowHeight = h;
+
+        // Вычисляем уменьшенные размеры (округление вниз нас устраивает для текстуры)
+        _beamWidth = w / BeamDivisor; 
+        _beamHeight = h / BeamDivisor; 
+    
+        // Защита от нулевого размера при сворачивании окна
+        if (_beamWidth < 1) _beamWidth = 1;
+        if (_beamHeight < 1) _beamHeight = 1;
+
+        // Если текстура уже создана, ее нужно пересоздать под новый размер,
+        // но проще это сделает логика внутри Render/Update при следующем кадре 
+        // или можно вызвать удаление старой:
+        if (_beamTexture != 0) { GL.DeleteTexture(_beamTexture); _beamTexture = 0; }
+    
+        // Обновляем Viewport для основного окна (на всякий случай)
+        GL.Viewport(0, 0, _windowWidth, _windowHeight); 
+    }
     
     // Прокси метод для UI, который просит систему перекомпилировать шейдер
     public void ReloadShader() 
