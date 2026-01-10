@@ -1,4 +1,6 @@
-﻿using BepuPhysics;
+﻿// --- START OF FILE Chunk.cs ---
+
+using BepuPhysics;
 using OpenTK.Mathematics;
 using System;
 using System.Buffers;
@@ -7,21 +9,27 @@ using System.Threading;
 public class Chunk : IDisposable
 {
     // Ссылки на константы для совместимости
-    public const int ChunkSize = Constants.ChunkResolution; // 64
-    public const int Volume = Constants.ChunkVolume;        // 262144
+    public const int ChunkSize = Constants.ChunkResolution; 
+    public const int Volume = Constants.ChunkVolume;        
 
-    // --- НОВЫЕ КОНСТАНТЫ (Bitwise Masking) ---
+    // --- БИТОВЫЕ КОНСТАНТЫ ---
     public const int BlockSize = 4;
-    public const int BlocksPerAxis = ChunkSize / BlockSize; // 16
-    public const int MasksCount = BlocksPerAxis * BlocksPerAxis * BlocksPerAxis; // 4096
+    private const int BlockShift = 2; // 2^2 = 4
+    private const int BlockMaskBit = 3; // 00000011 (3)
+    
+    public const int BlocksPerAxis = ChunkSize / BlockSize; 
+    public const int MasksCount = BlocksPerAxis * BlocksPerAxis * BlocksPerAxis; 
 
     public Vector3i Position { get; }
     public WorldManager WorldManager { get; }
 
     private byte[] _voxels; // Nullable!
-    private ulong[] _blockMasks; // Маски для оптимизации (Bitwise)
+    private ulong[] _blockMasks; 
 
     public int SolidCount { get; private set; } = 0;
+    
+    // Флаг готовности для рендера (из предыдущих шагов)
+    public bool IsReadyForRendering { get; set; } = false;
     
     private readonly ReaderWriterLockSlim _lock = new ReaderWriterLockSlim();
     public bool IsLoaded { get; private set; } = false;
@@ -34,6 +42,7 @@ public class Chunk : IDisposable
     {
         Position = position;
         WorldManager = worldManager;
+        IsReadyForRendering = false;
     }
 
     public void SetDataFromArray(MaterialType[] sourceArray)
@@ -45,11 +54,19 @@ public class Chunk : IDisposable
         {
             int solidCounter = 0;
             
-            // Инициализация или очистка масок
             if (_blockMasks == null) _blockMasks = ArrayPool<ulong>.Shared.Rent(MasksCount);
             Array.Clear(_blockMasks, 0, MasksCount);
 
             bool hasSolids = false;
+
+            // Кэшируем константы для скорости (JIT это любит)
+            int cShift = Constants.BitShift; 
+            int cMask = Constants.BitMask;   
+            int bShift = BlockShift;
+            int bMask = BlockMaskBit;
+            int bPerAxis = BlocksPerAxis;
+            // Сдвиги для макро-индекса блока
+            int bLayerStride = bPerAxis * bPerAxis;
 
             for(int i = 0; i < Volume; i++) 
             {
@@ -58,24 +75,36 @@ public class Chunk : IDisposable
                     solidCounter++;
                     hasSolids = true;
 
-                    // --- ГЕНЕРАЦИЯ МАСКИ ---
-                    // Индекс i = x + 64 * (y + 64 * z)
-                    int z = i / (ChunkSize * ChunkSize);
-                    int rem = i % (ChunkSize * ChunkSize);
-                    int y = rem / ChunkSize;
-                    int x = rem % ChunkSize;
+                    // --- ОПТИМИЗАЦИЯ: БИТОВЫЕ ОПЕРАЦИИ ВМЕСТО ДЕЛЕНИЯ ---
+                    // Индекс i = x + Size * (y + Size * z)
+                    // z = i / (Size^2) -> i >> (shift * 2)
+                    int z = i >> (cShift * 2);
+                    
+                    // rem = i % (Size^2). В битах это отсечение старших битов Z.
+                    // (1 << (cShift * 2)) - 1 создает маску (например, 1023 для 32x32)
+                    // Но проще: y = (i >> cShift) & cMask
+                    int y = (i >> cShift) & cMask;
+                    
+                    // x = i % Size -> i & cMask
+                    int x = i & cMask;
 
-                    // Координаты макро-блока
-                    int bx = x / BlockSize;
-                    int by = y / BlockSize;
-                    int bz = z / BlockSize;
-                    int blockIndex = bx + BlocksPerAxis * (by + BlocksPerAxis * bz);
+                    // Координаты макро-блока (деление на 4 -> сдвиг на 2)
+                    int bx = x >> bShift;
+                    int by = y >> bShift;
+                    int bz = z >> bShift;
+                    
+                    // Индекс блока в массиве масок
+                    int blockIndex = bx + bPerAxis * (by + bPerAxis * bz);
 
-                    // Координаты внутри блока (бит)
-                    int lx = x % BlockSize;
-                    int ly = y % BlockSize;
-                    int lz = z % BlockSize;
-                    int localBitIndex = lx + BlockSize * (ly + BlockSize * lz); // 0..63
+                    // Координаты внутри блока (x % 4 -> x & 3)
+                    int lx = x & bMask;
+                    int ly = y & bMask;
+                    int lz = z & bMask;
+                    
+                    // Бит внутри ulong (0..63)
+                    // bit = lx + 4 * ly + 16 * lz
+                    // bit = lx + (ly << 2) + (lz << 4)
+                    int localBitIndex = lx | (ly << 2) | (lz << 4);
 
                     // Устанавливаем бит
                     _blockMasks[blockIndex] |= (1UL << localBitIndex);
@@ -86,7 +115,6 @@ public class Chunk : IDisposable
             if (SolidCount > 0)
             {
                 if (_voxels == null) _voxels = ArrayPool<byte>.Shared.Rent(Volume);
-                // Безопасное копирование
                 for(int i=0; i < Volume; i++) _voxels[i] = (byte)sourceArray[i];
             }
             else
@@ -96,8 +124,6 @@ public class Chunk : IDisposable
                     ArrayPool<byte>.Shared.Return(_voxels);
                     _voxels = null;
                 }
-                // Если чанк пустой, маски можно не очищать (они уже очищены или не будут читаться),
-                // но массив _blockMasks мы пока держим.
             }
             
             IsLoaded = true;
@@ -105,7 +131,6 @@ public class Chunk : IDisposable
         finally { _lock.ExitWriteLock(); }
     }
 
-    // --- Метод для чтения масок (НОВЫЙ) ---
     public void ReadMasksUnsafe(Action<ulong[]> action)
     {
         if (_isDisposed) return;
@@ -136,7 +161,6 @@ public class Chunk : IDisposable
         try { action(_voxels); } finally { _lock.ExitReadLock(); }
     }
 
-    // --- ВОССТАНОВЛЕННЫЙ МЕТОД (Используется в физике) ---
     public byte[] GetVoxelsCopy()
     {
         if (_isDisposed) return null;
@@ -202,18 +226,21 @@ public class Chunk : IDisposable
                     _voxels[index] = 0;
                     SolidCount--;
 
-                    // --- ОБНОВЛЕНИЕ МАСКИ ПРИ УДАЛЕНИИ ---
-                    int bx = localPosition.X / BlockSize;
-                    int by = localPosition.Y / BlockSize;
-                    int bz = localPosition.Z / BlockSize;
+                    // --- ОПТИМИЗИРОВАННОЕ ОБНОВЛЕНИЕ МАСКИ ---
+                    int x = localPosition.X;
+                    int y = localPosition.Y;
+                    int z = localPosition.Z;
+
+                    int bx = x >> BlockShift;
+                    int by = y >> BlockShift;
+                    int bz = z >> BlockShift;
                     int blockIndex = bx + BlocksPerAxis * (by + BlocksPerAxis * bz);
                     
-                    int lx = localPosition.X % BlockSize;
-                    int ly = localPosition.Y % BlockSize;
-                    int lz = localPosition.Z % BlockSize;
-                    int localBitIndex = lx + BlockSize * (ly + BlockSize * lz);
+                    int lx = x & BlockMaskBit;
+                    int ly = y & BlockMaskBit;
+                    int lz = z & BlockMaskBit;
+                    int localBitIndex = lx | (ly << 2) | (lz << 4);
                     
-                    // Сбрасываем бит в 0. Если блок станет пустым (0), шейдер будет его пропускать.
                     _blockMasks[blockIndex] &= ~(1UL << localBitIndex);
                     // -------------------------------------
 
@@ -231,7 +258,6 @@ public class Chunk : IDisposable
 
         if (removed && IsLoaded)
         {
-            // Уведомления
             WorldManager.NotifyVoxelFastDestroyed(this.Position * Constants.ChunkSizeWorld + localPosition);
             WorldManager.RebuildPhysics(this);
             WorldManager.NotifyChunkModified(this); 
@@ -261,16 +287,12 @@ public class Chunk : IDisposable
     public void Dispose()
     {
         if (_isDisposed) return;
-        
-        // Блокируем запись, чтобы никто не начал читать/писать пока мы удаляем
         _lock.EnterWriteLock(); 
         try
         {
-            if (_isDisposed) return; // Двойная проверка
+            if (_isDisposed) return;
             _isDisposed = true;
             IsLoaded = false;
-            
-            // Очищаем физику (это безопасно делать под локом, т.к. RegisterChunkStatic берет свой лок)
             ClearPhysics();
 
             if (_voxels != null)
@@ -287,7 +309,7 @@ public class Chunk : IDisposable
         finally
         {
             _lock.ExitWriteLock();
-            _lock.Dispose(); // Dispose самого лока
+            _lock.Dispose();
         }
     }
 }

@@ -338,109 +338,90 @@ public class GpuRaycastingRenderer : IDisposable
 
     private int GetPageTableIndex(Vector3i p) => (p.X & MASK_X) + PT_X * ((p.Y & MASK_Y) + PT_Y * (p.Z & MASK_Z));
     
-    private void UpdateDynamicObjectsAndGrid() 
-{ 
-    // 1. Получаем список всех активных воксельных объектов
-    var voxelObjects = _worldManager.GetAllVoxelObjects(); 
-    int count = voxelObjects.Count; 
-
-    // 2. Если объектов стало больше, чем вмещает текущий массив, расширяем его
-    if (count > _tempGpuObjectsArray.Length) 
+private void UpdateDynamicObjectsAndGrid() 
     { 
-        // Увеличиваем массив с запасом (+1024)
-        Array.Resize(ref _tempGpuObjectsArray, count + 1024); 
-        
-        // Пересоздаем буфер на GPU под новый размер
-        GL.BindBuffer(BufferTarget.ShaderStorageBuffer, _dynamicObjectsBuffer); 
-        GL.BufferData(BufferTarget.ShaderStorageBuffer, 
-                      _tempGpuObjectsArray.Length * Marshal.SizeOf<GpuDynamicObject>(), 
-                      IntPtr.Zero, 
-                      BufferUsageHint.DynamicDraw); 
-    } 
+        // 1. Получаем список всех активных воксельных объектов
+        var voxelObjects = _worldManager.GetAllVoxelObjects(); 
+        int count = voxelObjects.Count; 
 
-    // 3. Заполняем массив данных для GPU (позиция, поворот, цвет, AABB)
-    if (count > 0) 
-    { 
-        // Используем Parallel.For для ускорения математики при большом кол-ве объектов
-        var options = new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount }; 
-        
-        Parallel.For(0, count, options, i => { 
-            var vo = voxelObjects[i]; 
-            
-            // Матрица модели: Сдвиг ЦМ в 0 -> Вращение -> Сдвиг в позицию мира
-            Matrix4 model = Matrix4.CreateTranslation(-vo.LocalCenterOfMass) * 
-                            Matrix4.CreateFromQuaternion(vo.Rotation) * 
-                            Matrix4.CreateTranslation(vo.Position); 
-            
-            var col = MaterialRegistry.GetColor(vo.Material); 
-            
-            _tempGpuObjectsArray[i] = new GpuDynamicObject { 
-                Model = model, 
-                InvModel = Matrix4.Invert(model), 
-                Color = new Vector4(col.r, col.g, col.b, 1.0f), 
-                // Передаем локальные границы (AABB) для ускорения лучей
-                BoxMin = new Vector4(vo.LocalBoundsMin, 0), 
-                BoxMax = new Vector4(vo.LocalBoundsMax, 0) 
-            }; 
-        }); 
+        // 2. Если объектов стало больше, чем вмещает текущий массив, расширяем его
+        if (count > _tempGpuObjectsArray.Length) 
+        { 
+            Array.Resize(ref _tempGpuObjectsArray, count + 1024); 
+            GL.BindBuffer(BufferTarget.ShaderStorageBuffer, _dynamicObjectsBuffer); 
+            GL.BufferData(BufferTarget.ShaderStorageBuffer, 
+                          _tempGpuObjectsArray.Length * Marshal.SizeOf<GpuDynamicObject>(), 
+                          IntPtr.Zero, 
+                          BufferUsageHint.DynamicDraw); 
+        } 
 
-        // Заливаем данные в SSBO (Binding 2)
-        GL.BindBuffer(BufferTarget.ShaderStorageBuffer, _dynamicObjectsBuffer); 
-        GL.BufferSubData(BufferTarget.ShaderStorageBuffer, 
-                         IntPtr.Zero, 
-                         count * Marshal.SizeOf<GpuDynamicObject>(), 
-                         _tempGpuObjectsArray); 
-    } 
+        // 3. Заполняем массив данных для GPU
+        if (count > 0) 
+        { 
+            // ИЗМЕНЕНИЕ: Убран Parallel.For, заменен на обычный цикл.
+            // Это убирает аллокацию делегата и замыкания каждый кадр (меньше работы GC).
+            for (int i = 0; i < count; i++)
+            {
+                var vo = voxelObjects[i];
+                
+                Matrix4 model = Matrix4.CreateTranslation(-vo.LocalCenterOfMass) * 
+                                Matrix4.CreateFromQuaternion(vo.Rotation) * 
+                                Matrix4.CreateTranslation(vo.Position); 
+                
+                var col = MaterialRegistry.GetColor(vo.Material); 
+                
+                _tempGpuObjectsArray[i].Model = model;
+                _tempGpuObjectsArray[i].InvModel = Matrix4.Invert(model);
+                _tempGpuObjectsArray[i].Color = new Vector4(col.r, col.g, col.b, 1.0f);
+                _tempGpuObjectsArray[i].BoxMin = new Vector4(vo.LocalBoundsMin, 0);
+                _tempGpuObjectsArray[i].BoxMax = new Vector4(vo.LocalBoundsMax, 0);
+            }
 
-    // 4. Рассчитываем положение сетки ускорения (Grid)
-    // Сетка "прилипает" к игроку, но движется дискретно (шагами), чтобы не было дрожания
-    float snap = _gridCellSize; 
-    Vector3 playerPos = _worldManager.GetPlayerPosition(); 
-    Vector3 snappedCenter = new Vector3(
-        (float)Math.Floor(playerPos.X / snap) * snap, 
-        (float)Math.Floor(playerPos.Y / snap) * snap, 
-        (float)Math.Floor(playerPos.Z / snap) * snap
-    ); 
-    float halfExtent = (OBJ_GRID_SIZE * _gridCellSize) / 2.0f; 
-    _lastGridOrigin = snappedCenter - new Vector3(halfExtent); 
+            GL.BindBuffer(BufferTarget.ShaderStorageBuffer, _dynamicObjectsBuffer); 
+            GL.BufferSubData(BufferTarget.ShaderStorageBuffer, 
+                             IntPtr.Zero, 
+                             count * Marshal.SizeOf<GpuDynamicObject>(), 
+                             _tempGpuObjectsArray); 
+        } 
 
-    // 5. ОЧИСТКА СТРУКТУР ПЕРЕД COMPUTE SHADER
-    // Сбрасываем счетчик узлов связного списка в 0
-    uint zero = 0; 
-    GL.BindBuffer(BufferTarget.AtomicCounterBuffer, _atomicCounterBuffer); 
-    GL.BufferSubData(BufferTarget.AtomicCounterBuffer, IntPtr.Zero, sizeof(uint), ref zero); 
-    
-    // Очищаем 3D текстуру (головы списков) значением 0
-    GL.ClearTexImage(_gridHeadTexture, 0, PixelFormat.RedInteger, PixelType.Int, IntPtr.Zero); 
+        // 4. Рассчитываем положение сетки ускорения
+        float snap = _gridCellSize; 
+        Vector3 playerPos = _worldManager.GetPlayerPosition(); 
+        Vector3 snappedCenter = new Vector3(
+            (float)Math.Floor(playerPos.X / snap) * snap, 
+            (float)Math.Floor(playerPos.Y / snap) * snap, 
+            (float)Math.Floor(playerPos.Z / snap) * snap
+        ); 
+        float halfExtent = (OBJ_GRID_SIZE * _gridCellSize) / 2.0f; 
+        _lastGridOrigin = snappedCenter - new Vector3(halfExtent); 
 
-    // 6. Запускаем Compute Shader для построения сетки
-    if (count > 0) 
-    { 
-        _gridComputeShader.Use(); 
-        _gridComputeShader.SetInt("uObjectCount", count); 
-        _gridComputeShader.SetVector3("uGridOrigin", _lastGridOrigin); 
-        _gridComputeShader.SetFloat("uGridStep", _gridCellSize); 
-        _gridComputeShader.SetInt("uGridSize", OBJ_GRID_SIZE); 
+        // 5. ОЧИСТКА СТРУКТУР ПЕРЕД COMPUTE SHADER
+        uint zero = 0; 
+        GL.BindBuffer(BufferTarget.AtomicCounterBuffer, _atomicCounterBuffer); 
+        GL.BufferSubData(BufferTarget.AtomicCounterBuffer, IntPtr.Zero, sizeof(uint), ref zero); 
+        GL.ClearTexImage(_gridHeadTexture, 0, PixelFormat.RedInteger, PixelType.Int, IntPtr.Zero); 
 
-        // Привязываем ресурсы
-        // Binding 1: Текстура-голова (R/W)
-        GL.BindImageTexture(1, _gridHeadTexture, 0, true, 0, TextureAccess.ReadWrite, SizedInternalFormat.R32i); 
-        // Binding 2: Данные объектов (SSBO)
-        GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 2, _dynamicObjectsBuffer); 
-        // Binding 3: Узлы связного списка (SSBO)
-        GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 3, _linkedListSsbo); 
-        // Binding 4: Атомарный счетчик
-        GL.BindBufferBase(BufferRangeTarget.AtomicCounterBuffer, 4, _atomicCounterBuffer); 
+        // 6. Запускаем Compute Shader
+        if (count > 0) 
+        { 
+            _gridComputeShader.Use(); 
+            _gridComputeShader.SetInt("uObjectCount", count); 
+            _gridComputeShader.SetVector3("uGridOrigin", _lastGridOrigin); 
+            _gridComputeShader.SetFloat("uGridStep", _gridCellSize); 
+            _gridComputeShader.SetInt("uGridSize", OBJ_GRID_SIZE); 
 
-        // Запускаем (по 64 потока в группе)
-        GL.DispatchCompute((count + 63) / 64, 1, 1); 
+            GL.BindImageTexture(1, _gridHeadTexture, 0, true, 0, TextureAccess.ReadWrite, SizedInternalFormat.R32i); 
+            GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 2, _dynamicObjectsBuffer); 
+            GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 3, _linkedListSsbo); 
+            GL.BindBufferBase(BufferRangeTarget.AtomicCounterBuffer, 4, _atomicCounterBuffer); 
 
-        // Ждем завершения записи в память, чтобы фрагментный шейдер увидел актуальные данные
-        GL.MemoryBarrier(MemoryBarrierFlags.ShaderImageAccessBarrierBit | 
-                         MemoryBarrierFlags.AtomicCounterBarrierBit | 
-                         MemoryBarrierFlags.ShaderStorageBarrierBit); 
-    } 
-}
+            GL.DispatchCompute((count + 63) / 64, 1, 1); 
+
+            GL.MemoryBarrier(MemoryBarrierFlags.ShaderImageAccessBarrierBit | 
+                             MemoryBarrierFlags.AtomicCounterBarrierBit | 
+                             MemoryBarrierFlags.ShaderStorageBarrierBit); 
+        } 
+    }
     
     public void Render(Camera cam) 
     { 
