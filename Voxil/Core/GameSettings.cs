@@ -12,7 +12,7 @@ public enum ShadowMode
 public static class GameSettings
 {
     // === ГРАФИКА ===
-    public static int RenderDistance = 32;
+    public static int RenderDistance = 64;
     public static bool EnableAO = true;    
     public static ShadowMode CurrentShadowMode = ShadowMode.Soft;
     public static int SoftShadowSamples = 8; 

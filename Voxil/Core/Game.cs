@@ -41,6 +41,10 @@ public class Game : GameWindow
     {
         base.OnLoad();
 
+        // --- ТЕСТ СИСТЕМЫ ---
+        //var tester = new VoxelSystemTester();
+        //tester.RunStressTest();
+        
         GL.ClearColor(0.5f, 0.7f, 0.9f, 1.0f);
         GL.Enable(EnableCap.DepthTest);
         GL.Disable(EnableCap.CullFace);
@@ -58,7 +62,8 @@ public class Game : GameWindow
         _renderer = new GpuRaycastingRenderer(_worldManager);
         _renderer.Load();
         _renderer.OnResize(ClientSize.X, ClientSize.Y);
-
+        PerformanceMonitor.MemoryInfoProvider = () => _renderer.GetMemoryDebugInfo();
+        
         _input = new InputManager();
         _lineRenderer = new LineRenderer();
         _physicsDebugger = new PhysicsDebugDrawer();

@@ -13,28 +13,27 @@ bool IsSolidForAO(ivec3 pos) {
     uint chunkSlot = imageLoad(uPageTable, chunkCoord & (PAGE_TABLE_SIZE - 1)).r;
     if (chunkSlot == 0xFFFFFFFFu) return false;
 
+    // === SOLID CHUNK CHECK ===
+    if ((chunkSlot & 0x80000000u) != 0u) {
+        return true;
+    }
+    // =========================
+
     ivec3 local = pos & BIT_MASK;
     ivec3 bMapPos = local / BLOCK_SIZE;
     int blockIdx = bMapPos.x + BLOCKS_PER_AXIS * (bMapPos.y + BLOCKS_PER_AXIS * bMapPos.z);
-
     uint maskBaseOffset = chunkSlot * (uint(BLOCKS_PER_AXIS)*uint(BLOCKS_PER_AXIS)*uint(BLOCKS_PER_AXIS));
     uvec2 maskVal = packedMasks[maskBaseOffset + blockIdx];
 
     if (maskVal.x == 0u && maskVal.y == 0u) return false;
 
-    // Проверяем конкретный бит всегда (для точности)
-    int lx = local.x % BLOCK_SIZE;
-    int ly = local.y % BLOCK_SIZE;
-    int lz = local.z % BLOCK_SIZE;
+    int lx = local.x % BLOCK_SIZE; int ly = local.y % BLOCK_SIZE; int lz = local.z % BLOCK_SIZE;
     int bitIdx = lx + BLOCK_SIZE * (ly + BLOCK_SIZE * lz);
-
     bool hasVoxel = (bitIdx < 32) ? ((maskVal.x & (1u << bitIdx)) != 0u) : ((maskVal.y & (1u << (bitIdx - 32))) != 0u);
-
     if (!hasVoxel) return false;
 
     int idx = local.x + VOXEL_RESOLUTION * (local.y + VOXEL_RESOLUTION * local.z);
     uint matID = GetVoxelData(chunkSlot, idx);
-
     return (matID != 0u && matID != 4u);
 }
 

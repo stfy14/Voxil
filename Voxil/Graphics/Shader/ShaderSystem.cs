@@ -8,23 +8,20 @@ public class ShaderSystem : IDisposable
     public Shader RaycastShader { get; private set; }
     public event Action OnShaderReloaded;
 
-    public void Compile(int voxelBanksCount)
+    // Аргумент int banks больше не нужен, но оставим сигнатуру для совместимости, или можно убрать
+    public void Compile(int banksCount, int chunksPerBank) // <--- Новые аргументы
     {
         RaycastShader?.Dispose();
         var defines = new List<string>();
 
-        // 1. Системные
-        defines.Add($"VOXEL_BANKS {voxelBanksCount}");
+        defines.Add($"VOXEL_BANKS {banksCount}");     // Обычно 32
+        defines.Add($"CHUNKS_PER_BANK {chunksPerBank}"); // <--- ВАЖНО! Например, 65535
 
-        // 2. Настройки графики
         if (GameSettings.UseProceduralWater) defines.Add("WATER_MODE_PROCEDURAL");
         if (GameSettings.EnableAO) defines.Add("ENABLE_AO");
         if (GameSettings.EnableWaterTransparency) defines.Add("ENABLE_WATER_TRANSPARENCY");
         if (GameSettings.BeamOptimization) defines.Add("ENABLE_BEAM_OPTIMIZATION");
-
-        // === ДОБАВЛЕНО ===
         if (GameSettings.EnableLOD) defines.Add("ENABLE_LOD");
-        // =================
 
         switch (GameSettings.CurrentShadowMode)
         {

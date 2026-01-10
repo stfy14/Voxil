@@ -1,4 +1,5 @@
-﻿using System.Collections.Generic;
+﻿using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Threading;
 
@@ -6,7 +7,7 @@ public enum ThreadType
 {
     Generation,     // Генерация ландшафта (Perlin)
     Physics,        // Шаг симуляции BepuPhysics (Update)
-    ChunkPhys,      // Построение коллайдеров чанка (Meshing) <--- НОВОЕ
+    ChunkPhys,      // Построение коллайдеров чанка (Meshing)
     GpuRender       // Upload данных в GPU
 }
 
@@ -14,9 +15,12 @@ public static class PerformanceMonitor
 {
     public static volatile bool IsEnabled = true;
 
+    // Делегат для получения инфо о памяти (назначается извне, например из Game.cs)
+    public static Func<string> MemoryInfoProvider { get; set; }
+
     private static long _genTicks; private static int _genCount;
-    private static long _physTicks; private static int _physCount; // Bepu Step
-    private static long _cPhysTicks; private static int _cPhysCount; // Chunk Collider Build
+    private static long _physTicks; private static int _physCount; 
+    private static long _cPhysTicks; private static int _cPhysCount; 
     private static long _gpuTicks; private static int _gpuCount;
 
     private static readonly double _tickFrequency = Stopwatch.Frequency;
@@ -35,7 +39,7 @@ public static class PerformanceMonitor
                 Interlocked.Add(ref _physTicks, elapsedTicks);
                 Interlocked.Increment(ref _physCount);
                 break;
-            case ThreadType.ChunkPhys: // <--- НОВОЕ
+            case ThreadType.ChunkPhys:
                 Interlocked.Add(ref _cPhysTicks, elapsedTicks);
                 Interlocked.Increment(ref _cPhysCount);
                 break;
@@ -46,7 +50,6 @@ public static class PerformanceMonitor
         }
     }
 
-    // Теперь принимаем время, прошедшее с прошлого замера
     public static Dictionary<string, string> GetDataAndReset(double elapsedSeconds)
     {
         if (!IsEnabled) return null;
@@ -63,7 +66,6 @@ public static class PerformanceMonitor
         long gpuT = Interlocked.Exchange(ref _gpuTicks, 0);
         int gpuC = Interlocked.Exchange(ref _gpuCount, 0);
 
-        // Форматирование: Время выполнения (ms) | CPS (Chunks/Calls per Second)
         string FormatStat(long ticks, int count, bool showCps)
         {
             if (count == 0) return "0.0 ms | 0.0/s";
@@ -80,12 +82,20 @@ public static class PerformanceMonitor
             return $"{ms:F2} ms";
         }
 
-        return new Dictionary<string, string>
+        var stats = new Dictionary<string, string>
         {
-            ["Gen (Perlin)"]   = FormatStat(genT, genC, true),  // Покажет CPS генерации
-            ["Build (Phys)"]   = FormatStat(cPhysT, cPhysC, true), // Покажет CPS мешинга
-            ["Sim (Bepu)"]     = FormatStat(physT, physC, false), // Просто время шага
-            ["GPU Upload"]     = FormatStat(gpuT, gpuC, true)   // Покажет скорость заливки
+            ["Gen (Perlin)"]   = FormatStat(genT, genC, true),
+            ["Build (Phys)"]   = FormatStat(cPhysT, cPhysC, true),
+            ["Sim (Bepu)"]     = FormatStat(physT, physC, false),
+            ["GPU Upload"]     = FormatStat(gpuT, gpuC, true)
         };
+
+        // Добавляем VRAM инфо, если провайдер назначен
+        if (MemoryInfoProvider != null)
+        {
+            stats["VRAM"] = MemoryInfoProvider.Invoke();
+        }
+
+        return stats;
     }
 }
