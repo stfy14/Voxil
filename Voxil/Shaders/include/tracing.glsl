@@ -38,10 +38,6 @@ uint GetVoxelData(uint chunkSlot, int voxelIdx) {
     uint offset = localSlot * chunkSizeUint + (uint(voxelIdx) >> 2u);
     uint rawVal = 0u;
 
-    #if VOXEL_BANKS == 1
-        rawVal = b0[offset];
-    #else
-        // ИСПРАВЛЕННЫЙ SWITCH С ПРОВЕРКАМИ ПРЕПРОЦЕССОРА
     switch(bank) {
             #if VOXEL_BANKS >= 1
         case 0u: rawVal = b0[offset]; break;
@@ -67,8 +63,7 @@ uint GetVoxelData(uint chunkSlot, int voxelIdx) {
         #if VOXEL_BANKS >= 8
         case 7u: rawVal = b7[offset]; break;
             #endif
-        }
-    #endif
+    }
 
     uint shift = (uint(voxelIdx) & 3u) * 8u;
     return (rawVal >> shift) & 0xFFu;
@@ -136,9 +131,11 @@ bool TraceDynamicRay(vec3 ro, vec3 rd, float maxDist, inout float tHit, inout in
     int dummy = 0; return TraceDynamicRay(ro, rd, maxDist, tHit, outObjID, outLocalNormal, dummy);
 }
 
+// === TraceStaticRay ===
 bool TraceStaticRay(vec3 ro, vec3 rd, float maxDist, float tStart, inout float tHit, inout uint matID, inout vec3 normal, inout int steps) {
     float tCurrent = max(0.0, tStart);
     vec3 rayOrigin = ro + rd * (tCurrent + 0.001);
+
     ivec3 cMapPos = ivec3(floor(rayOrigin / float(CHUNK_SIZE)));
     vec3 cDeltaDist = abs(1.0 / rd) * float(CHUNK_SIZE);
     ivec3 cStepDir = ivec3(sign(rd));
@@ -149,6 +146,7 @@ bool TraceStaticRay(vec3 ro, vec3 rd, float maxDist, float tStart, inout float t
     cSideDist.z = (rd.z > 0.0) ? (float(CHUNK_SIZE) - relPos.z) : relPos.z;
     cSideDist *= abs(1.0 / rd);
     vec3 cMask = vec3(0);
+
     ivec3 bMin = ivec3(uBoundMinX, uBoundMinY, uBoundMinZ);
     ivec3 bMax = ivec3(uBoundMaxX, uBoundMaxY, uBoundMaxZ);
 
@@ -160,9 +158,19 @@ bool TraceStaticRay(vec3 ro, vec3 rd, float maxDist, float tStart, inout float t
         uint chunkSlot = imageLoad(uPageTable, cMapPos & (PAGE_TABLE_SIZE - 1)).r;
 
         if (chunkSlot != 0xFFFFFFFFu) {
+
+            #ifdef ENABLE_LOD
+                vec3 chunkCenter = (vec3(cMapPos) + 0.5) * float(CHUNK_SIZE);
+            float distToChunk = distance(uCamPos, chunkCenter);
+            bool isLodChunk = (distToChunk > uLodDistance);
+            #else
+                bool isLodChunk = false;
+            #endif
+
             uint maskBaseOffset = chunkSlot * (uint(BLOCKS_PER_AXIS)*uint(BLOCKS_PER_AXIS)*uint(BLOCKS_PER_AXIS));
             vec3 chunkOrigin = vec3(cMapPos) * float(CHUNK_SIZE);
             vec3 pLocal = (ro + rd * tCurrent) - chunkOrigin;
+
             if (length(cMask) > 0.5) {
                 if (cMask.x > 0.5) pLocal.x = (rd.x > 0.0) ? 0.0 : float(CHUNK_SIZE);
                 if (cMask.y > 0.5) pLocal.y = (rd.y > 0.0) ? 0.0 : float(CHUNK_SIZE);
@@ -176,6 +184,7 @@ bool TraceStaticRay(vec3 ro, vec3 rd, float maxDist, float tStart, inout float t
                 if (cMask.y > 0.5 && rd.y < 0.0) vMapPos.y = VOXEL_RESOLUTION - 1;
                 if (cMask.z > 0.5 && rd.z < 0.0) vMapPos.z = VOXEL_RESOLUTION - 1;
             }
+
             vec3 vDeltaDist = abs(1.0 / rd);
             ivec3 vStepDir = cStepDir;
             vec3 vSideDist;
@@ -184,10 +193,14 @@ bool TraceStaticRay(vec3 ro, vec3 rd, float maxDist, float tStart, inout float t
             vSideDist.z = (rd.z > 0.0) ? (float(vMapPos.z + 1) - pVoxel.z) : (pVoxel.z - float(vMapPos.z));
             vSideDist *= vDeltaDist;
             vec3 vMask = vec3(0);
+
+            if (length(cMask) > 0.5) vMask = cMask;
+
             bool exitChunk = false;
 
             for (int sanityChunk = 0; sanityChunk < 512; sanityChunk++) {
                 if (((vMapPos.x | vMapPos.y | vMapPos.z) & ~BIT_MASK) != 0) { exitChunk = true; break; }
+
                 ivec3 bMapPos = vMapPos / BLOCK_SIZE;
                 int blockIdx = bMapPos.x + BLOCKS_PER_AXIS * (bMapPos.y + BLOCKS_PER_AXIS * bMapPos.z);
                 uvec2 maskVal = packedMasks[maskBaseOffset + blockIdx];
@@ -201,23 +214,42 @@ bool TraceStaticRay(vec3 ro, vec3 rd, float maxDist, float tStart, inout float t
                         if (((vMapPos.x | vMapPos.y | vMapPos.z) & ~BIT_MASK) != 0) { exitChunk = true; break; }
                     }
                 } else {
+                    // === LOD LOGIC ===
+                    #ifdef ENABLE_LOD
+                    if (isLodChunk) {
+                        int idx = vMapPos.x + VOXEL_RESOLUTION * (vMapPos.y + VOXEL_RESOLUTION * vMapPos.z);
+                        uint m = GetVoxelData(chunkSlot, idx);
+                        if (m == 0u) m = 1u;
+
+                        tHit = tCurrent;
+                        matID = m;
+
+                        vec3 faceNormal = -vec3(vStepDir) * vMask;
+
+                        // Slope Hack для визуальной гладкости
+                        if (abs(faceNormal.y) < 0.1) {
+                            normal = normalize(faceNormal + vec3(0.0, 0.8, 0.0));
+                        } else {
+                            normal = faceNormal;
+                        }
+                        return true;
+                    }
+                    #endif
+                    // =================
+
                     for(int s=0; s<64; s++) {
                         int lx = vMapPos.x % BLOCK_SIZE; int ly = vMapPos.y % BLOCK_SIZE; int lz = vMapPos.z % BLOCK_SIZE;
                         int bitIdx = lx + BLOCK_SIZE * (ly + BLOCK_SIZE * lz);
                         bool hasVoxel = (bitIdx < 32) ? ((maskVal.x & (1u << bitIdx)) != 0u) : ((maskVal.y & (1u << (bitIdx - 32))) != 0u);
+
                         if (hasVoxel) {
                             int idx = vMapPos.x + VOXEL_RESOLUTION * (vMapPos.y + VOXEL_RESOLUTION * vMapPos.z);
-                            uint mat = GetVoxelData(chunkSlot, idx);
-                            if (mat != 0u) {
+                            uint m = GetVoxelData(chunkSlot, idx);
+                            if (m != 0u) {
                                 float tRelVoxel = (length(vMask) > 0.5) ? dot(vMask, vSideDist - vDeltaDist) : 0.0;
                                 tHit = tCurrent + (tRelVoxel / VOXELS_PER_METER);
-                                matID = mat;
-                                if (length(vMask) < 0.5) {
-                                    if (length(cMask) > 0.5) normal = -vec3(cStepDir) * cMask;
-                                    else normal = -vec3(vStepDir);
-                                } else {
-                                    normal = -vec3(vStepDir) * vMask;
-                                }
+                                matID = m;
+                                normal = -vec3(vStepDir) * vMask;
                                 return true;
                             }
                         }
@@ -238,12 +270,15 @@ bool TraceStaticRay(vec3 ro, vec3 rd, float maxDist, float tStart, inout float t
     }
     return false;
 }
+
 bool TraceStaticRay(vec3 ro, vec3 rd, float maxDist, float tStart, inout float tHit, inout uint matID, inout vec3 normal) {
     int dummy = 0; return TraceStaticRay(ro, rd, maxDist, tStart, tHit, matID, normal, dummy);
 }
 
+// === TraceShadowRay ===
 bool TraceShadowRay(vec3 ro, vec3 rd, float maxDist, inout float tHit, inout uint matID) {
     vec3 pStart = ro + rd * 0.001;
+
     ivec3 cMapPos = ivec3(floor(pStart / float(CHUNK_SIZE)));
     vec3 cDeltaDist = abs(1.0 / rd) * float(CHUNK_SIZE);
     ivec3 cStepDir = ivec3(sign(rd));
@@ -255,6 +290,7 @@ bool TraceShadowRay(vec3 ro, vec3 rd, float maxDist, inout float tHit, inout uin
     cSideDist *= abs(1.0 / rd);
     vec3 cMask = vec3(0);
     float tCurrentRel = 0.0;
+
     ivec3 bMin = ivec3(uBoundMinX, uBoundMinY, uBoundMinZ);
     ivec3 bMax = ivec3(uBoundMaxX, uBoundMaxY, uBoundMaxZ);
 
@@ -265,9 +301,19 @@ bool TraceShadowRay(vec3 ro, vec3 rd, float maxDist, inout float tHit, inout uin
         uint chunkSlot = imageLoad(uPageTable, cMapPos & (PAGE_TABLE_SIZE - 1)).r;
 
         if (chunkSlot != 0xFFFFFFFFu) {
+
+            #ifdef ENABLE_LOD
+                vec3 chunkCenter = (vec3(cMapPos) + 0.5) * float(CHUNK_SIZE);
+            float distToChunk = distance(uCamPos, chunkCenter);
+            bool isLodChunk = (distToChunk > uLodDistance);
+            #else
+                bool isLodChunk = false;
+            #endif
+
             uint maskBaseOffset = chunkSlot * (uint(BLOCKS_PER_AXIS)*uint(BLOCKS_PER_AXIS)*uint(BLOCKS_PER_AXIS));
             vec3 chunkOrigin = vec3(cMapPos) * float(CHUNK_SIZE);
             vec3 pLocal = (pStart + rd * tCurrentRel) - chunkOrigin;
+
             if (length(cMask) > 0.5) {
                 if (cMask.x > 0.5) pLocal.x = (rd.x > 0.0) ? 0.0 : float(CHUNK_SIZE);
                 if (cMask.y > 0.5) pLocal.y = (rd.y > 0.0) ? 0.0 : float(CHUNK_SIZE);
@@ -281,6 +327,7 @@ bool TraceShadowRay(vec3 ro, vec3 rd, float maxDist, inout float tHit, inout uin
                 if (cMask.y > 0.5 && rd.y < 0.0) vMapPos.y = VOXEL_RESOLUTION - 1;
                 if (cMask.z > 0.5 && rd.z < 0.0) vMapPos.z = VOXEL_RESOLUTION - 1;
             }
+
             vec3 vDeltaDist = abs(1.0 / rd);
             ivec3 vStepDir = cStepDir;
             vec3 vSideDist;
@@ -289,6 +336,9 @@ bool TraceShadowRay(vec3 ro, vec3 rd, float maxDist, inout float tHit, inout uin
             vSideDist.z = (rd.z > 0.0) ? (float(vMapPos.z + 1) - pVoxel.z) : (pVoxel.z - float(vMapPos.z));
             vSideDist *= vDeltaDist;
             vec3 vMask = vec3(0);
+
+            if (length(cMask) > 0.5) vMask = cMask;
+
             bool exitChunk = false;
 
             for(int sanity = 0; sanity < 512; sanity++) {
@@ -306,6 +356,31 @@ bool TraceShadowRay(vec3 ro, vec3 rd, float maxDist, inout float tHit, inout uin
                         if (((vMapPos.x | vMapPos.y | vMapPos.z) & ~BIT_MASK) != 0) { exitChunk = true; break; }
                     }
                 } else {
+                    // === LOD LOGIC (SHADOWS) ===
+                    #ifdef ENABLE_LOD
+                    // Если тень на LOD-чанке и мы далеко от поверхности
+                    if (isLodChunk && tCurrentRel > 4.0) {
+
+                        // Если оптимизация ВКЛЮЧЕНА - тень НЕ падает (прозрачно)
+                        if (uDisableEffectsOnLOD == 1) {
+                            // Пропускаем блок как пустой
+                            vMask = (vSideDist.x < vSideDist.y) ? ((vSideDist.x < vSideDist.z) ? vec3(1,0,0) : vec3(0,0,1)) : ((vSideDist.y < vSideDist.z) ? vec3(0,1,0) : vec3(0,0,1));
+                            vSideDist += vMask * vDeltaDist;
+                            vMapPos += ivec3(vMask) * vStepDir;
+                            if (vMapPos / BLOCK_SIZE != bMapPos) break;
+                            if (((vMapPos.x | vMapPos.y | vMapPos.z) & ~BIT_MASK) != 0) { exitChunk = true; break; }
+                            continue;
+                        }
+
+                        // Иначе: СТАНДАРТНОЕ LOD ПОВЕДЕНИЕ (БЕЗ ХАКОВ)
+                        // Считаем блок 4x4 твердым.
+                        tHit = tCurrentRel;
+                        matID = 1u;
+                        return true;
+                    }
+                    #endif
+                    // ===========================
+
                     for(int s=0; s<64; s++) {
                         int lx = vMapPos.x % BLOCK_SIZE; int ly = vMapPos.y % BLOCK_SIZE; int lz = vMapPos.z % BLOCK_SIZE;
                         int bitIdx = lx + BLOCK_SIZE * (ly + BLOCK_SIZE * lz);
@@ -313,7 +388,7 @@ bool TraceShadowRay(vec3 ro, vec3 rd, float maxDist, inout float tHit, inout uin
                         if (hasVoxel) {
                             int idx = vMapPos.x + VOXEL_RESOLUTION * (vMapPos.y + VOXEL_RESOLUTION * vMapPos.z);
                             uint m = GetVoxelData(chunkSlot, idx);
-                            if (m != 0u && m != 4u) {
+                            if (m != 0u) {
                                 float tRelVoxel = (length(vMask) > 0.5) ? dot(vMask, vSideDist - vDeltaDist) : 0.0;
                                 tHit = tCurrentRel + (tRelVoxel / VOXELS_PER_METER);
                                 matID = m;

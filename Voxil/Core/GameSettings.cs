@@ -13,32 +13,25 @@ public static class GameSettings
 {
     // === ГРАФИКА ===
     public static int RenderDistance = 32;
-    public static int GpuUploadSpeed = 5000;
+    public static bool EnableAO = true;    
+    public static ShadowMode CurrentShadowMode = ShadowMode.Soft;
+    public static int SoftShadowSamples = 8; 
     public static bool UseProceduralWater = false; 
     public static bool EnableWaterTransparency = false; 
-    public static ShadowMode CurrentShadowMode = ShadowMode.Soft;
-    public static bool EnableAO = true;              
-    public static int SoftShadowSamples = 8; 
     
     // === ОПТИМИЗАЦИЯ ===
     public static bool BeamOptimization = false;
-    public static bool ShowDebugHeatmap = false;
+    public static bool EnableLOD = true; 
+    public static float LodPercentage = 0.45f;  
+    public static bool DisableEffectsOnLOD = true; 
 
-    // === ПОТОКИ И ПРОИЗВОДИТЕЛЬНОСТЬ (CPU) ===
+    // === ПОТОКИ И ПРОИЗВОДИТЕЛЬНОСТЬ ===
+    public static int GpuUploadSpeed = 5000;     // Количество чанков, отправляемое GPU на рендер за кадр
+    public static int GenerationThreads = 2;    // Количество потоков для генерации мира.
+    public static int PhysicsThreads = 1;    // Количество потоков для физической симуляции Bepu.
+    public static int TargetFPSForBudgeting = 75;    // Целевой FPS, на который ориентируется система бюджета времени.
+    public static float WorldUpdateBudgetPercentage = 0.3f;    // Процент от времени кадра, выделяемый на обработку чанков в основном потоке (например, 0.3f = 30%).
     
-    // Количество потоков для генерации мира.
-    public static int GenerationThreads = 2;
-    
-    // Количество потоков для физической симуляции Bepu.
-    public static int PhysicsThreads = 1;
-    
-    // --- НОВЫЕ НАСТРОЙКИ БЮДЖЕТА ОСНОВНОГО ПОТОКА ---
-    
-    // Целевой FPS, на который ориентируется система бюджета времени.
-    // Система будет стараться не превышать время кадра для этого FPS.
-    public static int TargetFPSForBudgeting = 75;
-    
-    // Процент от времени кадра, выделяемый на обработку чанков в основном потоке (например, 0.3f = 30%).
-    // Уменьшение этого значения может сделать загрузку мира чуть медленнее, но игра будет более отзывчивой.
-    public static float WorldUpdateBudgetPercentage = 0.3f;
+    // === ДЕБАГ ===
+    public static bool ShowDebugHeatmap = false;
 }

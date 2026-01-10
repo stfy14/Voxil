@@ -20,6 +20,10 @@ public class SettingsWindow : IUIWindow
     
     // Переменная для слайдера бюджета (в процентах)
     private int _budgetPercent;
+    
+    // Переменные для LOD
+    private float _lodDist;
+    private bool _lodEffectsDisabled;
 
     public SettingsWindow(WorldManager wm, GpuRaycastingRenderer renderer)
     {
@@ -30,8 +34,9 @@ public class SettingsWindow : IUIWindow
         _shadowSamples = GameSettings.SoftShadowSamples;
         _genThreads = GameSettings.GenerationThreads;
         _physThreads = GameSettings.PhysicsThreads;
-        // Конвертируем float 0.3f в int 30 для слайдера
         _budgetPercent = (int)(GameSettings.WorldUpdateBudgetPercentage * 100);
+        _lodDist = GameSettings.LodPercentage;
+        _lodEffectsDisabled = GameSettings.DisableEffectsOnLOD;
     }
 
     public void Toggle() => IsVisible = !IsVisible;
@@ -76,6 +81,35 @@ public class SettingsWindow : IUIWindow
             bool beam = GameSettings.BeamOptimization; if (ImGui.Checkbox("Beam Optimization (May increase/reduce FPS)", ref beam)) { GameSettings.BeamOptimization = beam; _renderer.ReloadShader(); }
             bool heatmap = GameSettings.ShowDebugHeatmap; if (ImGui.Checkbox("Debug Heatmap (Debug)", ref heatmap)) { GameSettings.ShowDebugHeatmap = heatmap; }
 
+            // --- LOD SECTION ---
+            ImGui.Spacing();
+            ImGui.Separator();
+            ImGui.Text("Level of Detail (LOD)");
+            bool enableLod = GameSettings.EnableLOD;
+            if (ImGui.Checkbox("Enable LOD System", ref enableLod)) 
+            { 
+                GameSettings.EnableLOD = enableLod; 
+                _renderer.ReloadShader(); // Требует перекомпиляции для дефайнов
+            }
+
+            if (enableLod)
+            {
+                // Используем временную переменную int для слайдера (0-100%)
+                int lodPercent = (int)(GameSettings.LodPercentage * 100);
+                
+                if (ImGui.SliderInt("LOD Start (%)", ref lodPercent, 10, 95))
+                {
+                    GameSettings.LodPercentage = lodPercent / 100.0f;
+                }
+                
+                if (ImGui.Checkbox("Disable Shadows/AO on LOD", ref _lodEffectsDisabled))
+                {
+                    GameSettings.DisableEffectsOnLOD = _lodEffectsDisabled;
+                }
+            }
+            ImGui.Separator();
+            // -------------------
+            
             // --- Секция CPU & Threads ---
             ImGui.Spacing();
             ImGui.Separator();

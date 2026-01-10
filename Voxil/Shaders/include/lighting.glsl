@@ -4,33 +4,25 @@
 #define SOFT_SHADOW_RADIUS 0.01
 #define SHADOW_BIAS 0.003
 
-bool IsSolidVoxelSpace(ivec3 pos) {
-    // 1. Проверка границ мира
+bool IsSolidForAO(ivec3 pos) {
     ivec3 boundMin = ivec3(uBoundMinX, uBoundMinY, uBoundMinZ) * VOXEL_RESOLUTION;
     ivec3 boundMax = ivec3(uBoundMaxX, uBoundMaxY, uBoundMaxZ) * VOXEL_RESOLUTION;
     if (any(lessThan(pos, boundMin)) || any(greaterThanEqual(pos, boundMax))) return false;
 
-    // 2. Проверка Page Table (есть ли чанк)
     ivec3 chunkCoord = pos >> BIT_SHIFT;
     uint chunkSlot = imageLoad(uPageTable, chunkCoord & (PAGE_TABLE_SIZE - 1)).r;
     if (chunkSlot == 0xFFFFFFFFu) return false;
 
-    // 3. ОПТИМИЗАЦИЯ: Проверка Bitmask (есть ли блок 4x4)
-    // Этого не было. Мы избегаем чтения GetVoxelData для пустого воздуха.
-
-    // Вычисляем локальные координаты
-    ivec3 local = pos & BIT_MASK; // 0..31
-    ivec3 bMapPos = local / BLOCK_SIZE; // 0..7
+    ivec3 local = pos & BIT_MASK;
+    ivec3 bMapPos = local / BLOCK_SIZE;
     int blockIdx = bMapPos.x + BLOCKS_PER_AXIS * (bMapPos.y + BLOCKS_PER_AXIS * bMapPos.z);
 
-    // Читаем маску
     uint maskBaseOffset = chunkSlot * (uint(BLOCKS_PER_AXIS)*uint(BLOCKS_PER_AXIS)*uint(BLOCKS_PER_AXIS));
     uvec2 maskVal = packedMasks[maskBaseOffset + blockIdx];
 
-    // Если блок 4x4 полностью пуст - выходим сразу
     if (maskVal.x == 0u && maskVal.y == 0u) return false;
 
-    // Проверяем конкретный бит
+    // Проверяем конкретный бит всегда (для точности)
     int lx = local.x % BLOCK_SIZE;
     int ly = local.y % BLOCK_SIZE;
     int lz = local.z % BLOCK_SIZE;
@@ -40,43 +32,73 @@ bool IsSolidVoxelSpace(ivec3 pos) {
 
     if (!hasVoxel) return false;
 
-    // 4. Только если бит установлен, читаем тип материала (чтобы игнорировать воду)
     int idx = local.x + VOXEL_RESOLUTION * (local.y + VOXEL_RESOLUTION * local.z);
     uint matID = GetVoxelData(chunkSlot, idx);
 
-    // Игнорируем воду (ID 4) для AO, чтобы под водой не было черноты на дне,
-    // и чтобы сама вода не затеняла берег.
     return (matID != 0u && matID != 4u);
 }
 
-float GetCornerOcclusion(ivec3 pos, ivec3 side1, ivec3 side2) {
-    bool s1 = IsSolidVoxelSpace(pos + side1);
-    bool s2 = IsSolidVoxelSpace(pos + side2);
-    bool c = IsSolidVoxelSpace(pos + side1 + side2);
+bool IsSolidVoxelSpace(ivec3 pos) { return IsSolidForAO(pos); }
+
+float GetCornerOcclusionScaled(ivec3 basePos, ivec3 side1, ivec3 side2, int stride) {
+    bool s1 = IsSolidForAO(basePos + side1 * stride);
+    bool s2 = IsSolidForAO(basePos + side2 * stride);
+    bool c = IsSolidForAO(basePos + (side1 + side2) * stride);
     if (s1 && s2) return 3.0;
     return float(s1) + float(s2) + float(c);
 }
 
 float CalculateAO(vec3 hitPos, vec3 normal) {
-    vec3 aoRayOrigin = hitPos + normal * 0.005;
+
+    // === СИНХРОНИЗАЦИЯ AO С ЧАНКАМИ ===
+    // Вместо дистанции до пикселя, считаем дистанцию до ЦЕНТРА ЧАНКА, в котором пиксель.
+    // Это заставит AO переключаться ровно по границам чанков, как и геометрия.
+
+    vec3 chunkCoordFloat = floor(hitPos / float(CHUNK_SIZE));
+    vec3 chunkCenter = (chunkCoordFloat + 0.5) * float(CHUNK_SIZE);
+    float distChunkToCam = distance(uCamPos, chunkCenter);
+
+    #ifdef ENABLE_LOD
+        bool useLodAO = (distChunkToCam > uLodDistance);
+    if (useLodAO && uDisableEffectsOnLOD == 1) return 1.0;
+    #else
+        bool useLodAO = false;
+    #endif
+    // ===================================
+
+    int stepDist = useLodAO ? BLOCK_SIZE : 1;
+
+    vec3 aoRayOrigin = hitPos + normal * 0.01 * float(stepDist);
     vec3 voxelPos = aoRayOrigin * VOXELS_PER_METER;
+
     ivec3 ipos = ivec3(floor(voxelPos));
     ivec3 n = ivec3(normal);
-    vec3 localPos = fract(voxelPos);
+
+    // На LOD выравниваем позицию внутри блока, чтобы убрать шум
+    vec3 localPos = useLodAO ? fract(voxelPos / float(BLOCK_SIZE)) : fract(voxelPos);
+
     ivec3 t, b;
     vec2 uvSurf;
     if (abs(n.y) > 0.5) { t = ivec3(1, 0, 0); b = ivec3(0, 0, 1); uvSurf = localPos.xz; }
     else if (abs(n.x) > 0.5) { t = ivec3(0, 0, 1); b = ivec3(0, 1, 0); uvSurf = localPos.zy; }
     else { t = ivec3(1, 0, 0); b = ivec3(0, 1, 0); uvSurf = localPos.xy; }
-    float occ00 = GetCornerOcclusion(ipos, -t, -b);
-    float occ10 = GetCornerOcclusion(ipos,  t, -b);
-    float occ01 = GetCornerOcclusion(ipos, -t,  b);
-    float occ11 = GetCornerOcclusion(ipos,  t,  b);
+
+    float occ00 = GetCornerOcclusionScaled(ipos, -t, -b, stepDist);
+    float occ10 = GetCornerOcclusionScaled(ipos,  t, -b, stepDist);
+    float occ01 = GetCornerOcclusionScaled(ipos, -t,  b, stepDist);
+    float occ11 = GetCornerOcclusionScaled(ipos,  t,  b, stepDist);
+
     vec2 smoothUV = uvSurf * uvSurf * (3.0 - 2.0 * uvSurf);
     float finalOcc = mix(mix(occ00, occ10, smoothUV.x), mix(occ01, occ11, smoothUV.x), smoothUV.y);
-    float ao = clamp(pow(0.5, finalOcc) + (IGN(gl_FragCoord.xy) - 0.5) * 0.1, 0.0, 1.0);
-    return mix(1.0, ao, AO_STRENGTH);
+
+    float ao = pow(0.5, finalOcc);
+    if (!useLodAO) ao += (IGN(gl_FragCoord.xy) - 0.5) * 0.1;
+
+    return clamp(mix(1.0, ao, AO_STRENGTH), 0.0, 1.0);
 }
+
+// Функции теней оставляем старые, они используют TraceShadowRay из tracing.glsl,
+// который уже настроен на работу "по чанкам" (он использует cMapPos для определения LOD).
 
 float CalculateSoftShadow(vec3 hitPos, vec3 normal, vec3 sunDir) {
     float distToCam = length(hitPos - uCamPos);
@@ -123,6 +145,15 @@ float CalculateHardShadow(vec3 hitPos, vec3 normal, vec3 sunDir) {
 }
 
 float CalculateShadow(vec3 hitPos, vec3 normal, vec3 sunDir) {
+    #ifdef ENABLE_LOD
+        // Для теней тоже используем "чанковую" дистанцию, чтобы они не отключались кусками посреди чанка
+    vec3 chunkCoordFloat = floor(hitPos / float(CHUNK_SIZE));
+    vec3 chunkCenter = (chunkCoordFloat + 0.5) * float(CHUNK_SIZE);
+    float distChunkToCam = distance(uCamPos, chunkCenter);
+
+    if (distChunkToCam > uLodDistance && uDisableEffectsOnLOD == 1) return 1.0;
+    #endif
+
     #ifdef SHADOW_MODE_HARD
         return CalculateHardShadow(hitPos, normal, sunDir);
     #elif defined(SHADOW_MODE_SOFT)

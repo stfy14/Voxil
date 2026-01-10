@@ -506,6 +506,21 @@ private void UpdateDynamicObjectsAndGrid()
             GL.Disable(EnableCap.DepthTest); 
             GL.DrawArrays(PrimitiveType.TriangleStrip, 0, 4); 
         } 
+        
+        float viewRange = _worldManager.GetViewRangeInMeters();
+        // === LOD UNIFORMS ===
+        if (GameSettings.EnableLOD)
+        {
+            // ПРЕВРАЩАЕМ ПРОЦЕНТЫ В МЕТРЫ
+            float lodMeters = viewRange * GameSettings.LodPercentage;
+            shader.SetFloat("uLodDistance", lodMeters);
+        }
+        else
+        {
+            shader.SetFloat("uLodDistance", 100000.0f);
+        }
+        
+        shader.SetInt("uDisableEffectsOnLOD", GameSettings.DisableEffectsOnLOD ? 1 : 0);
     
         // --- ПРОХОД 2: MAIN PASS (Полное разрешение) ---
         GL.BindFramebuffer(FramebufferTarget.Framebuffer, 0); 

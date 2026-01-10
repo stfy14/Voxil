@@ -1,4 +1,6 @@
-﻿using System;
+﻿// --- START OF FILE ShaderDefines.cs ---
+
+using System;
 using System.Globalization;
 
 public static class ShaderDefines
@@ -11,7 +13,6 @@ public static class ShaderDefines
 
         var sb = new System.Text.StringBuilder();
     
-        // Вставляем базовые константы
         sb.AppendLine($@"
        #define CHUNK_SIZE {Constants.ChunkSizeWorld}
        #define VOXEL_RESOLUTION {Constants.ChunkResolution}
@@ -22,13 +23,13 @@ public static class ShaderDefines
        #define SOFT_SHADOW_STEPS 8
     ");
 
-        // Вставляем настройки пользователя
-        if (GameSettings.EnableAO) 
-            sb.AppendLine("#define ENABLE_AO");
-        if (GameSettings.EnableWaterTransparency) 
-            sb.AppendLine("#define ENABLE_WATER_TRANSPARENCY");
-        if (GameSettings.BeamOptimization) 
-            sb.AppendLine("#define ENABLE_BEAM_OPTIMIZATION");  
+        if (GameSettings.EnableAO) sb.AppendLine("#define ENABLE_AO");
+        if (GameSettings.EnableWaterTransparency) sb.AppendLine("#define ENABLE_WATER_TRANSPARENCY");
+        if (GameSettings.BeamOptimization) sb.AppendLine("#define ENABLE_BEAM_OPTIMIZATION");
+        
+        // === ДОБАВЛЕНО ===
+        if (GameSettings.EnableLOD) sb.AppendLine("#define ENABLE_LOD");
+        // =================
 
         return sb.ToString();
     }

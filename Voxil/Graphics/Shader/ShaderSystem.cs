@@ -1,4 +1,6 @@
-﻿using System;
+﻿// --- START OF FILE ShaderSystem.cs ---
+
+using System;
 using System.Collections.Generic;
 
 public class ShaderSystem : IDisposable
@@ -17,11 +19,12 @@ public class ShaderSystem : IDisposable
         // 2. Настройки графики
         if (GameSettings.UseProceduralWater) defines.Add("WATER_MODE_PROCEDURAL");
         if (GameSettings.EnableAO) defines.Add("ENABLE_AO");
-        
-        // --- ВАЖНЫЙ ФИКС: ДОБАВЛЕНА ПЕРЕДАЧА НАСТРОЙКИ ПРОЗРАЧНОСТИ ---
         if (GameSettings.EnableWaterTransparency) defines.Add("ENABLE_WATER_TRANSPARENCY");
-        
         if (GameSettings.BeamOptimization) defines.Add("ENABLE_BEAM_OPTIMIZATION");
+
+        // === ДОБАВЛЕНО ===
+        if (GameSettings.EnableLOD) defines.Add("ENABLE_LOD");
+        // =================
 
         switch (GameSettings.CurrentShadowMode)
         {

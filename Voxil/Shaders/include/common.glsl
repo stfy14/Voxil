@@ -25,9 +25,12 @@ uniform int uGridSize;
 // === ТЕКСТУРЫ И БУФЕРЫ ===
 uniform sampler2D uNoiseTexture;
 
-// === ДОБАВЛЕНО ДЛЯ BEAM OPTIMIZATION ===
+// === BEAM OPTIMIZATION ===
 uniform int uIsBeamPass;           // 1 = рисуем карту глубин, 0 = основной проход
 uniform sampler2D uBeamTexture;    // Результат первого прохода
+// === LOD ===
+uniform float uLodDistance;
+uniform int uDisableEffectsOnLOD;
 
 layout(binding = 0, r32ui) uniform uimage3D uPageTable;
 const ivec3 PAGE_TABLE_SIZE = ivec3(512, 16, 512);
