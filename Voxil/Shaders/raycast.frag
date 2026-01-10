@@ -81,8 +81,19 @@ void main() {
 
     // 4. Heatmap (Дебаг нагрузки)
     if (uShowDebugHeatmap) {
-        float val = float(steps) / 250.0;
-        vec3 col = (val < 0.5) ? mix(vec3(0,0,1), vec3(0,1,0), val*2.0) : mix(vec3(0,1,0), vec3(1,0,0), (val-0.5)*2.0);
+        // Мы нормализуем количество шагов.
+        // uMaxRaySteps - это твой лимит (например 1000).
+        // Но обычно "тяжелый" пиксель - это уже 200-300 шагов.
+
+        float val = float(steps) / 300.0; // 300 шагов = ярко-красный
+
+        // Градиент: Синий -> Зеленый -> Желтый -> Красный
+        vec3 col = vec3(0.0);
+        if (val < 0.25)      col = mix(vec3(0,0,0.5), vec3(0,0,1), val * 4.0);       // Очень легко
+        else if (val < 0.5)  col = mix(vec3(0,0,1),   vec3(0,1,0), (val-0.25)*4.0);  // Норм
+        else if (val < 0.75) col = mix(vec3(0,1,0),   vec3(1,1,0), (val-0.5)*4.0);   // Нагрузка
+        else                 col = mix(vec3(1,1,0),   vec3(1,0,0), (val-0.75)*4.0);  // Тяжело!
+
         FragColor = vec4(col, 1.0);
         return;
     }
