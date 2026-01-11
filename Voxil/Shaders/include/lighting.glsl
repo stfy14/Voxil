@@ -134,6 +134,15 @@ float CalculateSoftShadow(vec3 hitPos, vec3 normal, vec3 sunDir) {
     float totalVisibility = 0.0;
     float noiseVal = IGN(gl_FragCoord.xy);
     float maxShadowDist = 200.0;
+
+    // === ОПТИМИЗАЦИЯ: Early Exit ===
+    // Сначала проверяем центр солнца. Если он перекрыт, считаем, что мы в тени.
+    // Это значительно ускоряет рендер в темных местах (пещеры, внутри зданий).
+    float tHitHard = 0.0; uint matIDHard = 0u;
+    if (TraceShadowRay(shadowOrigin, sunDir, maxShadowDist, tHitHard, matIDHard)) {
+        return 0.0;
+    }
+
     for (int k = 0; k < effectiveSamples; k++) {
         float angle = (float(k) + noiseVal) * 2.39996;
         float r = sqrt(float(k) + 0.5) / sqrt(float(effectiveSamples));

@@ -127,8 +127,13 @@ bool TraceDynamicRay(vec3 ro, vec3 rd, float maxDist, inout float tHit, inout in
     vec3 deltaDist = abs(uGridStep * invRd);
     vec3 sideDist = (sign(rd) * (vec3(mapPos) - currPos) + (0.5 + 0.5 * sign(rd))) * deltaDist;
 
-    for (int i = 0; i < 512; i++) {
+    // === ОПТИМИЗАЦИЯ: "Мертвые" лучи ===
+    // Заменяем for на while, чтобы избежать unrolling-а
+    int safetyLoop = 0;
+    while (safetyLoop < 512) {
+        safetyLoop++;
         steps++;
+
         if (any(lessThan(mapPos, ivec3(0))) || any(greaterThanEqual(mapPos, ivec3(uGridSize)))) break;
         int nodeIndex = imageLoad(uObjectGridHead, mapPos).r;
         while (nodeIndex > 0) {
