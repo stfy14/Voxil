@@ -75,12 +75,27 @@ void main() {
 
     // === ЗАПИСЬ РЕЗУЛЬТАТА ДЛЯ BEAM PASS ===
     #ifdef ENABLE_BEAM_OPTIMIZATION
-        if (uIsBeamPass == 1) {
-        // Если мы ничего не нашли, пишем макс дистанцию
-        float dist = hitStatic ? tStatic : uRenderDistance;
-        // Пишем в красный канал (R)
-        FragColor = vec4(dist, 0.0, 0.0, 1.0);
-        return; // Прерываем выполнение, освещение считать не нужно!
+    if (uIsBeamPass == 1) {
+        // --- НАЧАЛО ИЗМЕНЕНИЙ ---
+
+        // Сначала ищем статическую геометрию
+        float distStatic = hitStatic ? tStatic : uRenderDistance;
+
+        // Теперь трассируем и динамическую
+        float tDyn = uRenderDistance; int idDyn = -1; vec3 normDyn = vec3(0);
+        bool hitDyn = false;
+        if (uObjectCount > 0) {
+            // Важно: трассируем до ближайшего статического объекта, не дальше
+            hitDyn = TraceDynamicRay(uCamPos, rayDir, distStatic, tDyn, idDyn, normDyn, steps);
+        }
+        float distDyn = hitDyn ? tDyn : uRenderDistance;
+
+        // Записываем МИНИМАЛЬНУЮ дистанцию из двух
+        float finalDist = min(distStatic, distDyn);
+        FragColor = vec4(finalDist, 0.0, 0.0, 1.0);
+
+        // --- КОНЕЦ ИЗМЕНЕНИЙ ---
+        return;
     }
     #endif
 
