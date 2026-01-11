@@ -20,7 +20,7 @@ public class GpuRaycastingRenderer : IDisposable
     
     // --- ПАМЯТЬ SSBO ---
     private const int MAX_TOTAL_BANKS = 13; 
-    private const long BANK_SIZE_BYTES = 2L * 1024L * 1024L * 1024L - 1; // 2 ГБ минус 1 байт
+    private const long BANK_SIZE_BYTES = 1L * 1024L * 1024L * 1024L - 1; // 2 ГБ минус 1 байт
     
     private int[] _voxelSsboBanks = new int[MAX_TOTAL_BANKS]; 
     private int _chunksPerBank;
@@ -87,7 +87,6 @@ public class GpuRaycastingRenderer : IDisposable
 
     public void Load()
     {
-        _shaderSystem.Compile(MAX_TOTAL_BANKS, _chunksPerBank);
         _gridComputeShader = new Shader("Shaders/grid_update.comp");
         
         _quadVao = GL.GenVertexArray(); 
