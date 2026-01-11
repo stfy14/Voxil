@@ -78,7 +78,7 @@ public class SettingsWindow : IUIWindow
             bool ao = GameSettings.EnableAO; if (ImGui.Checkbox("Ambient Occlusion", ref ao)) { GameSettings.EnableAO = ao; _renderer.ReloadShader(); }
             bool water = GameSettings.UseProceduralWater; if (ImGui.Checkbox("Procedural Water (Disable)", ref water)) { GameSettings.UseProceduralWater = water; _renderer.ReloadShader(); }
             bool trans = GameSettings.EnableWaterTransparency; if (ImGui.Checkbox("Water Transparency (Disable)", ref trans)) { GameSettings.EnableWaterTransparency = trans; _renderer.ReloadShader(); }
-            bool beam = GameSettings.BeamOptimization; if (ImGui.Checkbox("Beam Optimization (May increase/reduce FPS)", ref beam)) { GameSettings.BeamOptimization = beam; _renderer.ReloadShader(); }
+            bool beam = GameSettings.BeamOptimization; if (ImGui.Checkbox("Beam Optimization", ref beam)) { GameSettings.BeamOptimization = beam; _renderer.ReloadShader(); }
             bool heatmap = GameSettings.ShowDebugHeatmap; if (ImGui.Checkbox("Debug Heatmap (Debug)", ref heatmap)) { GameSettings.ShowDebugHeatmap = heatmap; }
 
             // --- LOD SECTION ---

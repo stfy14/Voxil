@@ -19,6 +19,25 @@ bool IsSolidForAO(ivec3 pos) {
     }
     // =========================
 
+    #ifdef ENABLE_LOD
+        vec3 chunkCenter = (vec3(chunkCoord) + 0.5) * float(CHUNK_SIZE);
+    float distChunkToCam = distance(uCamPos, chunkCenter);
+    bool isLodChunk = (distChunkToCam > uLodDistance);
+
+    if (isLodChunk) {
+        // === LOD AO: Проверяем БЛОК 4x4x4, а не воксель ===
+        ivec3 local = pos & BIT_MASK;
+        ivec3 bMapPos = local / BLOCK_SIZE;
+        int blockIdx = bMapPos.x + BLOCKS_PER_AXIS * (bMapPos.y + BLOCKS_PER_AXIS * bMapPos.z);
+        uint maskBaseOffset = chunkSlot * (uint(BLOCKS_PER_AXIS)*uint(BLOCKS_PER_AXIS)*uint(BLOCKS_PER_AXIS));
+        uvec2 maskVal = packedMasks[maskBaseOffset + blockIdx];
+
+        // Если блок не пустой — считаем его твердым
+        return (maskVal.x != 0u || maskVal.y != 0u);
+    }
+    #endif
+
+    // Обычная проверка вокселя
     ivec3 local = pos & BIT_MASK;
     ivec3 bMapPos = local / BLOCK_SIZE;
     int blockIdx = bMapPos.x + BLOCKS_PER_AXIS * (bMapPos.y + BLOCKS_PER_AXIS * bMapPos.z);
@@ -145,14 +164,24 @@ float CalculateHardShadow(vec3 hitPos, vec3 normal, vec3 sunDir) {
 
 float CalculateShadow(vec3 hitPos, vec3 normal, vec3 sunDir) {
     #ifdef ENABLE_LOD
-        // Для теней тоже используем "чанковую" дистанцию, чтобы они не отключались кусками посреди чанка
-    vec3 chunkCoordFloat = floor(hitPos / float(CHUNK_SIZE));
+        vec3 chunkCoordFloat = floor(hitPos / float(CHUNK_SIZE));
     vec3 chunkCenter = (chunkCoordFloat + 0.5) * float(CHUNK_SIZE);
     float distChunkToCam = distance(uCamPos, chunkCenter);
 
-    if (distChunkToCam > uLodDistance && uDisableEffectsOnLOD == 1) return 1.0;
+    // ИСПРАВЛЕНИЕ:
+    // 1. СНАЧАЛА проверяем, нужно ли ВЫКЛЮЧИТЬ тени для LOD
+    if (distChunkToCam > uLodDistance && uDisableEffectsOnLOD == 1) {
+        return 1.0; // Возвращаем полный свет (тени отключены)
+    }
+
+    // 2. ПОТОМ решаем, какой тип теней использовать (если они НЕ выключены)
+    // Если это LOD чанк — принудительно используем только твердые тени
+    if (distChunkToCam > uLodDistance) {
+        return CalculateHardShadow(hitPos, normal, sunDir);
+    }
     #endif
 
+    // Логика для обычных, не-LOD чанков остается без изменений
     #ifdef SHADOW_MODE_HARD
         return CalculateHardShadow(hitPos, normal, sunDir);
     #elif defined(SHADOW_MODE_SOFT)

@@ -9,6 +9,31 @@ in vec2 uv;
 #include "include/atmosphere.glsl"
 #include "include/postprocess.glsl"
 
+float GetConservativeBeamDist(vec2 uv) {
+    // Билинейная интерполяция вручную для более плавных переходов
+    vec2 texSize = vec2(textureSize(uBeamTexture, 0));
+    vec2 pixelCoord = uv * texSize - 0.5;
+    vec2 f = fract(pixelCoord);
+    vec2 baseCoord = floor(pixelCoord) + 0.5;
+
+    // Читаем 4 соседних пикселя
+    vec2 uv00 = (baseCoord + vec2(0.0, 0.0)) / texSize;
+    vec2 uv10 = (baseCoord + vec2(1.0, 0.0)) / texSize;
+    vec2 uv01 = (baseCoord + vec2(0.0, 1.0)) / texSize;
+    vec2 uv11 = (baseCoord + vec2(1.0, 1.0)) / texSize;
+
+    float d00 = texture(uBeamTexture, uv00).r;
+    float d10 = texture(uBeamTexture, uv10).r;
+    float d01 = texture(uBeamTexture, uv01).r;
+    float d11 = texture(uBeamTexture, uv11).r;
+
+    // Берем МИНИМУМ из всех 4 для консервативности (защита от пропуска геометрии)
+    float d0 = min(d00, d10);
+    float d1 = min(d01, d11);
+
+    return min(d0, d1);
+}
+
 void main() {
     // 1. Генерация луча
     vec4 target = uInvProjection * vec4(uv * 2.0 - 1.0, 1.0, 1.0);
@@ -24,18 +49,20 @@ void main() {
 
     #ifdef ENABLE_BEAM_OPTIMIZATION
         if (uIsBeamPass == 0) {
-        float beamDist = texture(uBeamTexture, uv).r;
+        // ИСПРАВЛЕНИЕ: Используем консервативное чтение
+        float beamDist = GetConservativeBeamDist(uv);
 
-        // Если луч улетел в бесконечность (небо) на первом проходе - выходим сразу!
-        // Это дает основной буст FPS на открытых пространствах.
+        // Если луч улетел в небо
         if (beamDist >= uRenderDistance - 1.0) {
             vec3 finalColor = GetSkyColor(rayDir, uSunDir);
             FragColor = vec4(ApplyPostProcess(finalColor), 1.0);
             return;
         }
 
-        // Иначе начинаем трассировку ближе к объекту
-        tStart = max(0.0, beamDist - 4.0 * VOXELS_PER_METER);
+        // ИСПРАВЛЕНИЕ: Отступаем в МЕТРАХ, не в вокселях
+        // 4 метра = 8 вокселей (при VOXELS_PER_METER = 2)
+        // Это безопасный минимум, который не создаст артефактов
+        tStart = max(0.0, beamDist - 4.0);
     }
     #endif
 

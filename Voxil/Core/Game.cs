@@ -41,7 +41,6 @@ public class Game : GameWindow
     {
         base.OnLoad();
 
-        // --- ТЕСТ СИСТЕМЫ ---
         //var tester = new VoxelSystemTester();
         //tester.RunStressTest();
         
