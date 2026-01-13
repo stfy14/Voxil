@@ -1,5 +1,7 @@
-﻿using OpenTK.Windowing.GraphicsLibraryFramework;
+﻿// --- START OF FILE TestManager.cs ---
+using OpenTK.Windowing.GraphicsLibraryFramework;
 using System;
+using System.Collections.Generic; // Не забудь добавить
 using System.Diagnostics;
 
 public class TestManager
@@ -21,18 +23,25 @@ public class TestManager
 
     public void Update(float deltaTime, InputManager input)
     {
-        // Нажатие 'T' запускает тест "100 вокселей"
+        // 'T' - Поштучный спавн (стресс-тест количества объектов)
         if (input.IsKeyPressed(Keys.T))
         {
-            StartSpawnTest(100, 0.05f); // 100 штук, каждые 0.05 сек (быстрее, чем 0.2, для стресса)
+            StartSpawnTest(100, 0.05f); 
             Console.WriteLine("[Test] Started spawning 100 voxels...");
         }
 
-        // Нажатие 'Y' спавнит "Бомбу" (сразу 1000 в одной точке)
+        // 'Y' - Взрыв (много мелких объектов в одной куче - стресс для GPU Grid)
         if (input.IsKeyPressed(Keys.Y))
         {
              SpawnExplosionTest(1000);
-             Console.WriteLine("[Test] SPAWNED 1000 VOXELS INSTANTLY");
+             Console.WriteLine("[Test] SPAWNED 1000 VOXELS INSTANTLY (Explosion)");
+        }
+
+        // 'U' - Большой куб (1000 вокселей в одном теле - тест Greedy Meshing)
+        if (input.IsKeyPressed(Keys.U))
+        {
+            SpawnLargeCubeTest(10); // 10x10x10
+            Console.WriteLine("[Test] SPAWNED LARGE CUBE 10x10x10");
         }
 
         if (_isSpawning)
@@ -64,10 +73,7 @@ public class TestManager
 
     private void SpawnSingleVoxel()
     {
-        // Спавним перед камерой
         var spawnPos = _camera.Position + _camera.Front * 3.0f;
-        
-        // Добавляем немного случайности, чтобы они не падали идеальным столбом
         var rnd = new Random();
         float offset = 0.5f;
         spawnPos.X += (float)(rnd.NextDouble() * offset * 2 - offset);
@@ -81,9 +87,9 @@ public class TestManager
         var rnd = new Random();
         var basePos = _camera.Position + _camera.Front * 5.0f;
 
+        // Спавним 1000 ОТДЕЛЬНЫХ объектов
         for(int i=0; i<count; i++)
         {
-             // Спавним в куче 4x4x4 метра
              var pos = basePos + new OpenTK.Mathematics.Vector3(
                  (float)rnd.NextDouble() * 4,
                  (float)rnd.NextDouble() * 4,
@@ -91,5 +97,34 @@ public class TestManager
              );
              _worldManager.SpawnTestVoxel(pos.ToSystemNumerics(), MaterialType.Stone);
         }
+    }
+
+    private void SpawnLargeCubeTest(int size)
+    {
+        // Генерируем список координат для одного большого объекта
+        List<OpenTK.Mathematics.Vector3i> voxels = new List<OpenTK.Mathematics.Vector3i>();
+        for (int x = 0; x < size; x++)
+        {
+            for (int y = 0; y < size; y++)
+            {
+                for (int z = 0; z < size; z++)
+                {
+                    voxels.Add(new OpenTK.Mathematics.Vector3i(x, y, z));
+                }
+            }
+        }
+
+        // Спавним перед камерой
+        var spawnPos = (_camera.Position + _camera.Front * 5.0f).ToSystemNumerics();
+        
+        // Используем метод создания объекта напрямую через WorldManager (нужно добавить метод или использовать очередь)
+        // В WorldManager уже есть метод CreateDetachedObject, но он удаляет воксели из мира.
+        // Нам нужно просто создать новый. Добавим воксели в очередь создания.
+        
+        // Для этого нам придется хакнуть/расширить WorldManager, чтобы он принимал готовый список
+        // В твоем коде есть структура VoxelObjectCreationData.
+        
+        // Внимание: мы используем приватную структуру через публичный метод, который сейчас добавим в WorldManager (см. ниже).
+        _worldManager.SpawnComplexObject(spawnPos, voxels, MaterialType.Wood);
     }
 }

@@ -211,6 +211,9 @@ public class Game : GameWindow
         _frameCount++; 
         GL.Clear(ClearBufferMask.ColorBufferBit | ClearBufferMask.DepthBufferBit);
         _renderer.Render(_camera);
+        // Рисуем дебаг коллизий (поверх всего)
+        _physicsDebugger.Draw(_physicsWorld, _lineRenderer, _camera);
+        _lineRenderer.Render(_camera); // Фактическая отправка линий на GPU
         if (!_mainMenuWindow.IsVisible && !_settingsWindow.IsVisible) _crosshair.Render();
         _uiManager.Render();
         SwapBuffers();

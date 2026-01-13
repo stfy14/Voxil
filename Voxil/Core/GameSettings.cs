@@ -9,6 +9,15 @@ public enum ShadowMode
     Soft
 }
 
+// Новый Enum для режима отладки коллизий
+public enum CollisionDebugMode
+{
+    None,
+    PhysicsOnly, // Динамика
+    StaticOnly,  // Чанки
+    All
+}
+
 public static class GameSettings
 {
     // === ГРАФИКА ===
@@ -26,12 +35,13 @@ public static class GameSettings
     public static bool DisableEffectsOnLOD = true; 
 
     // === ПОТОКИ И ПРОИЗВОДИТЕЛЬНОСТЬ ===
-    public static int GpuUploadSpeed = 10000;     // Количество чанков, отправляемое GPU на рендер за кадр
-    public static int GenerationThreads = 2;    // Количество потоков для генерации мира.
-    public static int PhysicsThreads = 1;    // Количество потоков для физической симуляции Bepu.
-    public static int TargetFPSForBudgeting = 60;    // Целевой FPS, на который ориентируется система бюджета времени.
-    public static float WorldUpdateBudgetPercentage = 0.3f;    // Процент от времени кадра, выделяемый на обработку чанков в основном потоке (например, 0.3f = 30%).
+    public static int GpuUploadSpeed = 10000;
+    public static int GenerationThreads = 2;
+    public static int PhysicsThreads = 1;
+    public static int TargetFPSForBudgeting = 60;
+    public static float WorldUpdateBudgetPercentage = 0.3f;
     
     // === ДЕБАГ ===
     public static bool ShowDebugHeatmap = false;
+    public static CollisionDebugMode DebugCollisionMode = CollisionDebugMode.None; // <--- Новая настройка
 }

@@ -51,7 +51,6 @@ public class SettingsWindow : IUIWindow
             // --- Секция Графики ---
             ImGui.Text("Graphics");
             ImGui.Separator();
-            // ... (ваш код для Render Distance, теней и т.д. остается здесь) ...
             long totalVramBytes = (long)_renderer.TotalVramMb * 1024 * 1024;
             long safeBudget = Math.Max(0, totalVramBytes - (2500L * 1024 * 1024));
             long futureBytes = _renderer.CalculateMemoryBytesForDistance(_renderDist);
@@ -68,19 +67,37 @@ public class SettingsWindow : IUIWindow
             else ImGui.Text($"Request: {futureMb:F0} MB / {budgetMb:F0} MB");
             if (ImGui.Button("Apply Render Distance")) { GameSettings.RenderDistance = _renderDist; _renderer.RequestReallocation(); }
             ImGui.Spacing();
+            
             ImGui.Text("Shadows Mode:");
             if (ImGui.RadioButton("None", GameSettings.CurrentShadowMode == ShadowMode.None)) { GameSettings.CurrentShadowMode = ShadowMode.None; _renderer.ReloadShader(); } ImGui.SameLine();
             if (ImGui.RadioButton("Hard", GameSettings.CurrentShadowMode == ShadowMode.Hard)) { GameSettings.CurrentShadowMode = ShadowMode.Hard; _renderer.ReloadShader(); } ImGui.SameLine();
             if (ImGui.RadioButton("Soft", GameSettings.CurrentShadowMode == ShadowMode.Soft)) { GameSettings.CurrentShadowMode = ShadowMode.Soft; _renderer.ReloadShader(); }
             if (GameSettings.CurrentShadowMode == ShadowMode.Soft) { if (ImGui.SliderInt("Soft Samples", ref _shadowSamples, 2, 64)) GameSettings.SoftShadowSamples = _shadowSamples; }
             ImGui.Spacing();
+            
             ImGui.Text("Effects");
             bool ao = GameSettings.EnableAO; if (ImGui.Checkbox("Ambient Occlusion", ref ao)) { GameSettings.EnableAO = ao; _renderer.ReloadShader(); }
             bool water = GameSettings.UseProceduralWater; if (ImGui.Checkbox("Procedural Water (Disable)", ref water)) { GameSettings.UseProceduralWater = water; _renderer.ReloadShader(); }
             bool trans = GameSettings.EnableWaterTransparency; if (ImGui.Checkbox("Water Transparency (Disable)", ref trans)) { GameSettings.EnableWaterTransparency = trans; _renderer.ReloadShader(); }
             bool beam = GameSettings.BeamOptimization; if (ImGui.Checkbox("Beam Optimization", ref beam)) { GameSettings.BeamOptimization = beam; _renderer.ReloadShader(); }
             bool heatmap = GameSettings.ShowDebugHeatmap; if (ImGui.Checkbox("Debug Heatmap (Debug)", ref heatmap)) { GameSettings.ShowDebugHeatmap = heatmap; }
-
+            ImGui.Spacing();
+            
+            ImGui.Text("Collision Debug Mode:");
+            
+            // Радио-кнопки для режимов
+            if (ImGui.RadioButton("None##Col", GameSettings.DebugCollisionMode == CollisionDebugMode.None)) 
+                GameSettings.DebugCollisionMode = CollisionDebugMode.None;
+            ImGui.SameLine();
+            if (ImGui.RadioButton("Dynamic##Col", GameSettings.DebugCollisionMode == CollisionDebugMode.PhysicsOnly)) 
+                GameSettings.DebugCollisionMode = CollisionDebugMode.PhysicsOnly;
+            
+            if (ImGui.RadioButton("Static##Col", GameSettings.DebugCollisionMode == CollisionDebugMode.StaticOnly)) 
+                GameSettings.DebugCollisionMode = CollisionDebugMode.StaticOnly;
+            ImGui.SameLine();
+            if (ImGui.RadioButton("All##Col", GameSettings.DebugCollisionMode == CollisionDebugMode.All)) 
+                GameSettings.DebugCollisionMode = CollisionDebugMode.All;
+            
             // --- LOD SECTION ---
             ImGui.Spacing();
             ImGui.Separator();
