@@ -46,6 +46,7 @@ public class WorldManager : IDisposable
     public event Action<Chunk> OnChunkModified;
     public event Action<Vector3i> OnChunkUnloaded;
     public event Action<Vector3i> OnVoxelFastDestroyed;
+    public event Action<Chunk, Vector3i, MaterialType> OnVoxelEdited;
 
     public const int WorldHeightChunks = 16;
     private float _memoryLogTimer = 0f;
@@ -467,6 +468,7 @@ public class WorldManager : IDisposable
     public List<Chunk> GetChunksSnapshot() { lock (_chunksLock) return new List<Chunk>(_chunks.Values); }
     public float GetViewRangeInMeters() => GameSettings.RenderDistance * Constants.ChunkSizeWorld;
     public void RebuildPhysics(Chunk chunk) { if (chunk == null || !chunk.IsLoaded) return; _physicsBuilder.EnqueueTask(chunk, urgent: true); }
+    public void NotifyVoxelEdited(Chunk chunk, Vector3i pos, MaterialType mat) => OnVoxelEdited?.Invoke(chunk, pos, mat);
     public void CreateDetachedObject(List<Vector3i> globalCluster)
     {
         foreach (var pos in globalCluster) 

@@ -19,9 +19,10 @@ public class GpuRaycastingRenderer : IDisposable
     private int _pageTableTexture;
     
     // --- ПАМЯТЬ SSBO ---
-    private const int MAX_TOTAL_BANKS = 13; 
-    private const long BANK_SIZE_BYTES = 1L * 1024L * 1024L * 1024L - 1; // 2 ГБ минус 1 байт
-    
+    private const int MAX_TOTAL_BANKS = 8;
+    // Размер 256 МБ.
+    private const long BANK_SIZE_BYTES = 268435456;
+
     private int[] _voxelSsboBanks = new int[MAX_TOTAL_BANKS]; 
     private int _chunksPerBank;
     private int _activeBankCount = 0; 
@@ -51,7 +52,7 @@ public class GpuRaycastingRenderer : IDisposable
 
     private const int PT_X = 512, PT_Y = 16, PT_Z = 512;
     private const int MASK_X = PT_X - 1, MASK_Y = PT_Y - 1, MASK_Z = PT_Z - 1;
-    private const int OBJ_GRID_SIZE = 512;
+    private const int OBJ_GRID_SIZE = 64;
     private float _gridCellSize;
 
     private Queue<int> _freeSlots = new Queue<int>();
@@ -73,6 +74,25 @@ public class GpuRaycastingRenderer : IDisposable
     public int TotalVramMb { get; private set; } = 4096;
     public long CurrentAllocatedBytes { get; private set; } = 0;
     private bool _reallocationPending = false;
+
+    //Render Scale
+    private int _mainFbo;
+    private int _mainColorTexture;
+    private int _mainDepthTexture;
+    private int _renderWidth;
+    private int _renderHeight;
+
+    //Compute Shader Updater
+    private int _editSsbo;
+    private ConcurrentQueue<GpuVoxelEdit> _editQueue = new ConcurrentQueue<GpuVoxelEdit>();
+    private GpuVoxelEdit[] _editUploadArray = new GpuVoxelEdit[1024]; [StructLayout(LayoutKind.Sequential)]
+    struct GpuVoxelEdit
+    {
+        public uint ChunkSlot;
+        public uint VoxelIndex;
+        public uint NewMaterial;
+        public uint Padding; // GLSL std430 выравнивание до 16 байт
+    }
 
     [StructLayout(LayoutKind.Sequential)]
     struct GpuDynamicObject { public Matrix4 Model; public Matrix4 InvModel; public Vector4 Color; public Vector4 BoxMin; public Vector4 BoxMax; }
@@ -117,6 +137,13 @@ public class GpuRaycastingRenderer : IDisposable
         return (long)chunks * (PackedChunkSizeInInts * 4 + ChunkMaskSizeInUlongs * 8);
     }
 
+    public void ApplyRenderScale()
+    {
+        // Принудительно вызываем пересоздание FBO с текущими размерами окна,
+        // но внутри OnResize теперь учтется новый GameSettings.RenderScale
+        OnResize(_windowWidth, _windowHeight);
+    }
+
     public void InitializeBuffers()
     {
         if (_dummySSBO == 0)
@@ -127,8 +154,16 @@ public class GpuRaycastingRenderer : IDisposable
         }
 
         CleanupBanks();
-        if (!TryAddBank()) throw new Exception("Critical: GPU has less than 1GB VRAM available!");
+        // Сначала создаем первую банку
+        if (!TryAddBank()) throw new Exception("Critical: Failed to allocate even the first VRAM bank!");
+
+        // А ТЕПЕРЬ считаем, сколько чанков влезет в ЭТОТ размер (128 МБ)
+        // PackedChunkSizeInInts * 4 = размер одного чанка в байтах (32768 байт)
         _chunksPerBank = (int)(BANK_SIZE_BYTES / (PackedChunkSizeInInts * 4));
+
+        Console.WriteLine($"[Init] Bank Size: {BANK_SIZE_BYTES / 1024 / 1024} MB");
+        Console.WriteLine($"[Init] Chunks per Bank: {_chunksPerBank}");
+        Console.WriteLine($"[Init] Max World Capacity: {_chunksPerBank * MAX_TOTAL_BANKS} chunks");
 
         BindAllBuffers();
 
@@ -168,7 +203,7 @@ public class GpuRaycastingRenderer : IDisposable
         for (int i = 0; i < MAX_TOTAL_BANKS; i++)
         {
             int handle = (i < _activeBankCount) ? _voxelSsboBanks[i] : _dummySSBO;
-            GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 10 + i, handle);
+            GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 8 + i, handle);
         }
     }
 
@@ -192,23 +227,30 @@ public class GpuRaycastingRenderer : IDisposable
     private bool TryAddBank()
     {
         if (_activeBankCount >= MAX_TOTAL_BANKS) return false;
-        int availableKb = GetAvailableVramKb();
-        long neededKb = BANK_SIZE_BYTES / 1024;
-        if (availableKb < neededKb + 500000) return false; 
 
         try
         {
             int newIndex = _activeBankCount;
             int newBuffer = GL.GenBuffer();
             GL.BindBuffer(BufferTarget.ShaderStorageBuffer, newBuffer);
+            // Пытаемся выделить 256 МБ. Драйвер сам решит, куда.
             GL.BufferData(BufferTarget.ShaderStorageBuffer, (IntPtr)BANK_SIZE_BYTES, IntPtr.Zero, BufferUsageHint.DynamicDraw);
-            
+
+            // Проверка на ошибку памяти
+            if (GL.GetError() == ErrorCode.OutOfMemory)
+            {
+                GL.DeleteBuffer(newBuffer);
+                Console.WriteLine("[VRAM] Out Of Memory!");
+                return false;
+            }
+
             _voxelSsboBanks[newIndex] = newBuffer;
             _activeBankCount++;
             CurrentAllocatedBytes += BANK_SIZE_BYTES;
-            
-            GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 10 + newIndex, newBuffer);
-            Console.WriteLine($"[VRAM] Added Bank #{newIndex}. Total: {_activeBankCount}");
+
+            // Биндим в слот 8 + index (8, 9, ... 15)
+            GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 8 + newIndex, newBuffer);
+            Console.WriteLine($"[VRAM] Added Bank #{newIndex} (Binding {8 + newIndex}). Total: {_activeBankCount}");
             return true;
         }
         catch { return false; }
@@ -229,7 +271,7 @@ public class GpuRaycastingRenderer : IDisposable
 
     private int GetSlotOrPanic()
     {
-// 1. Если есть свободные слоты - берем их
+    // 1. Если есть свободные слоты - берем их
         if (_freeSlots.Count > 0) return _freeSlots.Dequeue();
 
         // 2. Если слотов нет, пробуем создать новую банку
@@ -340,30 +382,76 @@ public class GpuRaycastingRenderer : IDisposable
     }
 
     // === ВЕРНУЛ МЕТОД UPDATE ===
-    public void Update(float deltaTime) 
-    { 
-        _totalTime += deltaTime; 
-        int limit = GameSettings.GpuUploadSpeed; 
-        while (limit > 0 && _uploadQueue.TryDequeue(out var chunk)) 
-        { 
-            if (_allocatedChunks.TryGetValue(chunk.Position, out int slot)) 
-            { 
-                lock(_chunksPendingUpload) _chunksPendingUpload.Remove(chunk.Position);
-                // Загружаем только если это НЕ solid-чанк
-                if (chunk.IsLoaded && slot != SOLITARY_SLOT_INDEX) 
-                { 
-                    UploadChunkVoxels(chunk, slot); 
-                    limit--; 
+    public void Update(float deltaTime)
+    {
+        _totalTime += deltaTime;
+
+        // =========================================================
+        // 1. ПРИМЕНЯЕМ ТОЧЕЧНЫЕ РЕДАКТИРОВАНИЯ (ДЕЛТА-ОБНОВЛЕНИЯ)
+        // =========================================================
+        int editsToApply = Math.Min(_editQueue.Count, 1024);
+        if (editsToApply > 0)
+        {
+            for (int i = 0; i < editsToApply; i++)
+            {
+                _editQueue.TryDequeue(out _editUploadArray[i]);
+            }
+
+            // Отправляем массив правок в SSBO
+            GL.BindBuffer(BufferTarget.ShaderStorageBuffer, _editSsbo);
+            GL.BufferSubData(BufferTarget.ShaderStorageBuffer, IntPtr.Zero, editsToApply * 16, _editUploadArray);
+
+            var editShader = _shaderSystem.EditUpdaterShader;
+            if (editShader != null)
+            {
+                editShader.Use();
+                editShader.SetInt("uEditCount", editsToApply);
+
+                // Подключаем банки вокселей (b0, b1...), маски и буфер правок
+                BindAllBuffers();
+                GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 5, _maskSsbo);
+                GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 6, _editSsbo);
+
+                // Запускаем Compute Shader (размер рабочей группы 64)
+                GL.DispatchCompute((editsToApply + 63) / 64, 1, 1);
+
+                // ОБЯЗАТЕЛЬНО: Ждем, пока GPU закончит менять байты и маски, прежде чем рисовать кадр
+                GL.MemoryBarrier(MemoryBarrierFlags.ShaderStorageBarrierBit);
+            }
+        }
+
+        // =========================================================
+        // 2. ЗАГРУЖАЕМ ЦЕЛЫЕ ЧАНКИ (если они были сгенерированы)
+        // =========================================================
+        int limit = GameSettings.GpuUploadSpeed;
+        while (limit > 0 && _uploadQueue.TryDequeue(out var chunk))
+        {
+            if (_allocatedChunks.TryGetValue(chunk.Position, out int slot))
+            {
+                lock (_chunksPendingUpload) _chunksPendingUpload.Remove(chunk.Position);
+                // Загружаем только если это НЕ сплошной uniform-чанк
+                if (chunk.IsLoaded && slot != SOLITARY_SLOT_INDEX)
+                {
+                    UploadChunkVoxels(chunk, slot);
+                    limit--;
                 }
             }
-        } 
-        if (_pageTableDirty) 
-        { 
-            GL.BindTexture(TextureTarget.Texture3D, _pageTableTexture); 
-            GL.TexSubImage3D(TextureTarget.Texture3D, 0, 0, 0, 0, PT_X, PT_Y, PT_Z, PixelFormat.RedInteger, PixelType.UnsignedInt, _cpuPageTable); 
-            _pageTableDirty = false; 
-        } 
-        UpdateDynamicObjectsAndGrid(); 
+        }
+
+        // =========================================================
+        // 3. ОБНОВЛЯЕМ PAGE TABLE (СЛОВАРЬ ЧАНКОВ)
+        // =========================================================
+        if (_pageTableDirty)
+        {
+            GL.BindTexture(TextureTarget.Texture3D, _pageTableTexture);
+            GL.TexSubImage3D(TextureTarget.Texture3D, 0, 0, 0, 0, PT_X, PT_Y, PT_Z, PixelFormat.RedInteger, PixelType.UnsignedInt, _cpuPageTable);
+            _pageTableDirty = false;
+        }
+
+        // =========================================================
+        // 4. ОБНОВЛЯЕМ ДИНАМИЧЕСКИЕ ОБЪЕКТЫ И СЕТКУ (TEARDOWN PHYSICS)
+        // =========================================================
+        UpdateDynamicObjectsAndGrid();
     }
 
     public void UnloadChunk(Vector3i pos) 
@@ -385,8 +473,17 @@ public class GpuRaycastingRenderer : IDisposable
         if (_dynamicObjectsBuffer == 0) { _dynamicObjectsBuffer = GL.GenBuffer(); GL.BindBuffer(BufferTarget.ShaderStorageBuffer, _dynamicObjectsBuffer); GL.BufferData(BufferTarget.ShaderStorageBuffer, 4096 * Marshal.SizeOf<GpuDynamicObject>(), IntPtr.Zero, BufferUsageHint.DynamicDraw); GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 2, _dynamicObjectsBuffer); }
         if (_beamFbo == 0) _beamFbo = GL.GenFramebuffer(); 
         if (_beamTexture == 0) { _beamTexture = GL.GenTexture(); GL.BindTexture(TextureTarget.Texture2D, _beamTexture); GL.TexImage2D(TextureTarget.Texture2D, 0, PixelInternalFormat.R32f, _beamWidth, _beamHeight, 0, PixelFormat.Red, PixelType.Float, IntPtr.Zero); GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Nearest); GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMinFilter.Nearest); }
+        // НОВОЕ: Буфер правок (Binding 6)
+        if (_editSsbo == 0)
+        {
+            _editSsbo = GL.GenBuffer();
+            GL.BindBuffer(BufferTarget.ShaderStorageBuffer, _editSsbo);
+            GL.BufferData(BufferTarget.ShaderStorageBuffer, 2048 * 16, IntPtr.Zero, BufferUsageHint.DynamicDraw);
+            GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 6, _editSsbo);
+        }
+
     }
-    
+
     private void CleanupBuffers() { 
         GL.UseProgram(0); GL.BindVertexArray(0); GL.BindFramebuffer(FramebufferTarget.Framebuffer, 0); 
         for(int i=0; i<32; i++) GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, i, 0); 
@@ -431,7 +528,31 @@ public class GpuRaycastingRenderer : IDisposable
             } 
         }); 
     }
-    
+
+    public void NotifyVoxelEdited(Chunk chunk, Vector3i localPos, MaterialType newMat)
+    {
+        if (_allocatedChunks.TryGetValue(chunk.Position, out int slot))
+        {
+            if (slot == SOLITARY_SLOT_INDEX)
+            {
+                // Если чанк был сплошным воздухом/камнем, у него нет физического слота в SSBO.
+                // Тут дельта не спасет, грузим целиком (происходит очень редко).
+                NotifyChunkLoaded(chunk);
+            }
+            else
+            {
+                // Кладем правку в очередь для Compute Shader
+                int index = localPos.X + Constants.ChunkResolution * (localPos.Y + Constants.ChunkResolution * localPos.Z);
+                _editQueue.Enqueue(new GpuVoxelEdit
+                {
+                    ChunkSlot = (uint)slot,
+                    VoxelIndex = (uint)index,
+                    NewMaterial = (uint)newMat,
+                    Padding = 0
+                });
+            }
+        }
+    }
     public void UpdateDynamicObjectsAndGrid() 
     { 
         var voxelObjects = _worldManager.GetAllVoxelObjects(); 
@@ -491,103 +612,157 @@ public class GpuRaycastingRenderer : IDisposable
             GL.MemoryBarrier(MemoryBarrierFlags.ShaderImageAccessBarrierBit | MemoryBarrierFlags.AtomicCounterBarrierBit | MemoryBarrierFlags.ShaderStorageBarrierBit); 
         } 
     }
-    
-    public void Render(Camera cam) 
-    { 
-        if (_reallocationPending || _activeBankCount == 0) return; 
-        
-        _shaderSystem.Use(); 
-        var shader = _shaderSystem.RaycastShader; 
-        if (shader == null) return; 
-        
-        // ... (передача uniforms без изменений) ...
-        shader.SetVector3("uCamPos", cam.Position); 
-        shader.SetMatrix4("uView", cam.GetViewMatrix()); 
-        shader.SetMatrix4("uProjection", cam.GetProjectionMatrix()); 
-        shader.SetMatrix4("uInvView", Matrix4.Invert(cam.GetViewMatrix())); 
-        shader.SetMatrix4("uInvProjection", Matrix4.Invert(cam.GetProjectionMatrix())); 
-        float viewRange = _worldManager.GetViewRangeInMeters(); 
-        shader.SetFloat("uRenderDistance", viewRange); 
-        
-        if (GameSettings.EnableLOD) { 
-            float lodMeters = viewRange * GameSettings.LodPercentage; 
-            shader.SetFloat("uLodDistance", lodMeters); 
-        } else { 
-            shader.SetFloat("uLodDistance", 100000.0f); 
-        } 
-        
-        shader.SetInt("uDisableEffectsOnLOD", GameSettings.DisableEffectsOnLOD ? 1 : 0); 
-        shader.SetInt("uMaxRaySteps", (int)(GameSettings.RenderDistance * 8) + 2028); 
-        shader.SetVector3("uSunDir", Vector3.Normalize(new Vector3(0.2f, 0.4f, 0.8f))); 
-        shader.SetFloat("uTime", _totalTime); 
-        shader.SetInt("uShowDebugHeatmap", GameSettings.ShowDebugHeatmap ? 1 : 0); 
-        shader.SetInt("uSoftShadowSamples", GameSettings.SoftShadowSamples); 
-        
-        Vector3 p = cam.Position; 
-        int sz = Constants.ChunkSizeWorld; 
-        int cx = (int)Math.Floor(p.X/sz), cy = (int)Math.Floor(p.Y/sz), cz = (int)Math.Floor(p.Z/sz); 
-        int r = GameSettings.RenderDistance + 2; 
-        
-        shader.SetInt("uBoundMinX", cx-r); shader.SetInt("uBoundMinY", 0); shader.SetInt("uBoundMinZ", cz-r); 
-        shader.SetInt("uBoundMaxX", cx+r); shader.SetInt("uBoundMaxY", WorldManager.WorldHeightChunks); shader.SetInt("uBoundMaxZ", cz+r); 
-        
-        GL.BindImageTexture(0, _pageTableTexture, 0, true, 0, TextureAccess.ReadOnly, SizedInternalFormat.R32ui); 
-        BindAllBuffers(); 
-        GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 5, _maskSsbo); 
-        GL.BindImageTexture(1, _gridHeadTexture, 0, true, 0, TextureAccess.ReadOnly, SizedInternalFormat.R32i); 
-        GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 2, _dynamicObjectsBuffer); 
-        GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 3, _linkedListSsbo); 
-        
-        shader.SetTexture("uNoiseTexture", _noiseTexture, TextureUnit.Texture0); 
-        shader.SetVector3("uGridOrigin", _lastGridOrigin); 
-        shader.SetFloat("uGridStep", _gridCellSize); 
-        shader.SetInt("uGridSize", OBJ_GRID_SIZE); 
-        shader.SetInt("uObjectCount", _worldManager.GetAllVoxelObjects().Count); 
-        
-        GL.BindVertexArray(_quadVao); 
-        
-        if (GameSettings.BeamOptimization) 
-        { 
-            if (_beamTexture == 0) { 
-                _beamTexture = GL.GenTexture(); 
-                GL.BindTexture(TextureTarget.Texture2D, _beamTexture); 
-                GL.TexImage2D(TextureTarget.Texture2D, 0, PixelInternalFormat.R32f, _beamWidth, _beamHeight, 0, PixelFormat.Red, PixelType.Float, IntPtr.Zero); 
-                GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Nearest); 
-                GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMinFilter.Nearest);
-                // ИСПРАВЛЕНИЕ 1: Убираем артефакты по краям экрана
-                GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, (int)TextureWrapMode.ClampToEdge);
-                GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)TextureWrapMode.ClampToEdge);
-            } 
-            
-            GL.BindFramebuffer(FramebufferTarget.Framebuffer, _beamFbo); 
-            GL.FramebufferTexture2D(FramebufferTarget.Framebuffer, FramebufferAttachment.ColorAttachment0, TextureTarget.Texture2D, _beamTexture, 0); 
-            GL.Viewport(0, 0, _beamWidth, _beamHeight); 
-            
-            // Ставим красный цвет для очистки глубины
-            GL.ClearColor(10000.0f, 0, 0, 1); 
-            GL.Clear(ClearBufferMask.ColorBufferBit); 
-            
-            shader.SetInt("uIsBeamPass", 1); 
-            GL.Disable(EnableCap.DepthTest); 
+
+    public void Render(Camera cam)
+    {
+        if (_reallocationPending || _activeBankCount == 0) return;
+
+        _shaderSystem.Use();
+        var shader = _shaderSystem.RaycastShader;
+        if (shader == null) return;
+
+        // --- ПЕРЕДАЧА UNIFORMS КАМЕРЫ И НАСТРОЕК ---
+        shader.SetVector3("uCamPos", cam.Position);
+        shader.SetMatrix4("uView", cam.GetViewMatrix());
+        shader.SetMatrix4("uProjection", cam.GetProjectionMatrix());
+        shader.SetMatrix4("uInvView", Matrix4.Invert(cam.GetViewMatrix()));
+        shader.SetMatrix4("uInvProjection", Matrix4.Invert(cam.GetProjectionMatrix()));
+
+        float viewRange = _worldManager.GetViewRangeInMeters();
+        shader.SetFloat("uRenderDistance", viewRange);
+
+        if (GameSettings.EnableLOD)
+        {
+            float lodMeters = viewRange * GameSettings.LodPercentage;
+            shader.SetFloat("uLodDistance", lodMeters);
+        }
+        else
+        {
+            shader.SetFloat("uLodDistance", 100000.0f);
+        }
+
+        shader.SetInt("uDisableEffectsOnLOD", GameSettings.DisableEffectsOnLOD ? 1 : 0);
+        shader.SetInt("uMaxRaySteps", (int)(GameSettings.RenderDistance * 8) + 2028);
+        shader.SetVector3("uSunDir", Vector3.Normalize(new Vector3(0.2f, 0.4f, 0.8f)));
+        shader.SetFloat("uTime", _totalTime);
+        shader.SetInt("uShowDebugHeatmap", GameSettings.ShowDebugHeatmap ? 1 : 0);
+        shader.SetInt("uSoftShadowSamples", GameSettings.SoftShadowSamples);
+
+        // Оптимизация границ поиска (AABB лучей)
+        Vector3 p = cam.Position;
+        int sz = Constants.ChunkSizeWorld;
+        int cx = (int)Math.Floor(p.X / sz), cy = (int)Math.Floor(p.Y / sz), cz = (int)Math.Floor(p.Z / sz);
+        int r = GameSettings.RenderDistance + 2;
+
+        shader.SetInt("uBoundMinX", cx - r); shader.SetInt("uBoundMinY", 0); shader.SetInt("uBoundMinZ", cz - r);
+        shader.SetInt("uBoundMaxX", cx + r); shader.SetInt("uBoundMaxY", WorldManager.WorldHeightChunks); shader.SetInt("uBoundMaxZ", cz + r);
+
+        // --- ПОДКЛЮЧЕНИЕ БУФЕРОВ ---
+        GL.BindImageTexture(0, _pageTableTexture, 0, true, 0, TextureAccess.ReadOnly, SizedInternalFormat.R32ui);
+        BindAllBuffers(); // Банки b0, b1...
+        GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 5, _maskSsbo);
+        GL.BindImageTexture(1, _gridHeadTexture, 0, true, 0, TextureAccess.ReadOnly, SizedInternalFormat.R32i);
+        GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 2, _dynamicObjectsBuffer);
+        GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 3, _linkedListSsbo);
+
+        shader.SetTexture("uNoiseTexture", _noiseTexture, TextureUnit.Texture0);
+        shader.SetVector3("uGridOrigin", _lastGridOrigin);
+        shader.SetFloat("uGridStep", _gridCellSize);
+        shader.SetInt("uGridSize", OBJ_GRID_SIZE);
+        shader.SetInt("uObjectCount", _worldManager.GetAllVoxelObjects().Count);
+
+        GL.BindVertexArray(_quadVao);
+
+        // =========================================================
+        // ПРОХОД 1: BEAM OPTIMIZATION (Поиск глубины)
+        // =========================================================
+        if (GameSettings.BeamOptimization)
+        {
+            // Создание текстуры вынесено в OnResize, поэтому здесь только биндим
+            GL.BindFramebuffer(FramebufferTarget.Framebuffer, _beamFbo);
+            GL.Viewport(0, 0, _beamWidth, _beamHeight);
+
+            // Ставим красный цвет для очистки (далекая глубина)
+            GL.ClearColor(10000.0f, 0, 0, 1);
+            GL.Clear(ClearBufferMask.ColorBufferBit);
+
+            shader.SetInt("uIsBeamPass", 1);
+            GL.Disable(EnableCap.DepthTest);
             GL.DrawArrays(PrimitiveType.TriangleStrip, 0, 4);
-            
-            // ИСПРАВЛЕНИЕ 2: Возвращаем нормальный цвет очистки (иначе в след. кадре небо будет красным)
-            // Цвет как в Game.cs
-            GL.ClearColor(0.5f, 0.7f, 0.9f, 1.0f); 
-        } 
-        
-        GL.BindFramebuffer(FramebufferTarget.Framebuffer, 0); 
-        GL.Viewport(0, 0, _windowWidth, _windowHeight); 
-        shader.SetInt("uIsBeamPass", 0); 
-        shader.SetTexture("uBeamTexture", _beamTexture, TextureUnit.Texture1); 
-        
-        // Включаем DepthTest перед основным проходом
-        GL.Enable(EnableCap.DepthTest); 
-        GL.DrawArrays(PrimitiveType.TriangleStrip, 0, 4); 
-        GL.BindVertexArray(0); 
+        }
+
+        // =========================================================
+        // ПРОХОД 2: ОСНОВНОЙ РЕНДЕР (С УЧЕТОМ RENDER SCALE)
+        // =========================================================
+        GL.BindFramebuffer(FramebufferTarget.Framebuffer, _mainFbo); // Рендерим в нашу уменьшенную текстуру!
+        GL.Viewport(0, 0, _renderWidth, _renderHeight);
+
+        // Возвращаем нормальный цвет очистки (цвет неба)
+        GL.ClearColor(0.5f, 0.7f, 0.9f, 1.0f);
+        GL.Clear(ClearBufferMask.ColorBufferBit | ClearBufferMask.DepthBufferBit);
+
+        shader.SetInt("uIsBeamPass", 0);
+        shader.SetTexture("uBeamTexture", _beamTexture, TextureUnit.Texture1);
+
+        GL.Enable(EnableCap.DepthTest);
+        GL.DrawArrays(PrimitiveType.TriangleStrip, 0, 4);
+
+        // =========================================================
+        // ПРОХОД 3: UPSCALE НА ГЛАВНЫЙ ЭКРАН (АППАРАТНЫЙ BLIT)
+        // =========================================================
+        GL.BindFramebuffer(FramebufferTarget.ReadFramebuffer, _mainFbo);
+        GL.BindFramebuffer(FramebufferTarget.DrawFramebuffer, 0); // 0 = Дефолтный экранный буфер
+
+        // Копируем ГЛУБИНУ (Строго Nearest! Если использовать Linear, координаты Z смажутся и физика/UI провалятся под текстуры)
+        GL.BlitFramebuffer(0, 0, _renderWidth, _renderHeight, 0, 0, _windowWidth, _windowHeight, ClearBufferMask.DepthBufferBit, BlitFramebufferFilter.Nearest);
+
+        // Копируем ЦВЕТ (Linear, чтобы сгладить "пиксельность" от низкого Render Scale)
+        GL.BlitFramebuffer(0, 0, _renderWidth, _renderHeight, 0, 0, _windowWidth, _windowHeight, ClearBufferMask.ColorBufferBit, BlitFramebufferFilter.Linear);
+
+        // Возвращаем состояние в норму для отрисовки UI (ImGui)
+        GL.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
+        GL.Viewport(0, 0, _windowWidth, _windowHeight);
+        GL.BindVertexArray(0);
     }
-    
-    public void OnResize(int w, int h) { _windowWidth = w; _windowHeight = h; _beamWidth = w / BeamDivisor; _beamHeight = h / BeamDivisor; if (_beamWidth < 1) _beamWidth = 1; if (_beamHeight < 1) _beamHeight = 1; if (_beamTexture != 0) { GL.DeleteTexture(_beamTexture); _beamTexture = 0; } GL.Viewport(0, 0, _windowWidth, _windowHeight); }
+
+    public void OnResize(int w, int h)
+    {
+        _windowWidth = w; _windowHeight = h;
+
+        // Применяем Render Scale к реальному рендеру
+        _renderWidth = Math.Max(1, (int)(w * GameSettings.RenderScale));
+        _renderHeight = Math.Max(1, (int)(h * GameSettings.RenderScale));
+
+        _beamWidth = _renderWidth / BeamDivisor;
+        _beamHeight = _renderHeight / BeamDivisor;
+        if (_beamWidth < 1) _beamWidth = 1; if (_beamHeight < 1) _beamHeight = 1;
+
+        if (_beamTexture != 0) { GL.DeleteTexture(_beamTexture); _beamTexture = 0; }
+
+        // Пересоздаем основной FBO для Render Scale
+        if (_mainFbo != 0) GL.DeleteFramebuffer(_mainFbo);
+        if (_mainColorTexture != 0) GL.DeleteTexture(_mainColorTexture);
+        if (_mainDepthTexture != 0) GL.DeleteTexture(_mainDepthTexture);
+
+        _mainFbo = GL.GenFramebuffer();
+        GL.BindFramebuffer(FramebufferTarget.Framebuffer, _mainFbo);
+
+        _mainColorTexture = GL.GenTexture();
+        GL.BindTexture(TextureTarget.Texture2D, _mainColorTexture);
+        GL.TexImage2D(TextureTarget.Texture2D, 0, PixelInternalFormat.Rgba16f, _renderWidth, _renderHeight, 0, PixelFormat.Rgba, PixelType.Float, IntPtr.Zero);
+        GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Linear);
+        GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMinFilter.Linear);
+        GL.FramebufferTexture2D(FramebufferTarget.Framebuffer, FramebufferAttachment.ColorAttachment0, TextureTarget.Texture2D, _mainColorTexture, 0);
+
+        _mainDepthTexture = GL.GenTexture();
+        GL.BindTexture(TextureTarget.Texture2D, _mainDepthTexture);
+        // DepthComponent32f нужен, чтобы глубина корректно передавалась при Blit'е
+        GL.TexImage2D(TextureTarget.Texture2D, 0, PixelInternalFormat.DepthComponent32f, _renderWidth, _renderHeight, 0, PixelFormat.DepthComponent, PixelType.Float, IntPtr.Zero);
+        GL.FramebufferTexture2D(FramebufferTarget.Framebuffer, FramebufferAttachment.DepthAttachment, TextureTarget.Texture2D, _mainDepthTexture, 0);
+
+        GL.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
+        GL.Viewport(0, 0, _windowWidth, _windowHeight);
+    }
     public void ReloadShader() { _shaderSystem.Compile(MAX_TOTAL_BANKS, _chunksPerBank); }
     public void UploadAllVisibleChunks() { foreach (var c in _worldManager.GetChunksSnapshot()) NotifyChunkLoaded(c); }
     public void Dispose() { CleanupBuffers(); _quadVao = 0; _shaderSystem?.Dispose(); _gridComputeShader?.Dispose(); }

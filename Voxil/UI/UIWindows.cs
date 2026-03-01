@@ -14,6 +14,7 @@ public class SettingsWindow : IUIWindow
     private readonly GpuRaycastingRenderer _renderer;
     
     private int _renderDist;
+    private float _currentScale;
     private int _shadowSamples;
     private int _genThreads;
     private int _physThreads;
@@ -29,8 +30,9 @@ public class SettingsWindow : IUIWindow
     {
         _worldManager = wm;
         _renderer = renderer;
-        
+       
         _renderDist = GameSettings.RenderDistance;
+        _currentScale = GameSettings.RenderScale;
         _shadowSamples = GameSettings.SoftShadowSamples;
         _genThreads = GameSettings.GenerationThreads;
         _physThreads = GameSettings.PhysicsThreads;
@@ -66,25 +68,37 @@ public class SettingsWindow : IUIWindow
             if (danger) ImGui.TextColored(new System.Numerics.Vector4(1, 0.3f, 0.3f, 1), $"Request: {futureMb:F0} MB (Limit: {budgetMb:F0})");
             else ImGui.Text($"Request: {futureMb:F0} MB / {budgetMb:F0} MB");
             if (ImGui.Button("Apply Render Distance")) { GameSettings.RenderDistance = _renderDist; _renderer.RequestReallocation(); }
+
             ImGui.Spacing();
-            
+            ImGui.Separator();
+            ImGui.Text("Render Scale");
+            ImGui.SliderFloat("Render Scale", ref _currentScale, 0.25f, 1.0f, "%.2f");
+            if (ImGui.Button("Apply Render Scale"))
+            {
+                GameSettings.RenderScale = _currentScale;
+                _renderer.ApplyRenderScale(); // <--- ВОТ ЭТОГО НЕ ХВАТАЛО!
+            }
+
+            ImGui.Spacing();
+            ImGui.Separator();
             ImGui.Text("Shadows Mode:");
             if (ImGui.RadioButton("None", GameSettings.CurrentShadowMode == ShadowMode.None)) { GameSettings.CurrentShadowMode = ShadowMode.None; _renderer.ReloadShader(); } ImGui.SameLine();
             if (ImGui.RadioButton("Hard", GameSettings.CurrentShadowMode == ShadowMode.Hard)) { GameSettings.CurrentShadowMode = ShadowMode.Hard; _renderer.ReloadShader(); } ImGui.SameLine();
             if (ImGui.RadioButton("Soft", GameSettings.CurrentShadowMode == ShadowMode.Soft)) { GameSettings.CurrentShadowMode = ShadowMode.Soft; _renderer.ReloadShader(); }
             if (GameSettings.CurrentShadowMode == ShadowMode.Soft) { if (ImGui.SliderInt("Soft Samples", ref _shadowSamples, 2, 64)) GameSettings.SoftShadowSamples = _shadowSamples; }
+
             ImGui.Spacing();
-            
+            ImGui.Separator();
             ImGui.Text("Effects");
             bool ao = GameSettings.EnableAO; if (ImGui.Checkbox("Ambient Occlusion", ref ao)) { GameSettings.EnableAO = ao; _renderer.ReloadShader(); }
             bool water = GameSettings.UseProceduralWater; if (ImGui.Checkbox("Procedural Water (Disable)", ref water)) { GameSettings.UseProceduralWater = water; _renderer.ReloadShader(); }
             bool trans = GameSettings.EnableWaterTransparency; if (ImGui.Checkbox("Water Transparency (Disable)", ref trans)) { GameSettings.EnableWaterTransparency = trans; _renderer.ReloadShader(); }
             bool beam = GameSettings.BeamOptimization; if (ImGui.Checkbox("Beam Optimization", ref beam)) { GameSettings.BeamOptimization = beam; _renderer.ReloadShader(); }
             bool heatmap = GameSettings.ShowDebugHeatmap; if (ImGui.Checkbox("Debug Heatmap (Debug)", ref heatmap)) { GameSettings.ShowDebugHeatmap = heatmap; }
+
             ImGui.Spacing();
-            
+            ImGui.Separator();
             ImGui.Text("Collision Debug Mode:");
-            
             // Радио-кнопки для режимов
             if (ImGui.RadioButton("None##Col", GameSettings.DebugCollisionMode == CollisionDebugMode.None)) 
                 GameSettings.DebugCollisionMode = CollisionDebugMode.None;
@@ -99,6 +113,7 @@ public class SettingsWindow : IUIWindow
                 GameSettings.DebugCollisionMode = CollisionDebugMode.All;
             
             // --- LOD SECTION ---
+
             ImGui.Spacing();
             ImGui.Separator();
             ImGui.Text("Level of Detail (LOD)");

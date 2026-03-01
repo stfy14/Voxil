@@ -73,6 +73,7 @@ public class Game : GameWindow
         _worldManager.OnChunkModified += (chunk) => _renderer.NotifyChunkLoaded(chunk);
         _worldManager.OnVoxelFastDestroyed += (pos) => { };
         _worldManager.OnChunkUnloaded += (pos) => _renderer.UnloadChunk(pos);
+        _worldManager.OnVoxelEdited += (chunk, pos, mat) => _renderer.NotifyVoxelEdited(chunk, pos, mat);
 
         _renderer.UploadAllVisibleChunks();
 

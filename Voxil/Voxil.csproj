@@ -23,6 +23,9 @@
     <None Update="Assets\RobotoMono-Regular.ttf">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
+    <None Update="Shaders\edit_updater.comp">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </None>
     <None Update="Shaders\grid_update.comp">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </None>

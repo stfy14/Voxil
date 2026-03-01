@@ -22,6 +22,7 @@ public static class GameSettings
 {
     // === ГРАФИКА ===
     public static int RenderDistance = 32;
+    public static float RenderScale = 0.5f; // 50% от разрешения окна для спасения слабых GPU
     public static bool EnableAO = true;    
     public static ShadowMode CurrentShadowMode = ShadowMode.Soft;
     public static int SoftShadowSamples = 8; 

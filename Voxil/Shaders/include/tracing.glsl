@@ -1,46 +1,7 @@
-﻿// --- START OF FILE include/tracing.glsl ---
+﻿layout(std430, binding = 5) buffer MaskSSBO { uvec2 packedMasks[]; };
 
-layout(std430, binding = 5) buffer MaskSSBO { uvec2 packedMasks[]; };
-
-#if VOXEL_BANKS >= 1
-layout(std430, binding = 10) buffer VoxelSSBO0 { uint b0[]; };
-#endif
-#if VOXEL_BANKS >= 2
-layout(std430, binding = 11) buffer VoxelSSBO1 { uint b1[]; };
-#endif
-#if VOXEL_BANKS >= 3
-layout(std430, binding = 12) buffer VoxelSSBO2 { uint b2[]; };
-#endif
-#if VOXEL_BANKS >= 4
-layout(std430, binding = 13) buffer VoxelSSBO3 { uint b3[]; };
-#endif
-#if VOXEL_BANKS >= 5
-layout(std430, binding = 14) buffer VoxelSSBO4 { uint b4[]; };
-#endif
-#if VOXEL_BANKS >= 6
-layout(std430, binding = 15) buffer VoxelSSBO5 { uint b5[]; };
-#endif
-#if VOXEL_BANKS >= 7
-layout(std430, binding = 16) buffer VoxelSSBO6 { uint b6[]; };
-#endif
-#if VOXEL_BANKS >= 8
-layout(std430, binding = 17) buffer VoxelSSBO7 { uint b7[]; };
-#endif
-#if VOXEL_BANKS >= 9
-layout(std430, binding = 18) buffer VoxelSSBO8 { uint b8[]; };
-#endif
-#if VOXEL_BANKS >= 10
-layout(std430, binding = 19) buffer VoxelSSBO9 { uint b9[]; };
-#endif
-#if VOXEL_BANKS >= 11
-layout(std430, binding = 20) buffer VoxelSSBO10 { uint b10[]; };
-#endif
-#if VOXEL_BANKS >= 12
-layout(std430, binding = 21) buffer VoxelSSBO11 { uint b11[]; };
-#endif
-#if VOXEL_BANKS >= 13
-layout(std430, binding = 22) buffer VoxelSSBO12 { uint b12[]; };
-#endif
+// ВСТАВКА КОДА БАНКОВ (БЛОЧНЫЙ КОММЕНТАРИЙ)
+/*__BANKS_INJECTION__*/
 
 #define BLOCK_SIZE 4
 #define BLOCKS_PER_AXIS (VOXEL_RESOLUTION / BLOCK_SIZE) 
@@ -51,49 +12,9 @@ uint GetVoxelData(uint chunkSlot, int voxelIdx) {
     uint localSlot = chunkSlot % uint(CHUNKS_PER_BANK);
     uint chunkSizeUint = (uint(VOXEL_RESOLUTION)*uint(VOXEL_RESOLUTION)*uint(VOXEL_RESOLUTION)) / uint(VOXELS_IN_UINT);
     uint offset = localSlot * chunkSizeUint + (uint(voxelIdx) >> 2u);
-    uint rawVal = 0u;
-
-    switch(bank) {
-            #if VOXEL_BANKS >= 1
-        case 0u: rawVal = b0[offset]; break;
-            #endif
-        #if VOXEL_BANKS >= 2
-        case 1u: rawVal = b1[offset]; break;
-            #endif
-        #if VOXEL_BANKS >= 3
-        case 2u: rawVal = b2[offset]; break;
-            #endif
-        #if VOXEL_BANKS >= 4
-        case 3u: rawVal = b3[offset]; break;
-            #endif
-        #if VOXEL_BANKS >= 5
-        case 4u: rawVal = b4[offset]; break;
-            #endif
-        #if VOXEL_BANKS >= 6
-        case 5u: rawVal = b5[offset]; break;
-            #endif
-        #if VOXEL_BANKS >= 7
-        case 6u: rawVal = b6[offset]; break;
-            #endif
-        #if VOXEL_BANKS >= 8
-        case 7u: rawVal = b7[offset]; break;
-            #endif
-        #if VOXEL_BANKS >= 9
-        case 8u: rawVal = b8[offset]; break;
-            #endif
-        #if VOXEL_BANKS >= 10
-        case 9u: rawVal = b9[offset]; break;
-            #endif
-        #if VOXEL_BANKS >= 11
-        case 10u: rawVal = b10[offset]; break;
-            #endif
-        #if VOXEL_BANKS >= 12
-        case 11u: rawVal = b11[offset]; break;
-            #endif
-        #if VOXEL_BANKS >= 13
-        case 12u: rawVal = b12[offset]; break;
-            #endif
-    }
+    
+    // Теперь эта функция точно будет найдена
+    uint rawVal = GetVoxelFromBank(bank, offset);
 
     uint shift = (uint(voxelIdx) & 3u) * 8u;
     return (rawVal >> shift) & 0xFFu;

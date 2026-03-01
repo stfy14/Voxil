@@ -7,57 +7,57 @@ using System.Text;
 
 public class Shader : IDisposable
 {
+    public static string GlobalBanksInjection = "";
+
     public readonly int Handle;
     private readonly Dictionary<string, int> _uniformLocations = new();
     private readonly string _name;
     private bool _disposed;
 
-    // --- 1. Конструктор: Пути к файлам + Defines ---
+    // --- 1. Конструктор для ФАЙЛОВ ---
     public Shader(string vertexPath, string fragmentPath, List<string> defines = null)
     {
         _name = $"{vertexPath}+{fragmentPath}";
         string vsSource = LoadSource(vertexPath);
         string fsSource = LoadSource(fragmentPath);
 
-        // ВАЖНО: Вызываем InjectDefines ВСЕГДА, чтобы вставить константы из Constants.cs
         vsSource = InjectDefines(vsSource, defines);
         fsSource = InjectDefines(fsSource, defines);
+
+        // !!! ИСПРАВЛЕНИЕ: Ищем блочный комментарий, который не удаляется парсером !!!
+        fsSource = fsSource.Replace("/*__BANKS_INJECTION__*/", GlobalBanksInjection);
 
         int vs = CompileShader(ShaderType.VertexShader, vsSource);
         int fs = CompileShader(ShaderType.FragmentShader, fsSource);
 
         Handle = LinkProgram(vs, fs);
         CacheUniformLocations();
-
-        Console.WriteLine($"[Shader] Compiled: {_name} (Defines: {defines?.Count ?? 0})");
     }
 
-    // --- 2. Конструктор: Compute Shader ---
+    // --- 2. Конструктор для COMPUTE SHADER ---
     public Shader(string computePath, List<string> defines = null)
     {
         _name = computePath;
         string source = LoadSource(computePath);
 
-        // ВАЖНО: Вызываем InjectDefines ВСЕГДА
         source = InjectDefines(source, defines);
+
+        // !!! ИСПРАВЛЕНИЕ !!!
+        source = source.Replace("/*__BANKS_INJECTION__*/", GlobalBanksInjection);
 
         int cs = CompileShader(ShaderType.ComputeShader, source);
         Handle = LinkProgram(cs);
         CacheUniformLocations();
     }
-    
-    // --- 4. Конструктор для RAW SOURCE (Сырой код из строки) ---
-    // Используется в LineRenderer и других процедурных генераторах
+
+    // --- 3. Конструктор для СЫРОГО КОДА ---
     public Shader(string vertexSource, string fragmentSource, bool isSourceCode)
     {
-        if (!isSourceCode) 
+        if (!isSourceCode)
             throw new ArgumentException("Use the path-based constructor for files.");
 
         _name = "Generated/Internal";
-        
-        // Для сырого кода обычно не нужны Defines и Includes, 
-        // так как это простые встроенные шейдеры.
-        // Но на всякий случай удалим комментарии.
+
         vertexSource = RemoveComments(vertexSource);
         fragmentSource = RemoveComments(fragmentSource);
 
@@ -68,38 +68,36 @@ public class Shader : IDisposable
         CacheUniformLocations();
     }
 
-    // --- INTERNAL LOGIC ---
+    // --- Вспомогательные методы ---
 
     private static string LoadSource(string path)
     {
-        if (!File.Exists(path))
-            throw new FileNotFoundException($"Shader file not found: {path}");
-
+        if (!File.Exists(path)) throw new FileNotFoundException($"Shader not found: {path}");
         string source = File.ReadAllText(path);
-        
-        // СНАЧАЛА удаляем комментарии, чтобы парсер инклюдов не триггерился на закомментированный код
+
+        // Удаляем комментарии (//), но /* ... */ остаются
         source = RemoveComments(source);
 
         string dir = Path.GetDirectoryName(path);
-        return ParseIncludes(source, dir);
+        source = ParseIncludes(source, dir);
+        return source;
     }
 
     private static string RemoveComments(string source)
     {
         var lines = source.Split(new[] { "\r\n", "\r", "\n" }, StringSplitOptions.None);
         var sb = new StringBuilder();
-
         foreach (var line in lines)
         {
-            // Упрощенное удаление однострочных комментариев //
-            // (Для блочных /* */ нужен более сложный парсер, но обычно хватает этого)
-            int commentIndex = line.IndexOf("//");
+            var cleanLine = line;
+            // Удаляем только // комментарии
+            int commentIndex = cleanLine.IndexOf("//");
             if (commentIndex >= 0)
-                sb.AppendLine(line.Substring(0, commentIndex));
-            else
-                sb.AppendLine(line);
+            {
+                cleanLine = cleanLine.Substring(0, commentIndex);
+            }
+            sb.AppendLine(cleanLine);
         }
-
         return sb.ToString();
     }
 
@@ -110,105 +108,58 @@ public class Shader : IDisposable
 
         foreach (var line in lines)
         {
-            // Проверяем #include только если строка не пустая (комментарии уже удалены)
             if (line.Trim().StartsWith("#include"))
             {
                 int firstQuote = line.IndexOf('"');
                 int lastQuote = line.LastIndexOf('"');
-
                 if (firstQuote > 0 && lastQuote > firstQuote)
                 {
                     string includeFile = line.Substring(firstQuote + 1, lastQuote - firstQuote - 1);
                     string includePath = Path.Combine(currentDir, includeFile);
 
-                    if (!File.Exists(includePath))
-                        throw new FileNotFoundException($"Include file not found: {includePath}");
-
-                    // Рекурсивно читаем и чистим вложенный файл
-                    string includeSource = File.ReadAllText(includePath);
-                    includeSource = RemoveComments(includeSource); // <--- ЧИСТИМ И ВКЛЮЧАЕМЫЙ ФАЙЛ
-                    
-                    // Рекурсивно парсим инклюды внутри него
-                    string processedInclude = ParseIncludes(includeSource, Path.GetDirectoryName(includePath));
-
-                    sb.AppendLine($"// --- BEGIN INCLUDE: {includeFile} ---");
-                    sb.AppendLine(processedInclude);
-                    sb.AppendLine($"// --- END INCLUDE: {includeFile} ---");
+                    if (File.Exists(includePath))
+                    {
+                        string includeSrc = File.ReadAllText(includePath);
+                        includeSrc = RemoveComments(includeSrc);
+                        includeSrc = ParseIncludes(includeSrc, Path.GetDirectoryName(includePath));
+                        sb.AppendLine(includeSrc);
+                    }
+                    else
+                    {
+                        Console.WriteLine($"[Shader] Warning: Include not found {includePath}");
+                        sb.AppendLine(line);
+                    }
                 }
-                else
-                {
-                    // Если синтаксис кривой, оставляем как есть, пусть компилятор GLSL ругается
-                    sb.AppendLine(line);
-                }
+                else sb.AppendLine(line);
             }
-            else
-            {
-                sb.AppendLine(line);
-            }
+            else sb.AppendLine(line);
         }
-
         return sb.ToString();
     }
 
     private static string InjectDefines(string source, List<string> extraDefines)
     {
-        // 1. Получаем наши глобальные константы из C#
         string globalDefines = ShaderDefines.GetGlslDefines();
-
-        // 2. Собираем дополнительные дефайны (Shadows, Water и т.д.)
-        var sb = new System.Text.StringBuilder();
-        sb.Append(globalDefines); // Сначала вставляем глобальные настройки
-        
-        if (extraDefines != null)
-        {
-            foreach (var def in extraDefines)
-            {
-                sb.AppendLine($"#define {def}");
-            }
-        }
-        
-        string injectionBlock = sb.ToString();
-
-        // 3. Вставляем всё это ПОСЛЕ #version
+        var sb = new StringBuilder();
+        sb.Append(globalDefines);
+        if (extraDefines != null) foreach (var def in extraDefines) sb.AppendLine($"#define {def}");
         int versionIndex = source.IndexOf("#version");
-        int insertIndex = 0;
-
-        if (versionIndex != -1)
-        {
-            // Ищем конец строки с версией
-            int endOfLine = source.IndexOf('\n', versionIndex);
-            insertIndex = endOfLine + 1;
-        }
-        else
-        {
-            // Если #version нет (странно, но бывает в инклюдах), вставляем в начало
-            insertIndex = 0;
-        }
-
-        return source.Insert(insertIndex, injectionBlock);
+        int insertIndex = versionIndex != -1 ? source.IndexOf('\n', versionIndex) + 1 : 0;
+        return source.Insert(insertIndex, sb.ToString());
     }
-
-    // --- COMPILE & LINK ---
 
     private int CompileShader(ShaderType type, string source)
     {
         int shader = GL.CreateShader(type);
         GL.ShaderSource(shader, source);
         GL.CompileShader(shader);
-
         GL.GetShader(shader, ShaderParameter.CompileStatus, out int success);
         if (success == 0)
         {
             string infoLog = GL.GetShaderInfoLog(shader);
             GL.DeleteShader(shader);
-            
-            // Вывод части кода для дебага, если ошибка неочевидна
-            Console.WriteLine($"--- SHADER ERROR SOURCE ({type}) ---");
-            var lines = source.Split('\n');
-            for(int i=0; i<Math.Min(lines.Length, 20); i++) Console.WriteLine($"{i+1}: {lines[i]}");
-            Console.WriteLine("...");
-            
-            throw new Exception($"Error compiling {type} in '{_name}':\n{infoLog}");
+            Console.WriteLine($"Error compiling {type} ({_name}).\nLog:\n{infoLog}");
+            throw new Exception($"Error compiling {type} in '{_name}'");
         }
         return shader;
     }
@@ -216,70 +167,35 @@ public class Shader : IDisposable
     private int LinkProgram(params int[] shaders)
     {
         int program = GL.CreateProgram();
-        foreach (var shader in shaders) GL.AttachShader(program, shader);
+        foreach (var s in shaders) GL.AttachShader(program, s);
         GL.LinkProgram(program);
-
         GL.GetProgram(program, GetProgramParameterName.LinkStatus, out int success);
         if (success == 0)
         {
             string infoLog = GL.GetProgramInfoLog(program);
             GL.DeleteProgram(program);
-            foreach (var shader in shaders) GL.DeleteShader(shader);
-            throw new Exception($"Error linking program '{_name}':\n{infoLog}");
+            foreach (var s in shaders) GL.DeleteShader(s);
+            throw new Exception($"Error linking {_name}:\n{infoLog}");
         }
-
-        foreach (var shader in shaders)
-        {
-            GL.DetachShader(program, shader);
-            GL.DeleteShader(shader);
-        }
-
+        foreach (var s in shaders) { GL.DetachShader(program, s); GL.DeleteShader(s); }
         return program;
     }
 
     private void CacheUniformLocations()
     {
-        GL.GetProgram(Handle, GetProgramParameterName.ActiveUniforms, out int uniformCount);
-        for (int i = 0; i < uniformCount; i++)
+        GL.GetProgram(Handle, GetProgramParameterName.ActiveUniforms, out int count);
+        for (int i = 0; i < count; i++)
         {
             string name = GL.GetActiveUniform(Handle, i, out _, out _);
-            int location = GL.GetUniformLocation(Handle, name);
-            _uniformLocations[name] = location;
+            _uniformLocations[name] = GL.GetUniformLocation(Handle, name);
         }
     }
 
-    // --- PUBLIC API ---
-
     public void Use() => GL.UseProgram(Handle);
-
-    public void SetTexture(string name, int textureHandle, TextureUnit unit)
-    {
-        int loc = GetLoc(name);
-        if (loc == -1) return;
-        GL.ActiveTexture(unit);
-        GL.BindTexture(TextureTarget.Texture2D, textureHandle);
-        GL.Uniform1(loc, (int)unit - (int)TextureUnit.Texture0);
-    }
-
-    private int GetLoc(string name)
-    {
-        if (_uniformLocations.TryGetValue(name, out int loc)) return loc;
-        loc = GL.GetUniformLocation(Handle, name);
-        _uniformLocations[name] = loc;
-        return loc;
-    }
-
-    public void SetMatrix4(string name, Matrix4 data) { int loc = GetLoc(name); if (loc != -1) GL.UniformMatrix4(loc, false, ref data); }
-    public void SetVector3(string name, Vector3 data) { int loc = GetLoc(name); if (loc != -1) GL.Uniform3(loc, data); }
-    public void SetVector4(string name, Vector4 data) { int loc = GetLoc(name); if (loc != -1) GL.Uniform4(loc, data); }
-    public void SetFloat(string name, float data) { int loc = GetLoc(name); if (loc != -1) GL.Uniform1(loc, data); }
-    public void SetInt(string name, int data) { int loc = GetLoc(name); if (loc != -1) GL.Uniform1(loc, data); }
-
-    public void Dispose()
-    {
-        if (_disposed) return;
-        GL.DeleteProgram(Handle);
-        _disposed = true;
-        GC.SuppressFinalize(this);
-    }
+    public void SetInt(string n, int v) { if (_uniformLocations.TryGetValue(n, out int loc)) GL.Uniform1(loc, v); }
+    public void SetFloat(string n, float v) { if (_uniformLocations.TryGetValue(n, out int loc)) GL.Uniform1(loc, v); }
+    public void SetVector3(string n, Vector3 v) { if (_uniformLocations.TryGetValue(n, out int loc)) GL.Uniform3(loc, v); }
+    public void SetMatrix4(string n, Matrix4 v) { if (_uniformLocations.TryGetValue(n, out int loc)) GL.UniformMatrix4(loc, false, ref v); }
+    public void SetTexture(string n, int h, TextureUnit u) { if (_uniformLocations.TryGetValue(n, out int loc)) { GL.ActiveTexture(u); GL.BindTexture(TextureTarget.Texture2D, h); GL.Uniform1(loc, (int)u - 33984); } }
+    public void Dispose() { if (!_disposed) { GL.DeleteProgram(Handle); _disposed = true; } }
 }

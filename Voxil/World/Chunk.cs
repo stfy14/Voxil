@@ -188,7 +188,7 @@ public class Chunk : IDisposable
         if (removed && IsLoaded) {
             WorldManager.NotifyVoxelFastDestroyed(this.Position * Constants.ChunkSizeWorld + localPosition);
             WorldManager.RebuildPhysics(this);
-            WorldManager.NotifyChunkModified(this); 
+            WorldManager.NotifyVoxelEdited(this, localPosition, MaterialType.Air);
         }
         return removed;
     }
