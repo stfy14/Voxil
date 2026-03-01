@@ -2,7 +2,7 @@
 
 #define AO_STRENGTH 0.6
 #define SOFT_SHADOW_RADIUS 0.01
-#define SHADOW_BIAS 0.003
+#define SHADOW_BIAS 0.1
 
 bool IsSolidForAO(ivec3 pos) {
     ivec3 boundMin = ivec3(uBoundMinX, uBoundMinY, uBoundMinZ) * VOXEL_RESOLUTION;

@@ -3,6 +3,7 @@
 #version 450 core
 out vec4 FragColor;
 in vec2 uv;
+uniform mat4 uCleanProjection;
 
 #include "include/common.glsl"
 #include "include/tracing.glsl"
@@ -30,7 +31,9 @@ float GetConservativeBeamDist(vec2 uv) {
 }
 
 float ComputeDepth(vec3 pos) {
-    vec4 clip_space_pos = uProjection * uView * vec4(pos, 1.0);
+    // ВАЖНО: глубина пишется ЧИСТОЙ матрицей (без джиттера)
+    // Иначе TAA не сможет правильно восстановить мировую позицию
+    vec4 clip_space_pos = uCleanProjection * uView * vec4(pos, 1.0);
     return (clip_space_pos.z / clip_space_pos.w) * 0.5 + 0.5;
 }
 

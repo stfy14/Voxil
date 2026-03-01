@@ -88,7 +88,12 @@ public class GpuRaycastingRenderer : IDisposable
     private int[] _historyTexture = new int[2];
     private int _historyWriteIndex = 0;
     private long _frameIndex = 0;
-    private Matrix4 _prevViewProjection;
+    // ТОЛЬКО ОДНА МАТРИЦА - ЧИСТАЯ (БЕЗ ДЖИТТЕРА)
+    private Matrix4 _prevCleanViewProjection = Matrix4.Identity;
+    private Vector2 _prevJitterNDC = Vector2.Zero;
+
+
+    private bool _resetTaaHistory = true;
 
     // Стандартная последовательность Галтона для джиттера
     private readonly Vector2[] _haltonSequence = new Vector2[] {
@@ -632,57 +637,45 @@ public class GpuRaycastingRenderer : IDisposable
     {
         if (_reallocationPending || _activeBankCount == 0) return;
 
-        // --- 1. РАСЧЕТ ДЖИТТЕРА (Halton Sequence 2, 3) ---
+        // --- 1. ПОДГОТОВКА МАТРИЦ ---
         _frameIndex++;
 
-        // Паттерн Галтона (8 точек достаточно для TAA)
-        // Эти числа (0.5, 0.25...) обеспечивают наилучшее покрытие пикселя
+        // Расчет джиттера (Halton)
         int index = (int)(_frameIndex % 8);
-        Vector2 jitter = _haltonSequence[index];
+        Vector2 halton = _haltonSequence[index]; // 0..1
 
-        // Сдвигаем диапазон с [0..1] в [-0.5..0.5] (центр пикселя)
-        jitter -= new Vector2(0.5f);
+        // Смещаем к центру (-0.5..0.5) и УМЕНЬШАЕМ АМПЛИТУДУ (масштабируем на 0.2)
+        // Это уберет видимую "тряску" камеры, но оставит микро-сдвиги для антиалиасинга
+        Vector2 jitter = (halton - new Vector2(0.5f)) * 0.1f;
 
-        // --- 2. МАТРИЦЫ ---
         Matrix4 view = cam.GetViewMatrix();
-        Matrix4 cleanProj = cam.GetProjectionMatrix(); // Чистая проекция (для TAA и UI)
+        Matrix4 cleanProj = cam.GetProjectionMatrix();
+        Matrix4 cleanViewProj = view * cleanProj; // Чистая матрица (без джиттера)
 
-        // Грязная проекция (ТОЛЬКО для пускания лучей)
-        Matrix4 jitteredProj = cam.GetJitteredProjectionMatrix(jitter, _renderWidth, _renderHeight);
+        // Если TAA выключен или это первый кадр - джиттер равен 0
+        bool useTaa = GameSettings.EnableTAA;
+        if (_resetTaaHistory) useTaa = false;
 
-        // Матрицы для TAA (должны быть СТАБИЛЬНЫМИ, поэтому используем cleanProj)
-        Matrix4 cleanViewProj = view * cleanProj;
-        Matrix4 cleanInvViewProj = Matrix4.Invert(cleanViewProj);
+        Matrix4 activeProj = useTaa ? cam.GetJitteredProjectionMatrix(jitter, _renderWidth, _renderHeight) : cleanProj;
+        Matrix4 activeViewProj = view * activeProj;
 
-        // --- 3. ПРОХОД РЕЙКАСТИНГА ---
+        // --- 2. РЕЙКАСТИНГ ---
         _shaderSystem.Use();
         var shader = _shaderSystem.RaycastShader;
         if (shader == null) return;
 
-        // UNIFORMS
         shader.SetVector3("uCamPos", cam.Position);
         shader.SetMatrix4("uView", view);
 
-        // !!! ВАЖНО: Сюда подаем ДЖИТТЕРНУЮ матрицу !!!
-        // Лучи будут вылетать чуть-чуть со смещением
-        shader.SetMatrix4("uProjection", jitteredProj);
-        shader.SetMatrix4("uInvProjection", Matrix4.Invert(jitteredProj));
-
-        // Для ViewMatrix инверсия обычная
+        // Вернули как было: просто uProjection получает активную (с джиттером) матрицу
+        shader.SetMatrix4("uProjection", activeProj);
+        shader.SetMatrix4("uInvProjection", Matrix4.Invert(activeProj));
         shader.SetMatrix4("uInvView", Matrix4.Invert(view));
 
-        // Остальные параметры
+        // ... (остальные параметры uRenderDistance, uTime и т.д. не трогаем, они не менялись) ...
         float viewRange = _worldManager.GetViewRangeInMeters();
         shader.SetFloat("uRenderDistance", viewRange);
-        if (GameSettings.EnableLOD)
-        {
-            float lodMeters = viewRange * GameSettings.LodPercentage;
-            shader.SetFloat("uLodDistance", lodMeters);
-        }
-        else
-        {
-            shader.SetFloat("uLodDistance", 100000.0f);
-        }
+        shader.SetFloat("uLodDistance", GameSettings.EnableLOD ? viewRange * GameSettings.LodPercentage : 100000.0f);
         shader.SetInt("uDisableEffectsOnLOD", GameSettings.DisableEffectsOnLOD ? 1 : 0);
         shader.SetInt("uMaxRaySteps", (int)(GameSettings.RenderDistance * 8) + 2028);
         shader.SetVector3("uSunDir", Vector3.Normalize(new Vector3(0.2f, 0.4f, 0.8f)));
@@ -690,7 +683,6 @@ public class GpuRaycastingRenderer : IDisposable
         shader.SetInt("uShowDebugHeatmap", GameSettings.ShowDebugHeatmap ? 1 : 0);
         shader.SetInt("uSoftShadowSamples", GameSettings.SoftShadowSamples);
 
-        // Оптимизация границ
         Vector3 p = cam.Position;
         int sz = Constants.ChunkSizeWorld;
         int cx = (int)Math.Floor(p.X / sz), cy = (int)Math.Floor(p.Y / sz), cz = (int)Math.Floor(p.Z / sz);
@@ -698,7 +690,6 @@ public class GpuRaycastingRenderer : IDisposable
         shader.SetInt("uBoundMinX", cx - r); shader.SetInt("uBoundMinY", 0); shader.SetInt("uBoundMinZ", cz - r);
         shader.SetInt("uBoundMaxX", cx + r); shader.SetInt("uBoundMaxY", WorldManager.WorldHeightChunks); shader.SetInt("uBoundMaxZ", cz + r);
 
-        // Биндинг буферов
         GL.BindImageTexture(0, _pageTableTexture, 0, true, 0, TextureAccess.ReadOnly, SizedInternalFormat.R32ui);
         BindAllBuffers();
         GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 5, _maskSsbo);
@@ -713,12 +704,9 @@ public class GpuRaycastingRenderer : IDisposable
 
         GL.BindVertexArray(_quadVao);
 
-        // Beam Pass (Low Res Depth)
         if (GameSettings.BeamOptimization)
         {
-            if (_beamTexture == 0) OnResize(_windowWidth, _windowHeight);
             GL.BindFramebuffer(FramebufferTarget.Framebuffer, _beamFbo);
-            GL.FramebufferTexture2D(FramebufferTarget.Framebuffer, FramebufferAttachment.ColorAttachment0, TextureTarget.Texture2D, _beamTexture, 0);
             GL.Viewport(0, 0, _beamWidth, _beamHeight);
             GL.ClearColor(10000.0f, 0, 0, 1);
             GL.Clear(ClearBufferMask.ColorBufferBit);
@@ -727,7 +715,7 @@ public class GpuRaycastingRenderer : IDisposable
             GL.DrawArrays(PrimitiveType.TriangleStrip, 0, 4);
         }
 
-        // Main Render (в _mainFbo)
+        // Main Render
         GL.BindFramebuffer(FramebufferTarget.Framebuffer, _mainFbo);
         GL.Viewport(0, 0, _renderWidth, _renderHeight);
         GL.ClearColor(0.5f, 0.7f, 0.9f, 1.0f);
@@ -737,8 +725,8 @@ public class GpuRaycastingRenderer : IDisposable
         GL.Enable(EnableCap.DepthTest);
         GL.DrawArrays(PrimitiveType.TriangleStrip, 0, 4);
 
-        // --- 4. TAA RESOLVE (Сглаживание) ---
-        if (GameSettings.EnableTAA && _frameIndex > 1)
+        // --- 3. TAA RESOLVE (СТАРЫЙ ВАРИАНТ) ---
+        if (useTaa && !_resetTaaHistory)
         {
             int readIndex = 1 - _historyWriteIndex;
             int writeIndex = _historyWriteIndex;
@@ -748,42 +736,59 @@ public class GpuRaycastingRenderer : IDisposable
             GL.Disable(EnableCap.DepthTest);
 
             _taaShader.Use();
+            Vector2 currJitterNDC = useTaa
+            ? new Vector2((jitter.X / _renderWidth) * 2.0f, (jitter.Y / _renderHeight) * 2.0f)
+            : Vector2.Zero;
+
+            _taaShader.SetVector2("uCurrentJitterNDC", currJitterNDC);
+            _taaShader.SetVector2("uPrevJitterNDC", _prevJitterNDC);
+            // Эти uniform'ы были в оригинале, я их не трогаю, но добавлю обратно старые матрицы
             _taaShader.SetTexture("uCurrentColorTexture", _mainColorTexture, TextureUnit.Texture0);
             _taaShader.SetTexture("uCurrentDepthTexture", _mainDepthTexture, TextureUnit.Texture1);
             _taaShader.SetTexture("uHistoryTexture", _historyTexture[readIndex], TextureUnit.Texture2);
 
-            // !!! ВАЖНО: Для TAA используем ЧИСТЫЕ матрицы (без джиттера) !!!
-            // Это устраняет тряску статических объектов
-            _taaShader.SetMatrix4("uInvViewProj", cleanInvViewProj);
-            _taaShader.SetMatrix4("uPrevViewProj", _prevViewProjection); // Матрица прошлого кадра (тоже чистая)
+            _taaShader.SetMatrix4("uInvViewProj", Matrix4.Invert(cleanViewProj));
+            _taaShader.SetMatrix4("uPrevViewProj", _prevCleanViewProjection);
 
             GL.DrawArrays(PrimitiveType.TriangleStrip, 0, 4);
 
-            // Читаем из свежей истории
             GL.BindFramebuffer(FramebufferTarget.ReadFramebuffer, _historyFbo[writeIndex]);
         }
         else
         {
-            // Если TAA выключен - читаем сырой кадр
             GL.BindFramebuffer(FramebufferTarget.ReadFramebuffer, _mainFbo);
+            GL.BindFramebuffer(FramebufferTarget.DrawFramebuffer, _historyFbo[_historyWriteIndex]);
+            GL.BlitFramebuffer(0, 0, _renderWidth, _renderHeight, 0, 0, _renderWidth, _renderHeight,
+                               ClearBufferMask.ColorBufferBit, BlitFramebufferFilter.Nearest);
+
+            GL.BindFramebuffer(FramebufferTarget.DrawFramebuffer, _historyFbo[1 - _historyWriteIndex]);
+            GL.BlitFramebuffer(0, 0, _renderWidth, _renderHeight, 0, 0, _renderWidth, _renderHeight,
+                               ClearBufferMask.ColorBufferBit, BlitFramebufferFilter.Nearest);
+
+            GL.BindFramebuffer(FramebufferTarget.ReadFramebuffer, _mainFbo);
+            if (GameSettings.EnableTAA) _resetTaaHistory = false;
         }
 
-        // --- 5. UPSCALE BLIT (На экран) ---
+        // --- 4. UPSCALE ---
         GL.BindFramebuffer(FramebufferTarget.DrawFramebuffer, 0);
         GL.Viewport(0, 0, _windowWidth, _windowHeight);
 
-        // Цвет (Linear для мягкости)
-        GL.BlitFramebuffer(0, 0, _renderWidth, _renderHeight, 0, 0, _windowWidth, _windowHeight, ClearBufferMask.ColorBufferBit, BlitFramebufferFilter.Linear);
+        // Blit цвета 
+        GL.BlitFramebuffer(0, 0, _renderWidth, _renderHeight,
+                           0, 0, _windowWidth, _windowHeight,
+                           ClearBufferMask.ColorBufferBit, BlitFramebufferFilter.Nearest);
 
-        // Глубина (из _mainFbo, Nearest для точности UI/Gizmos)
+        // Blit глубины 
         GL.BindFramebuffer(FramebufferTarget.ReadFramebuffer, _mainFbo);
         GL.BlitFramebuffer(0, 0, _renderWidth, _renderHeight, 0, 0, _windowWidth, _windowHeight, ClearBufferMask.DepthBufferBit, BlitFramebufferFilter.Nearest);
 
         GL.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
         GL.BindVertexArray(0);
 
-        // Сохраняем ЧИСТУЮ матрицу для следующего кадра
-        _prevViewProjection = cleanViewProj;
+        _prevCleanViewProjection = cleanViewProj;
+        _prevJitterNDC = useTaa
+            ? new Vector2((jitter.X / _renderWidth) * 2.0f, (jitter.Y / _renderHeight) * 2.0f)
+            : Vector2.Zero;
         _historyWriteIndex = 1 - _historyWriteIndex;
     }
 
@@ -795,7 +800,16 @@ public class GpuRaycastingRenderer : IDisposable
         _beamWidth = _renderWidth / BeamDivisor;
         _beamHeight = _renderHeight / BeamDivisor;
         if (_beamWidth < 1) _beamWidth = 1; if (_beamHeight < 1) _beamHeight = 1;
-        if (_beamTexture != 0) { GL.DeleteTexture(_beamTexture); _beamTexture = 0; }
+        if (_beamTexture != 0) GL.DeleteTexture(_beamTexture);
+        _beamTexture = GL.GenTexture();
+        GL.BindTexture(TextureTarget.Texture2D, _beamTexture);
+        GL.TexImage2D(TextureTarget.Texture2D, 0, PixelInternalFormat.R32f,
+                      _beamWidth, _beamHeight, 0, PixelFormat.Red, PixelType.Float, IntPtr.Zero);
+        GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Nearest);
+        GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMinFilter.Nearest);
+        GL.BindFramebuffer(FramebufferTarget.Framebuffer, _beamFbo);
+        GL.FramebufferTexture2D(FramebufferTarget.Framebuffer, FramebufferAttachment.ColorAttachment0,
+                                TextureTarget.Texture2D, _beamTexture, 0);
 
         // Основной FBO для рейкастинга
         if (_mainFbo != 0) GL.DeleteFramebuffer(_mainFbo);
@@ -829,11 +843,14 @@ public class GpuRaycastingRenderer : IDisposable
             GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, (int)TextureWrapMode.ClampToEdge);
             GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)TextureWrapMode.ClampToEdge);
             GL.FramebufferTexture2D(FramebufferTarget.Framebuffer, FramebufferAttachment.ColorAttachment0, TextureTarget.Texture2D, _historyTexture[i], 0);
+            GL.ClearColor(0, 0, 0, 0);
+            GL.Clear(ClearBufferMask.ColorBufferBit);
         }
 
         GL.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
         GL.Viewport(0, 0, _windowWidth, _windowHeight);
         // Сбрасываем историю при ресайзе
+        _resetTaaHistory = true;
         _frameIndex = 0;
     }
     public void ReloadShader() { _shaderSystem.Compile(MAX_TOTAL_BANKS, _chunksPerBank); }
