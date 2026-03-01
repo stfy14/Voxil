@@ -18,6 +18,7 @@ public class SettingsWindow : IUIWindow
     private int _shadowSamples;
     private int _genThreads;
     private int _physThreads;
+    private bool _taa;
     
     // Переменная для слайдера бюджета (в процентах)
     private int _budgetPercent;
@@ -39,6 +40,7 @@ public class SettingsWindow : IUIWindow
         _budgetPercent = (int)(GameSettings.WorldUpdateBudgetPercentage * 100);
         _lodDist = GameSettings.LodPercentage;
         _lodEffectsDisabled = GameSettings.DisableEffectsOnLOD;
+        _taa = GameSettings.EnableTAA;
     }
 
     public void Toggle() => IsVisible = !IsVisible;
@@ -90,6 +92,10 @@ public class SettingsWindow : IUIWindow
             ImGui.Spacing();
             ImGui.Separator();
             ImGui.Text("Effects");
+            if (ImGui.Checkbox("Temporal Anti-Aliasing (TAA)", ref _taa))
+            {
+                GameSettings.EnableTAA = _taa;
+            }
             bool ao = GameSettings.EnableAO; if (ImGui.Checkbox("Ambient Occlusion", ref ao)) { GameSettings.EnableAO = ao; _renderer.ReloadShader(); }
             bool water = GameSettings.UseProceduralWater; if (ImGui.Checkbox("Procedural Water (Disable)", ref water)) { GameSettings.UseProceduralWater = water; _renderer.ReloadShader(); }
             bool trans = GameSettings.EnableWaterTransparency; if (ImGui.Checkbox("Water Transparency (Disable)", ref trans)) { GameSettings.EnableWaterTransparency = trans; _renderer.ReloadShader(); }

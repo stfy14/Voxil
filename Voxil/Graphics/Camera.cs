@@ -39,6 +39,26 @@ public class Camera
         return Matrix4.LookAt(_position, _position + _front, _up);
     }
 
+    // Сдвигает матрицу проекции на(jitter.X, jitter.Y) пикселей
+    public Matrix4 GetJitteredProjectionMatrix(Vector2 jitter, float renderWidth, float renderHeight)
+    {
+        // 1. Берем чистую проекцию
+        Matrix4 projection = GetProjectionMatrix();
+
+        // 2. Вычисляем смещение в NDC пространстве (от -1 до 1)
+        // jitter - смещение в пикселях (например, 0.5)
+        // Делим на ширину/высоту, умножаем на 2 (так как NDC это 2.0 единицы шириной)
+        float translationX = (jitter.X / renderWidth) * 2.0f;
+        float translationY = (jitter.Y / renderHeight) * 2.0f;
+
+        // 3. Модифицируем компоненты матрицы напрямую (M31 и M32 отвечают за сдвиг в проекции)
+        // Это эквивалентно умножению на Matrix4.CreateTranslation, но быстрее
+        projection.M31 += translationX;
+        projection.M32 += translationY;
+
+        return projection;
+    }
+
     public Matrix4 GetProjectionMatrix()
     {
         return Matrix4.CreatePerspectiveFieldOfView(MathHelper.DegreesToRadians(_fov), _aspectRatio, NearPlane, FarPlane);
