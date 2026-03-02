@@ -1,31 +1,26 @@
 ﻿// --- START OF FILE GameSettings.cs ---
-
 using System;
 
-public enum ShadowMode
-{
-    None,
-    Hard,
-    Soft
-}
-
-// Новый Enum для режима отладки коллизий
-public enum CollisionDebugMode
-{
-    None,
-    PhysicsOnly, // Динамика
-    StaticOnly,  // Чанки
-    All
-}
+public enum ShadowMode { None, Hard, Soft }
+public enum CollisionDebugMode { None, PhysicsOnly, StaticOnly, All }
 
 public static class GameSettings
 {
+    // === ВРЕМЯ И ЦИКЛ ДНЯ/НОЧИ ===
+    public static bool EnableDynamicTime = true;
+    // TotalTimeHours хранит общее время с начала игры. Стартуем, например, в 12:00.
+    public static double TotalTimeHours = 12.0; 
+    // TimeOfDay (0.0 - 24.0) вычисляется автоматически на основе общего времени
+    public static float TimeOfDay => (float)(TotalTimeHours % 24.0); 
+    // Во сколько раз игровое время быстрее реального (120 = 1 час в игре за 30 сек)
+    public static float TimeScale = 120.0f;
+
     // === ГРАФИКА ===
     public static int RenderDistance = 32;
-    public static float RenderScale = 0.5f; // 50% от разрешения окна для спасения слабых GPU
+    public static float RenderScale = 1.0f;
     public static bool EnableAO = true;
     public static bool EnableTAA = true;
-    public static ShadowMode CurrentShadowMode = ShadowMode.Soft;
+    public static ShadowMode CurrentShadowMode = ShadowMode.Hard;
     public static int SoftShadowSamples = 8; 
     public static bool UseProceduralWater = false; 
     public static bool EnableWaterTransparency = false; 
@@ -33,7 +28,7 @@ public static class GameSettings
     // === ОПТИМИЗАЦИЯ ===
     public static bool BeamOptimization = true;
     public static bool EnableLOD = true; 
-    public static float LodPercentage = 0.70f;  
+    public static float LodPercentage = 0.85f;  
     public static bool DisableEffectsOnLOD = true; 
 
     // === ПОТОКИ И ПРОИЗВОДИТЕЛЬНОСТЬ ===
@@ -45,5 +40,5 @@ public static class GameSettings
     
     // === ДЕБАГ ===
     public static bool ShowDebugHeatmap = false;
-    public static CollisionDebugMode DebugCollisionMode = CollisionDebugMode.None; // <--- Новая настройка
+    public static CollisionDebugMode DebugCollisionMode = CollisionDebugMode.None;
 }

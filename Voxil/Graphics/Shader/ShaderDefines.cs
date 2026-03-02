@@ -12,7 +12,7 @@ public static class ShaderDefines
         if (hardSteps < 10) hardSteps = 10;
 
         var sb = new System.Text.StringBuilder();
-    
+        
         sb.AppendLine($@"
        #define CHUNK_SIZE {Constants.ChunkSizeWorld}
        #define VOXEL_RESOLUTION {Constants.ChunkResolution}
@@ -20,7 +20,6 @@ public static class ShaderDefines
        #define BIT_SHIFT {Constants.BitShift}
        #define BIT_MASK {Constants.BitMask}
        #define HARD_SHADOW_STEPS {hardSteps}
-       #define SOFT_SHADOW_STEPS 8
     ");
 
         if (GameSettings.EnableAO) sb.AppendLine("#define ENABLE_AO");

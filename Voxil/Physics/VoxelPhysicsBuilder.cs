@@ -36,11 +36,12 @@ public static class VoxelPhysicsBuilder
         MaterialType[] voxels, 
         bool[] visitedBuffer, 
         VoxelCollider[] scratchBuffer,
-        int sizeX, int sizeY, int sizeZ)
+        int sizeX, int sizeY, int sizeZ,
+        float scale = 1.0f) // <--- НОВЫЙ ПАРАМЕТР
     {
         Array.Clear(visitedBuffer, 0, visitedBuffer.Length);
         int colliderCount = 0;
-        float voxelSize = Constants.VoxelSize;
+        float voxelSize = Constants.VoxelSize * scale; 
 
         fixed (MaterialType* pVoxels = voxels)
         fixed (bool* pVisited = visitedBuffer)

@@ -28,6 +28,9 @@ public class WorldManager : IDisposable
     private readonly ConcurrentQueue<VoxelObjectCreationData> _objectsCreationQueue = new();
     private readonly List<VoxelObject> _objectsToRemove = new();
 
+    // --- НОВОЕ: Для оптимизации взрывов ---
+    private readonly HashSet<Chunk> _dirtyChunks = new HashSet<Chunk>(); 
+    
     // Планировщик
     private Thread _schedulerThread;
     private CancellationTokenSource _schedulerCts = new CancellationTokenSource();
@@ -43,7 +46,7 @@ public class WorldManager : IDisposable
     private bool _isDisposed = false;
 
     public event Action<Chunk> OnChunkLoaded;
-    public event Action<Chunk> OnChunkModified;
+    public event Action<Chunk> OnChunkModified; // Используется для обновления меша
     public event Action<Vector3i> OnChunkUnloaded;
     public event Action<Vector3i> OnVoxelFastDestroyed;
     public event Action<Chunk, Vector3i, MaterialType> OnVoxelEdited;
@@ -79,13 +82,11 @@ public class WorldManager : IDisposable
         _physicsBuilder = new AsyncChunkPhysics();
         _integritySystem = new StructuralIntegritySystem(this);
 
-        _schedulerThread = new Thread(SchedulerLoop)
+        if (physicsWorld != null) // Защита для тестов
         {
-            IsBackground = true,
-            Name = "WorldScheduler",
-            Priority = ThreadPriority.AboveNormal 
-        };
-        _schedulerThread.Start();
+            _schedulerThread = new Thread(SchedulerLoop) { IsBackground = true, Priority = ThreadPriority.AboveNormal };
+            _schedulerThread.Start();
+        }
     }
     
     public void SetGenerationThreadCount(int count) => _chunkGenerator.SetThreadCount(count);
@@ -444,7 +445,21 @@ public class WorldManager : IDisposable
     }
     private void ProcessVoxelObjects() { foreach (var vo in _voxelObjects) { if (PhysicsWorld.Simulation.Bodies.BodyExists(vo.BodyHandle)) { var pose = PhysicsWorld.GetPose(vo.BodyHandle); vo.UpdatePose(pose); } } }
     private void ProcessRemovals() { foreach (var obj in _objectsToRemove) { try { _bodyToVoxelObjectMap.Remove(obj.BodyHandle); _voxelObjects.Remove(obj); PhysicsWorld.RemoveBody(obj.BodyHandle); obj.Dispose(); } catch { } } _objectsToRemove.Clear(); }
-    public OpenTK.Mathematics.Vector3 GetPlayerPosition() => PhysicsWorld.Simulation.Bodies.GetBodyReference(_playerController.BodyHandle).Pose.Position.ToOpenTK();
+    public OpenTK.Mathematics.Vector3 GetPlayerPosition()
+    {
+        if (_playerController == null) return OpenTK.Mathematics.Vector3.Zero;
+    
+        // === ПРОВЕРКА НА СУЩЕСТВОВАНИЕ ТЕЛА ===
+        if (PhysicsWorld.Simulation.Bodies.BodyExists(_playerController.BodyHandle))
+        {
+            return PhysicsWorld.Simulation.Bodies.GetBodyReference(_playerController.BodyHandle).Pose.Position.ToOpenTK();
+        }
+    
+        // Если тело уничтожено, возвращаем последнюю известную позицию или (0,0,0)
+        // В будущем здесь будет логика респавна
+        Console.WriteLine("[CRITICAL] Player body does not exist!");
+        return OpenTK.Mathematics.Vector3.Zero; 
+    }
     public void Dispose()
     {
         if (_isDisposed) return;
@@ -587,8 +602,99 @@ else if (collidable.Mobility == CollidableMobility.Dynamic &&
     }
 }
 }
+    
+    // 1. Спавн динамического объекта (Динамит)
+    public void SpawnDynamicObject(VoxelObject vo, System.Numerics.Vector3 position, System.Numerics.Vector3 velocity)
+    {
+        var handle = PhysicsWorld.CreateVoxelObjectBody(vo.VoxelCoordinates, vo.Material, vo.Scale, position, out var localCoM);
+    
+        // ФУНДАМЕНТАЛЬНО: Объект физически не смог создаться (0 коллайдеров, материал-воздух и т.д.)
+        if (handle.Value == -1)
+        {
+            Console.WriteLine($"[Physics] Rejected invalid dynamic object: {vo.Material}");
+            return; // Объект просто не спавнится, мир в безопасности
+        }
+        
+        var bodyRef = PhysicsWorld.Simulation.Bodies.GetBodyReference(handle);
+        bodyRef.Velocity.Linear = velocity;
+        bodyRef.Awake = true;
+
+        // === СТАРЫЙ НЕРАБОЧИЙ КОД УДАЛЕН ===
+
+        vo.InitializePhysics(handle, localCoM.ToOpenTK());
+    
+        _voxelObjects.Add(vo);
+        lock (_chunksLock) _bodyToVoxelObjectMap[handle] = vo;
+    }
+    
+    // 2. Уничтожение объекта (Динамит взорвался)
+    public void DestroyVoxelObject(VoxelObject vo)
+    {
+        if (vo == null) return;
+        QueueForRemoval(vo);
+    }
+    // 3. Публичное удаление вокселя (для взрывов)
+    // Добавили флаг updateMesh, чтобы не перестраивать чанк 1000 раз при взрыве
+    public bool RemoveVoxelGlobal(Vector3i globalVoxelIndex, bool updateMesh = true)
+    {
+        Vector3i chunkPos = GetChunkPosFromVoxelIndex(globalVoxelIndex);
+        if (_chunks.TryGetValue(chunkPos, out var chunk) && chunk.IsLoaded)
+        {
+            int res = Constants.ChunkResolution;
+            int lx = globalVoxelIndex.X % res; if (lx < 0) lx += res;
+            int ly = globalVoxelIndex.Y % res; if (ly < 0) ly += res;
+            int lz = globalVoxelIndex.Z % res; if (lz < 0) lz += res;
+            
+            // Вызываем удаление внутри чанка
+            // ВАЖНО: В Chunk.cs тоже нужно будет подправить RemoveVoxelAndUpdate, 
+            // но пока используем старый метод, он вернет true если удалил
+            bool removed = chunk.RemoveVoxelAndUpdate(new Vector3i(lx, ly, lz));
+            
+            if (removed)
+            {
+                // Если updateMesh = false, мы не перестраиваем физику и GPU буферы немедленно
+                // А просто помечаем чанк как "грязный"
+                if (!updateMesh)
+                {
+                    lock(_dirtyChunks) _dirtyChunks.Add(chunk);
+                }
+                return true;
+            }
+        }
+        return false;
+    }
+    // Перегрузка для старого кода (одиночный клик ЛКМ)
+    public bool RemoveVoxelGlobal(Vector3i globalVoxelIndex) => RemoveVoxelGlobal(globalVoxelIndex, true);
+    
+    // 4. Пометить чанк грязным (вызывается из ExplosionSystem)
+    public void MarkChunkDirty(Vector3i globalVoxelIndex)
+    {
+        Vector3i chunkPos = GetChunkPosFromVoxelIndex(globalVoxelIndex);
+        if (_chunks.TryGetValue(chunkPos, out var chunk))
+        {
+            lock(_dirtyChunks) _dirtyChunks.Add(chunk);
+        }
+    }
+    // 5. Массовое обновление грязных чанков (после взрыва)
+    public void UpdateDirtyChunks()
+    {
+        Chunk[] dirtyArr;
+        lock (_dirtyChunks)
+        {
+            dirtyArr = _dirtyChunks.ToArray();
+            _dirtyChunks.Clear();
+        }
+
+        foreach (var chunk in dirtyArr)
+        {
+            // Обновляем визуальную часть (GPU)
+            OnChunkModified?.Invoke(chunk); 
+            // Обновляем физику
+            RebuildPhysics(chunk);
+        }
+    }
+
     private void SpawnSplitCluster(List<Vector3i> localClusterVoxels, VoxelObject parentObj) { Vector3i anchorIdx = localClusterVoxels[0]; List<Vector3i> newLocalVoxels = new List<Vector3i>(); foreach(var v in localClusterVoxels) newLocalVoxels.Add(v - anchorIdx); System.Numerics.Vector3 calculatedLocalCoM = System.Numerics.Vector3.Zero; foreach (var v in newLocalVoxels) calculatedLocalCoM += (v.ToSystemNumerics() + new System.Numerics.Vector3(0.5f)) * Constants.VoxelSize; if (newLocalVoxels.Count > 0) calculatedLocalCoM /= newLocalVoxels.Count; System.Numerics.Vector3 anchorPosInParent = (anchorIdx.ToSystemNumerics() + new System.Numerics.Vector3(0.5f)) * Constants.VoxelSize; anchorPosInParent -= parentObj.LocalCenterOfMass.ToSystemNumerics(); System.Numerics.Vector3 anchorWorldPos = parentObj.Position.ToSystemNumerics() + System.Numerics.Vector3.Transform(anchorPosInParent, parentObj.Rotation.ToSystemNumerics()); System.Numerics.Vector3 anchorInNewLocal = new System.Numerics.Vector3(0.5f) * Constants.VoxelSize; System.Numerics.Vector3 offset = anchorInNewLocal - calculatedLocalCoM; System.Numerics.Vector3 rotatedOffset = System.Numerics.Vector3.Transform(offset, parentObj.Rotation.ToSystemNumerics()); System.Numerics.Vector3 finalSpawnPos = anchorWorldPos - rotatedOffset; _objectsCreationQueue.Enqueue(new VoxelObjectCreationData { Voxels = newLocalVoxels, Material = parentObj.Material, WorldPosition = finalSpawnPos }); }
-    private bool RemoveVoxelGlobal(Vector3i globalVoxelIndex) { Vector3i chunkPos = GetChunkPosFromVoxelIndex(globalVoxelIndex); if (_chunks.TryGetValue(chunkPos, out var chunk) && chunk.IsLoaded) { int res = Constants.ChunkResolution; int lx = globalVoxelIndex.X % res; if(lx < 0) lx += res; int ly = globalVoxelIndex.Y % res; if(ly < 0) ly += res; int lz = globalVoxelIndex.Z % res; if(lz < 0) lz += res; return chunk.RemoveVoxelAndUpdate(new Vector3i(lx, ly, lz)); } return false; }
     private Vector3i GetChunkPosFromVoxelIndex(Vector3i voxelIndex) => new Vector3i((int)Math.Floor((float)voxelIndex.X / Constants.ChunkResolution), (int)Math.Floor((float)voxelIndex.Y / Constants.ChunkResolution), (int)Math.Floor((float)voxelIndex.Z / Constants.ChunkResolution));
     public bool IsVoxelSolidGlobal(Vector3i globalVoxelIndex) { Vector3i chunkPos = GetChunkPosFromVoxelIndex(globalVoxelIndex); if (_chunks.TryGetValue(chunkPos, out var chunk) && chunk.IsLoaded) { int res = Constants.ChunkResolution; int lx = globalVoxelIndex.X % res; if (lx < 0) lx += res; int ly = globalVoxelIndex.Y % res; if (ly < 0) ly += res; int lz = globalVoxelIndex.Z % res; if (lz < 0) lz += res; return chunk.IsVoxelSolidAt(new Vector3i(lx, ly, lz)); } return false; }
     public bool IsChunkLoadedAt(Vector3i globalVoxelIndex) { Vector3i chunkPos = GetChunkPosFromVoxelIndex(globalVoxelIndex); lock(_chunksLock) return _chunks.ContainsKey(chunkPos) && _chunks[chunkPos].IsLoaded; }
@@ -597,5 +703,15 @@ else if (collidable.Mobility == CollidableMobility.Dynamic &&
     public void RegisterVoxelObject(BodyHandle handle, VoxelObject obj) { lock (_chunksLock) _bodyToVoxelObjectMap[handle] = obj; }
     public void RegisterChunkStatic(StaticHandle handle, Chunk chunk) { lock (_chunksLock) _staticToChunkMap[handle] = chunk; }
     public void UnregisterChunkStatic(StaticHandle handle) { lock (_chunksLock) _staticToChunkMap.Remove(handle); }
+    
+    // Добавляем НОВЫЙ МЕТОД в конец файла WorldManager.cs
+    public System.Numerics.Vector3 GetPlayerVelocity()
+    {
+        if (_playerController != null && PhysicsWorld.Simulation.Bodies.BodyExists(_playerController.BodyHandle))
+        {
+            return PhysicsWorld.Simulation.Bodies.GetBodyReference(_playerController.BodyHandle).Velocity.Linear;
+        }
+        return System.Numerics.Vector3.Zero;
+    }
     public void SpawnTestVoxel(System.Numerics.Vector3 position, MaterialType material) { var voxels = new List<Vector3i> { new Vector3i(0, 0, 0) }; _objectsCreationQueue.Enqueue(new VoxelObjectCreationData { Voxels = voxels, Material = material, WorldPosition = position }); }
 }

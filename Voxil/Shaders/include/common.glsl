@@ -10,6 +10,7 @@ uniform bool uShowDebugHeatmap;
 
 uniform float uRenderDistance;
 uniform vec3 uSunDir;
+uniform vec3 uMoonDir;
 uniform float uTime;
 uniform int uMaxRaySteps;
 uniform int uSoftShadowSamples;
@@ -55,7 +56,8 @@ vec3 GetColor(uint id) {
     if (id == 3u) return vec3(0.25, 0.12, 0.05); // Wood
     if (id == 4u) return vec3(0.15, 0.25, 0.60); // Water
     if (id == 5u) return vec3(0.15, 0.60, 0.05); // Grass
-    return vec3(1.0, 0.0, 1.0);
+    if (id == 6u) return vec3(0.9, 0.1, 0.1);    // TNT Red <--- ИСПРАВЛЕНО НА 6u
+    return vec3(1.0, 0.0, 1.0); // Error pink
 }
 
 float IGN(vec2 p) {

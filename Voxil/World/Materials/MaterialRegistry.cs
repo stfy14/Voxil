@@ -17,7 +17,8 @@ public static class MaterialRegistry
             [MaterialType.Dirt] = new MaterialProperties((0.55f, 0.27f, 0.07f), 1.3f),
             [MaterialType.Stone] = new MaterialProperties((0.5f, 0.5f, 0.5f), 2.5f),
             [MaterialType.Wood] = new MaterialProperties((0.4f, 0.26f, 0.13f), 0.7f),
-            [MaterialType.Water] = new MaterialProperties((0.2f, 0.4f, 0.8f), 1.0f)
+            [MaterialType.Water] = new MaterialProperties((0.2f, 0.4f, 0.8f), 1.0f),
+            [MaterialType.TNT] = new MaterialProperties((0.8f, 0.1f, 0.1f), 1.5f), // Красный
         };
     }
 
@@ -43,11 +44,12 @@ public static class MaterialRegistry
             case MaterialType.Stone:
             case MaterialType.Wood:
             case MaterialType.Water:
-                return true; // Это твердые блоки, с которыми мы сталкиваемся
+            case MaterialType.TNT: // <---- ДОБАВИТЬ ЭТУ СТРОЧКУ!
+                return true; 
 
             case MaterialType.Air:
             default:
-                return false; // Это "проходимые" блоки
+                return false; 
         }
     }
 }

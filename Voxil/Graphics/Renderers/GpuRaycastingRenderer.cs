@@ -91,9 +91,9 @@ public class GpuRaycastingRenderer : IDisposable
     // ТОЛЬКО ОДНА МАТРИЦА - ЧИСТАЯ (БЕЗ ДЖИТТЕРА)
     private Matrix4 _prevCleanViewProjection = Matrix4.Identity;
     private Vector2 _prevJitterNDC = Vector2.Zero;
-
-
     private bool _resetTaaHistory = true;
+    
+    private VoxelObject _currentViewModel;
 
     // Стандартная последовательность Галтона для джиттера
     private readonly Vector2[] _haltonSequence = new Vector2[] {
@@ -145,6 +145,11 @@ public class GpuRaycastingRenderer : IDisposable
     {
         try { GL.GetInteger((GetPName)0x9048, out int kb); if (kb > 0) return kb/1024; } catch {}
         return 4096; 
+    }
+    
+    public void SetViewModel(VoxelObject viewModel)
+    {
+        _currentViewModel = viewModel;
     }
     
     public void RequestReallocation() { CleanupBuffers(); GC.Collect(); GC.WaitForPendingFinalizers(); GC.Collect(); _reallocationPending = true; }
@@ -576,39 +581,50 @@ public class GpuRaycastingRenderer : IDisposable
     public void UpdateDynamicObjectsAndGrid() 
     { 
         var voxelObjects = _worldManager.GetAllVoxelObjects(); 
-        int count = voxelObjects.Count; 
         
-        if (count > _tempGpuObjectsArray.Length) 
+        // === ВНЕДРЕНИЕ ВЬЮМОДЕЛИ ===
+        // Создаем временный список, включающий обычные объекты + вьюмодель
+        int totalCount = voxelObjects.Count;
+        if (_currentViewModel != null) totalCount++;
+
+        // Ресайз буфера если надо
+        if (totalCount > _tempGpuObjectsArray.Length) 
         { 
-            Array.Resize(ref _tempGpuObjectsArray, count + 1024); 
+            Array.Resize(ref _tempGpuObjectsArray, totalCount + 1024); 
             GL.BindBuffer(BufferTarget.ShaderStorageBuffer, _dynamicObjectsBuffer); 
             GL.BufferData(BufferTarget.ShaderStorageBuffer, _tempGpuObjectsArray.Length * Marshal.SizeOf<GpuDynamicObject>(), IntPtr.Zero, BufferUsageHint.DynamicDraw); 
         } 
         
-        if (count > 0) 
-        { 
-            // Получаем Alpha из физического мира
-            float alpha = _worldManager.PhysicsWorld.PhysicsAlpha;
+        // Заполняем буфер
+        int currentIndex = 0;
 
-            for (int i = 0; i < count; i++) 
-            { 
-                var vo = voxelObjects[i]; 
-                
-                // ИСПОЛЬЗУЕМ ИНТЕРПОЛЯЦИЮ
-                Matrix4 model = vo.GetInterpolatedModelMatrix(alpha);
-                
-                var col = MaterialRegistry.GetColor(vo.Material); 
-                _tempGpuObjectsArray[i].Model = model; 
-                _tempGpuObjectsArray[i].InvModel = Matrix4.Invert(model); 
-                _tempGpuObjectsArray[i].Color = new Vector4(col.r, col.g, col.b, 1.0f); 
-                _tempGpuObjectsArray[i].BoxMin = new Vector4(vo.LocalBoundsMin, 0); 
-                _tempGpuObjectsArray[i].BoxMax = new Vector4(vo.LocalBoundsMax, 0); 
-            } 
+        // 1. Обычные объекты
+        float alpha = _worldManager.PhysicsWorld.PhysicsAlpha;
+        for (int i = 0; i < voxelObjects.Count; i++) 
+        { 
+            var vo = voxelObjects[i]; 
+            FillGpuObject(ref _tempGpuObjectsArray[currentIndex], vo, alpha, false);
+            currentIndex++;
+        } 
+
+        // 2. Вьюмодель (всегда последняя, или как удобно)
+        if (_currentViewModel != null)
+        {
+            // Для вьюмодели alpha = 1.0, так как мы обновляем её позицию каждый кадр в Update, без физики
+            FillGpuObject(ref _tempGpuObjectsArray[currentIndex], _currentViewModel, 1.0f, true);
+            currentIndex++;
+        }
+
+        if (totalCount > 0) 
+        { 
             GL.BindBuffer(BufferTarget.ShaderStorageBuffer, _dynamicObjectsBuffer); 
-            GL.BufferSubData(BufferTarget.ShaderStorageBuffer, IntPtr.Zero, count * Marshal.SizeOf<GpuDynamicObject>(), _tempGpuObjectsArray); 
+            GL.BufferSubData(BufferTarget.ShaderStorageBuffer, IntPtr.Zero, totalCount * Marshal.SizeOf<GpuDynamicObject>(), _tempGpuObjectsArray); 
         } 
         
-        // ... (остальной код метода без изменений: расчет сетки, запуск компута и т.д.) ...
+        // ... (Остальной код очистки сетки и вызова компутера остается тем же) ...
+        // ВНИМАНИЕ: uObjectCount теперь равен totalCount!
+        
+        // [КОПИРУЕМ СТАРУЮ ЛОГИКУ СЕТКИ, НО МЕНЯЕМ count НА totalCount]
         float snap = _gridCellSize; 
         Vector3 playerPos = _worldManager.GetPlayerPosition(); 
         Vector3 snappedCenter = new Vector3((float)Math.Floor(playerPos.X / snap) * snap, (float)Math.Floor(playerPos.Y / snap) * snap, (float)Math.Floor(playerPos.Z / snap) * snap); 
@@ -618,9 +634,10 @@ public class GpuRaycastingRenderer : IDisposable
         GL.BindBuffer(BufferTarget.AtomicCounterBuffer, _atomicCounterBuffer); 
         GL.BufferSubData(BufferTarget.AtomicCounterBuffer, IntPtr.Zero, sizeof(uint), ref zero); 
         GL.ClearTexImage(_gridHeadTexture, 0, PixelFormat.RedInteger, PixelType.Int, IntPtr.Zero); 
-        if (count > 0) { 
+        
+        if (totalCount > 0) { // <--- ТУТ totalCount
             _gridComputeShader.Use(); 
-            _gridComputeShader.SetInt("uObjectCount", count); 
+            _gridComputeShader.SetInt("uObjectCount", totalCount); // <--- И ТУТ
             _gridComputeShader.SetVector3("uGridOrigin", _lastGridOrigin); 
             _gridComputeShader.SetFloat("uGridStep", _gridCellSize); 
             _gridComputeShader.SetInt("uGridSize", OBJ_GRID_SIZE); 
@@ -628,9 +645,38 @@ public class GpuRaycastingRenderer : IDisposable
             GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 2, _dynamicObjectsBuffer); 
             GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 3, _linkedListSsbo); 
             GL.BindBufferBase(BufferRangeTarget.AtomicCounterBuffer, 4, _atomicCounterBuffer); 
-            GL.DispatchCompute((count + 63) / 64, 1, 1); 
+            GL.DispatchCompute((totalCount + 63) / 64, 1, 1); // <--- И ТУТ
             GL.MemoryBarrier(MemoryBarrierFlags.ShaderImageAccessBarrierBit | MemoryBarrierFlags.AtomicCounterBarrierBit | MemoryBarrierFlags.ShaderStorageBarrierBit); 
         } 
+    }
+    
+    // Вспомогательный метод для заполнения структуры
+    private void FillGpuObject(ref GpuDynamicObject gpuObj, VoxelObject vo, float alpha, bool isViewModel)
+    {
+        Matrix4 model;
+        if (isViewModel)
+        {
+            // Берем масштаб из самого объекта!
+            float scale = vo.Scale;
+     
+            Vector3 centeringPivot = new Vector3(-1.0f * Constants.VoxelSize, 0.0f, -1.0f * Constants.VoxelSize);
+     
+            model = Matrix4.CreateTranslation(centeringPivot) * 
+                    Matrix4.CreateScale(scale) *
+                    Matrix4.CreateFromQuaternion(vo.Rotation) *
+                    Matrix4.CreateTranslation(vo.Position);
+        }
+        else
+        {
+            model = vo.GetInterpolatedModelMatrix(alpha);
+        }
+        
+        var col = MaterialRegistry.GetColor(vo.Material); 
+        gpuObj.Model = model; 
+        gpuObj.InvModel = Matrix4.Invert(model); 
+        gpuObj.Color = new Vector4(col.r, col.g, col.b, 1.0f); 
+        gpuObj.BoxMin = new Vector4(vo.LocalBoundsMin, 0); 
+        gpuObj.BoxMax = new Vector4(vo.LocalBoundsMax, 0); 
     }
 
     public void Render(Camera cam)
@@ -678,10 +724,28 @@ public class GpuRaycastingRenderer : IDisposable
         shader.SetFloat("uLodDistance", GameSettings.EnableLOD ? viewRange * GameSettings.LodPercentage : 100000.0f);
         shader.SetInt("uDisableEffectsOnLOD", GameSettings.DisableEffectsOnLOD ? 1 : 0);
         shader.SetInt("uMaxRaySteps", (int)(GameSettings.RenderDistance * 8) + 2028);
-        shader.SetVector3("uSunDir", Vector3.Normalize(new Vector3(0.2f, 0.4f, 0.8f)));
-        shader.SetFloat("uTime", _totalTime);
-        shader.SetInt("uShowDebugHeatmap", GameSettings.ShowDebugHeatmap ? 1 : 0);
-        shader.SetInt("uSoftShadowSamples", GameSettings.SoftShadowSamples);
+        
+        // --- РАСЧЕТ НЕБЕСНЫХ ТЕЛ ---
+        // 1. Орбита Солнца (полный круг каждые 24 часа)
+        float sunAngle = ((float)GameSettings.TotalTimeHours - 6.0f) / 24.0f * MathHelper.TwoPi;
+        float sunX = (float)Math.Cos(sunAngle);
+        float sunY = (float)Math.Sin(sunAngle);
+        float sunZ = 0.3f; // Наклон орбиты солнца
+
+        // 2. Орбита Луны (Лунный цикл = 28 дней. Луна отстает от солнца каждый день)
+        float moonPhaseOffset = ((float)GameSettings.TotalTimeHours / (24.0f * 28.0f)) * MathHelper.TwoPi;
+        // -Pi нужно чтобы в нулевой день было Полнолуние
+        float moonAngle = sunAngle - MathHelper.Pi - moonPhaseOffset; 
+        
+        float moonX = (float)Math.Cos(moonAngle);
+        float moonY = (float)Math.Sin(moonAngle);
+        float moonZ = -0.1f; // Луна имеет немного другой наклон орбиты
+
+        Vector3 dynamicSunDir = Vector3.Normalize(new Vector3(sunX, sunY, sunZ));
+        Vector3 dynamicMoonDir = Vector3.Normalize(new Vector3(moonX, moonY, moonZ));
+
+        shader.SetVector3("uSunDir", dynamicSunDir);
+        shader.SetVector3("uMoonDir", dynamicMoonDir); // Передаем Луну в шейдер!
 
         Vector3 p = cam.Position;
         int sz = Constants.ChunkSizeWorld;
@@ -700,7 +764,7 @@ public class GpuRaycastingRenderer : IDisposable
         shader.SetVector3("uGridOrigin", _lastGridOrigin);
         shader.SetFloat("uGridStep", _gridCellSize);
         shader.SetInt("uGridSize", OBJ_GRID_SIZE);
-        shader.SetInt("uObjectCount", _worldManager.GetAllVoxelObjects().Count);
+        shader.SetInt("uObjectCount", _worldManager.GetAllVoxelObjects().Count + (_currentViewModel != null ? 1 : 0));
 
         GL.BindVertexArray(_quadVao);
 

@@ -1,7 +1,8 @@
 ﻿// --- START OF FILE include/lighting.glsl ---
 
 #define AO_STRENGTH 0.6
-#define SOFT_SHADOW_RADIUS 0.01
+#define BLOCKER_SAMPLES 6
+#define SOFT_SHADOW_RADIUS 0.08
 #define SHADOW_BIAS 0.1
 
 bool IsSolidForAO(ivec3 pos) {
@@ -121,39 +122,59 @@ float CalculateAO(vec3 hitPos, vec3 normal) {
 float CalculateSoftShadow(vec3 hitPos, vec3 normal, vec3 sunDir) {
     float distToCam = length(hitPos - uCamPos);
     vec3 shadowOrigin = hitPos + normal * SHADOW_BIAS;
-    int maxSamples = uSoftShadowSamples;
-    int effectiveSamples = maxSamples;
-    float currentRadius = SOFT_SHADOW_RADIUS;
-    if (distToCam > 80.0) { effectiveSamples = 2; currentRadius *= 0.5; }
-    else if (distToCam > 40.0) { effectiveSamples = max(4, maxSamples / 4); currentRadius *= 1.0; }
-    else if (distToCam > 15.0) { effectiveSamples = max(8, maxSamples / 2); currentRadius *= 1.0; }
-    if (effectiveSamples < 1) effectiveSamples = 1;
-    vec3 up = abs(sunDir.y) < 0.999 ? vec3(0, 1, 0) : vec3(0, 0, 1);
-    vec3 right = normalize(cross(sunDir, up));
-    up = cross(right, sunDir);
-    float totalVisibility = 0.0;
-    float noiseVal = IGN(gl_FragCoord.xy);
     float maxShadowDist = 200.0;
 
-    // === ОПТИМИЗАЦИЯ: Early Exit ===
-    // Сначала проверяем центр солнца. Если он перекрыт, считаем, что мы в тени.
-    // Это значительно ускоряет рендер в темных местах (пещеры, внутри зданий).
-    float tHitHard = 0.0; uint matIDHard = 0u;
-    if (TraceShadowRay(shadowOrigin, sunDir, maxShadowDist, tHitHard, matIDHard)) {
-        return 0.0;
-    }
+    vec3 up    = abs(sunDir.y) < 0.999 ? vec3(0,1,0) : vec3(0,0,1);
+    vec3 right = normalize(cross(sunDir, up));
+    up         = cross(right, sunDir);
 
-    for (int k = 0; k < effectiveSamples; k++) {
+    float noiseVal = IGN(gl_FragCoord.xy);
+
+    // Центральный луч — если не перекрыт, сразу выходим
+    float tHardHit = 0.0; uint matHard = 0u;
+    if (!TraceShadowRay(shadowOrigin, sunDir, maxShadowDist, tHardHit, matHard))
+    return 1.0;
+
+    // Blocker search — среднее расстояние до блокера
+    float avgBlockerDist = 0.0;
+    int   blockerCount   = 0;
+    for (int k = 0; k < BLOCKER_SAMPLES; k++) {
         float angle = (float(k) + noiseVal) * 2.39996;
-        float r = sqrt(float(k) + 0.5) / sqrt(float(effectiveSamples));
-        vec2 offset = vec2(cos(angle), sin(angle)) * r * currentRadius;
-        vec3 offsetDir = right * offset.x + up * offset.y;
-        vec3 shadowDir = normalize(sunDir + offsetDir);
-        bool hit = false;
-        if (distToCam < 150.0) {
-            float tDyn = 100000.0; int idDyn = -1; vec3 nDyn = vec3(0);
-            int dummy = 0;
-            if (uObjectCount > 0 && TraceDynamicRay(shadowOrigin, shadowDir, maxShadowDist, tDyn, idDyn, nDyn, dummy)) hit = true;
+        float r     = sqrt(float(k) + 0.5) / sqrt(float(BLOCKER_SAMPLES));
+        vec2  off   = vec2(cos(angle), sin(angle)) * r * SOFT_SHADOW_RADIUS;
+        vec3  dir   = normalize(sunDir + right * off.x + up * off.y);
+        float tHit  = 0.0; uint matID = 0u;
+        if (TraceShadowRay(shadowOrigin, dir, maxShadowDist, tHit, matID)) {
+            avgBlockerDist += tHit;
+            blockerCount++;
+        }
+    }
+    if (blockerCount == 0) return 1.0;
+    avgBlockerDist /= float(blockerCount);
+
+    // Penumbra: чем дальше поверхность от блокера — тем шире тень
+    float penumbra = clamp(avgBlockerDist / maxShadowDist, 0.0, 1.0);
+    float shadowRadius = penumbra * SOFT_SHADOW_RADIUS;
+    if (shadowRadius < 0.0005) return 0.0;
+
+    // PCF с адаптивным радиусом — uSoftShadowSamples из настроек игры
+    int   effectiveSamples = uSoftShadowSamples;
+    float currentRadius    = shadowRadius;
+    if (distToCam > 80.0)      { effectiveSamples = 2;                              currentRadius *= 0.5; }
+    else if (distToCam > 40.0) { effectiveSamples = max(4, uSoftShadowSamples / 4); }
+    else if (distToCam > 15.0) { effectiveSamples = max(8, uSoftShadowSamples / 2); }
+    if (effectiveSamples < 1)    effectiveSamples = 1;
+
+    float totalVisibility = 0.0;
+    for (int k = 0; k < effectiveSamples; k++) {
+        float angle     = (float(k) + noiseVal) * 2.39996;
+        float r         = sqrt(float(k) + 0.5) / sqrt(float(effectiveSamples));
+        vec2  off       = vec2(cos(angle), sin(angle)) * r * currentRadius;
+        vec3  shadowDir = normalize(sunDir + right * off.x + up * off.y);
+        bool  hit       = false;
+        if (distToCam < 150.0 && uObjectCount > 0) {
+            float tDyn = 100000.0; int idDyn = -1; vec3 nDyn = vec3(0); int dummy = 0;
+            if (TraceDynamicRay(shadowOrigin, shadowDir, maxShadowDist, tDyn, idDyn, nDyn, dummy)) hit = true;
         }
         if (!hit) {
             float tHit = 0.0; uint matID = 0u;

@@ -121,102 +121,109 @@ public class PhysicsWorld : IDisposable
         }
     }
 
-    // ✅ ВРЕМЕННЫЙ WORKAROUND: Ручной расчёт CoM
-
-public BodyHandle CreateVoxelObjectBody(IList<Vector3i> voxelCoordinates, MaterialType material, BepuVector3 initialPosition, out BepuVector3 localCenterOfMass)
-{
-    lock (_simLock)
+    // Перегрузка для старого кода (объекты мира)
+    public BodyHandle CreateVoxelObjectBody(IList<Vector3i> voxelCoordinates, MaterialType material, BepuVector3 initialPosition, out BepuVector3 localCenterOfMass)
     {
-        localCenterOfMass = BepuVector3.Zero;
-        if (_isDisposed || voxelCoordinates == null || voxelCoordinates.Count == 0) return new BodyHandle();
-
-        // 1. Границы объекта
-        int minX = int.MaxValue, minY = int.MaxValue, minZ = int.MaxValue;
-        int maxX = int.MinValue, maxY = int.MinValue, maxZ = int.MinValue;
-        foreach (var v in voxelCoordinates)
+        return CreateVoxelObjectBody(voxelCoordinates, material, 1.0f, initialPosition, out localCenterOfMass);
+    }
+    
+    // ✅ ВРЕМЕННЫЙ WORKAROUND: Ручной расчёт CoM
+    public BodyHandle CreateVoxelObjectBody(IList<Vector3i> voxelCoordinates, MaterialType material, float scale, BepuVector3 initialPosition, out BepuVector3 localCenterOfMass)
+    {
+        lock (_simLock)
         {
-            if (v.X < minX) minX = v.X; if (v.X > maxX) maxX = v.X;
-            if (v.Y < minY) minY = v.Y; if (v.Y > maxY) maxY = v.Y;
-            if (v.Z < minZ) minZ = v.Z; if (v.Z > maxZ) maxZ = v.Z;
-        }
+            localCenterOfMass = BepuVector3.Zero;
+            if (_isDisposed || voxelCoordinates == null || voxelCoordinates.Count == 0) 
+                return new BodyHandle(-1); // <-- БЫЛО просто new BodyHandle()
 
-        int sizeX = maxX - minX + 1;
-        int sizeY = maxY - minY + 1;
-        int sizeZ = maxZ - minZ + 1;
-
-        // 2. Greedy Meshing
-        var voxels = System.Buffers.ArrayPool<MaterialType>.Shared.Rent(sizeX * sizeY * sizeZ);
-        var visited = System.Buffers.ArrayPool<bool>.Shared.Rent(sizeX * sizeY * sizeZ);
-        var scratchColliders = System.Buffers.ArrayPool<VoxelCollider>.Shared.Rent(voxelCoordinates.Count);
-
-        Array.Clear(voxels, 0, sizeX * sizeY * sizeZ);
-
-        foreach (var v in voxelCoordinates)
-        {
-            int lx = v.X - minX;
-            int ly = v.Y - minY;
-            int lz = v.Z - minZ;
-            int idx = lx + sizeX * (ly + sizeY * lz);
-            voxels[idx] = material;
-        }
-
-        int colliderCount = VoxelPhysicsBuilder.GenerateColliders(voxels, visited, scratchColliders, sizeX, sizeY, sizeZ);
-
-        System.Buffers.ArrayPool<MaterialType>.Shared.Return(voxels);
-        System.Buffers.ArrayPool<bool>.Shared.Return(visited);
-
-        // 3. ✅ Ручной расчёт центра масс (workaround для бага в CompoundBuilder)
-        BepuVector3 manualCoM = BepuVector3.Zero;
-        foreach (var v in voxelCoordinates)
-        {
-            manualCoM += new BepuVector3(
-                (v.X + 0.5f) * Constants.VoxelSize,
-                (v.Y + 0.5f) * Constants.VoxelSize,
-                (v.Z + 0.5f) * Constants.VoxelSize
-            );
-        }
-        manualCoM /= voxelCoordinates.Count;
-
-        // 4. Compound Shape
-        using (var compoundBuilder = new CompoundBuilder(_bufferPool, Simulation.Shapes, colliderCount))
-        {
-            float voxelMass = MaterialRegistry.Get(material).MassPerVoxel;
-
-            for(int i = 0; i < colliderCount; i++)
+            // 1. Границы объекта
+            int minX = int.MaxValue, minY = int.MaxValue, minZ = int.MaxValue;
+            int maxX = int.MinValue, maxY = int.MinValue, maxZ = int.MinValue;
+            foreach (var v in voxelCoordinates)
             {
-                var col = scratchColliders[i];
-                var boxShape = new Box(col.HalfSize.X * 2, col.HalfSize.Y * 2, col.HalfSize.Z * 2);
+                if (v.X < minX) minX = v.X; if (v.X > maxX) maxX = v.X;
+                if (v.Y < minY) minY = v.Y; if (v.Y > maxY) maxY = v.Y;
+                if (v.Z < minZ) minZ = v.Z; if (v.Z > maxZ) maxZ = v.Z;
+            }
+
+            int sizeX = maxX - minX + 1;
+            int sizeY = maxY - minY + 1;
+            int sizeZ = maxZ - minZ + 1;
+
+            // 2. Greedy Meshing
+            var voxels = System.Buffers.ArrayPool<MaterialType>.Shared.Rent(sizeX * sizeY * sizeZ);
+            var visited = System.Buffers.ArrayPool<bool>.Shared.Rent(sizeX * sizeY * sizeZ);
+            var scratchColliders = System.Buffers.ArrayPool<VoxelCollider>.Shared.Rent(voxelCoordinates.Count);
+
+            Array.Clear(voxels, 0, sizeX * sizeY * sizeZ);
+
+            foreach (var v in voxelCoordinates)
+            {
+                int lx = v.X - minX;
+                int ly = v.Y - minY;
+                int lz = v.Z - minZ;
+                int idx = lx + sizeX * (ly + sizeY * lz);
+                voxels[idx] = material;
+            }
+
+            int colliderCount = VoxelPhysicsBuilder.GenerateColliders(voxels, visited, scratchColliders, sizeX, sizeY, sizeZ, scale);
+
+            System.Buffers.ArrayPool<MaterialType>.Shared.Return(voxels);
+            System.Buffers.ArrayPool<bool>.Shared.Return(visited);
+
+            // УДАЛЯЕМ БЛОК "3. Ручной расчёт центра масс (workaround...)" полностью!
+
+            // 4. Compound Shape
+            using (var compoundBuilder = new CompoundBuilder(_bufferPool, Simulation.Shapes, colliderCount))
+            {
+                float voxelMass = MaterialRegistry.Get(material).MassPerVoxel;
                 
-                float volumeInVoxels = (col.HalfSize.X * 2 * col.HalfSize.Y * 2 * col.HalfSize.Z * 2) / (float)Math.Pow(Constants.VoxelSize, 3);
-                float boxMass = voxelMass * volumeInVoxels;
+                // ВАЖНО: правильный размер для расчета объема
+                float scaledVoxelSize = Constants.VoxelSize * scale;
 
-                compoundBuilder.Add(boxShape, new RigidPose(col.Position), boxMass);
+                for(int i = 0; i < colliderCount; i++)
+                {
+                    var col = scratchColliders[i];
+                    var boxShape = new Box(col.HalfSize.X * 2, col.HalfSize.Y * 2, col.HalfSize.Z * 2);
+                    
+                    // ИСПРАВЛЕНИЕ: правильно считаем объем с учетом масштаба!
+                    float volumeInVoxels = (col.HalfSize.X * 2 * col.HalfSize.Y * 2 * col.HalfSize.Z * 2) / (float)Math.Pow(scaledVoxelSize, 3);
+                    float boxMass = voxelMass * volumeInVoxels;
+
+                    compoundBuilder.Add(boxShape, new RigidPose(col.Position), boxMass);
+                }
+                
+                System.Buffers.ArrayPool<VoxelCollider>.Shared.Return(scratchColliders);
+
+                // Bepu сам идеально вычислит Центр Масс
+                compoundBuilder.BuildDynamicCompound(out Buffer<CompoundChild> childrenBuffer, out BodyInertia inertia, out BepuVector3 bepuCoM);
+                
+                // ИСПОЛЬЗУЕМ ИДЕАЛЬНЫЙ ЦЕНТР МАСС ОТ ДВИЖКА
+                localCenterOfMass = bepuCoM;
+                
+                if (childrenBuffer.Length == 0)
+                {
+                    if (childrenBuffer.Allocated) _bufferPool.Return(ref childrenBuffer);
+                    return new BodyHandle(-1); // Как мы исправляли в прошлом шаге
+                }
+
+                var compound = new Compound(childrenBuffer);
+                var compoundShapeIndex = Simulation.Shapes.Add(compound);
+                lock (_bufferLock) { _compoundBuffers.Add(compoundShapeIndex, childrenBuffer); }
+
+                var bodyDescription = BodyDescription.CreateDynamic(new RigidPose(initialPosition), inertia, new CollidableDescription(compoundShapeIndex, 0.1f), new BodyActivityDescription(0.01f));
+                return Simulation.Bodies.Add(bodyDescription);
             }
-            
-            System.Buffers.ArrayPool<VoxelCollider>.Shared.Return(scratchColliders);
-
-            compoundBuilder.BuildDynamicCompound(out Buffer<CompoundChild> childrenBuffer, out BodyInertia inertia, out BepuVector3 _);
-            
-            // Используем ручной расчёт CoM вместо значения из компаунда
-            localCenterOfMass = manualCoM;
-            
-            if (childrenBuffer.Length == 0)
-            {
-                if (childrenBuffer.Allocated) _bufferPool.Return(ref childrenBuffer);
-                return new BodyHandle();
-            }
-
-            var compound = new Compound(childrenBuffer);
-            var compoundShapeIndex = Simulation.Shapes.Add(compound);
-            lock (_bufferLock) { _compoundBuffers.Add(compoundShapeIndex, childrenBuffer); }
-
-            var bodyDescription = BodyDescription.CreateDynamic(new RigidPose(initialPosition), inertia, new CollidableDescription(compoundShapeIndex, 0.1f), new BodyActivityDescription(0.01f));
-            return Simulation.Bodies.Add(bodyDescription);
         }
     }
-}
 
+    // Перегрузка
     public BodyHandle UpdateVoxelObjectBody(BodyHandle oldHandle, IList<Vector3i> voxelCoordinates, MaterialType material, out BepuVector3 localCenterOfMass)
+    {
+        return UpdateVoxelObjectBody(oldHandle, voxelCoordinates, material, 1.0f, out localCenterOfMass);
+    }
+    
+    public BodyHandle UpdateVoxelObjectBody(BodyHandle oldHandle, IList<Vector3i> voxelCoordinates, MaterialType material, float scale, out BepuVector3 localCenterOfMass)
     {
         localCenterOfMass = BepuVector3.Zero;
         lock (_simLock)
@@ -235,7 +242,7 @@ public BodyHandle CreateVoxelObjectBody(IList<Vector3i> voxelCoordinates, Materi
                 RemoveBody(oldHandle);
             }
 
-            var newHandle = CreateVoxelObjectBody(voxelCoordinates, material, hasOldBody ? oldPose.Position : BepuVector3.Zero, out localCenterOfMass);
+            var newHandle = CreateVoxelObjectBody(voxelCoordinates, material, scale, hasOldBody ? oldPose.Position : BepuVector3.Zero, out localCenterOfMass);
 
             if (Simulation.Bodies.BodyExists(newHandle) && hasOldBody)
             {

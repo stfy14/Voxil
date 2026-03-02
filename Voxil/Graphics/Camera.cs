@@ -1,4 +1,4 @@
-﻿// /Graphics/Camera.cs
+﻿// --- START OF FILE Camera.cs ---
 using OpenTK.Mathematics;
 using System;
 
@@ -22,53 +22,30 @@ public class Camera
     public Vector3 Right => _right;
     public float Fov => _fov;
 
+    // Кватернион теперь снова обновляется в UpdateVectors
+    public Quaternion Rotation { get; private set; }
+
     public Camera(Vector3 position, float aspectRatio)
     {
         _position = position;
         _aspectRatio = aspectRatio;
         UpdateVectors();
     }
+    
+    public void SetPosition(Vector3 position) { _position = position; }
+    public Matrix4 GetViewMatrix() { return Matrix4.LookAt(_position, _position + _front, _up); }
+    public Matrix4 GetJitteredProjectionMatrix(Vector2 jitter, float renderWidth, float renderHeight) { /*...*/ return GetProjectionMatrix(); }
+    public Matrix4 GetProjectionMatrix() { return Matrix4.CreatePerspectiveFieldOfView(MathHelper.DegreesToRadians(_fov), _aspectRatio, NearPlane, FarPlane); }
 
-    public void SetPosition(Vector3 position)
-    {
-        _position = position;
-    }
-
-    public Matrix4 GetViewMatrix()
-    {
-        return Matrix4.LookAt(_position, _position + _front, _up);
-    }
-
-    // Сдвигает матрицу проекции на(jitter.X, jitter.Y) пикселей
-    public Matrix4 GetJitteredProjectionMatrix(Vector2 jitter, float renderWidth, float renderHeight)
-    {
-        // 1. Берем чистую проекцию
-        Matrix4 projection = GetProjectionMatrix();
-
-        // 2. Вычисляем смещение в NDC пространстве (от -1 до 1)
-        // jitter - смещение в пикселях (например, 0.5)
-        // Делим на ширину/высоту, умножаем на 2 (так как NDC это 2.0 единицы шириной)
-        float translationX = (jitter.X / renderWidth) * 2.0f;
-        float translationY = (jitter.Y / renderHeight) * 2.0f;
-
-        // 3. Модифицируем компоненты матрицы напрямую (M31 и M32 отвечают за сдвиг в проекции)
-        // Это эквивалентно умножению на Matrix4.CreateTranslation, но быстрее
-        projection.M31 += translationX;
-        projection.M32 += translationY;
-
-        return projection;
-    }
-
-    public Matrix4 GetProjectionMatrix()
-    {
-        return Matrix4.CreatePerspectiveFieldOfView(MathHelper.DegreesToRadians(_fov), _aspectRatio, NearPlane, FarPlane);
-    }
-
+    // === ИСПРАВЛЕННЫЙ МЕТОД ВРАЩЕНИЯ ===
     public void Rotate(float deltaYaw, float deltaPitch)
     {
         _yaw += deltaYaw;
-        _pitch -= deltaPitch;
+        _pitch -= deltaPitch; // Инвертируем, чтобы мышь двигала камеру естественно
+        
+        // Ограничиваем вертикальный угол
         _pitch = Math.Clamp(_pitch, -89.0f, 89.0f);
+        
         UpdateVectors();
     }
 
@@ -77,6 +54,7 @@ public class Camera
         _aspectRatio = aspectRatio;
     }
 
+    // Единственный метод, который рассчитывает все векторы и кватернион
     private void UpdateVectors()
     {
         Vector3 front;
@@ -87,5 +65,9 @@ public class Camera
 
         _right = Vector3.Normalize(Vector3.Cross(_front, _worldUp));
         _up = Vector3.Normalize(Vector3.Cross(_right, _front));
+
+        // Обновляем кватернион на основе новых векторов
+        Rotation = Quaternion.FromAxisAngle(Vector3.UnitY, MathHelper.DegreesToRadians(_yaw)) *
+                   Quaternion.FromAxisAngle(Vector3.UnitX, MathHelper.DegreesToRadians(_pitch));
     }
 }

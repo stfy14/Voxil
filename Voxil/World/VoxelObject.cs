@@ -9,35 +9,36 @@ public class VoxelObject : IDisposable
 {
     public List<Vector3i> VoxelCoordinates { get; }
     public MaterialType Material { get; }
+    
     public BodyHandle BodyHandle { get; private set; }
     public Vector3 LocalCenterOfMass { get; private set; }
-    
-    // ✅ НОВОЕ ПОЛЕ: Якорная точка (минимальный воксель в мировых координатах)
-    // Это НЕ меняется при перестройке физики
     public Vector3 AnchorWorldPosition { get; private set; }
     
-    // Текущее состояние (позиция физического тела = CoM в мире)
     public Vector3 Position { get; private set; }
     public Quaternion Rotation { get; private set; }
 
-    // Предыдущее состояние (для интерполяции)
     public Vector3 PrevPosition { get; private set; }
     public Quaternion PrevRotation { get; private set; }
 
     public Vector3 LocalBoundsMin { get; private set; }
     public Vector3 LocalBoundsMax { get; private set; }
     
-    public event Action<VoxelObject> OnEmpty; 
+    public event Action<VoxelObject> OnEmpty;
+    
+    public float Scale { get; } 
 
     private bool _isDisposed = false;
     private bool _firstUpdate = true;
 
-    public VoxelObject(List<Vector3i> voxelCoordinates, MaterialType material)
+    public VoxelObject(List<Vector3i> voxelCoordinates, MaterialType material, float scale = 1.0f)
     {
         VoxelCoordinates = voxelCoordinates ?? throw new ArgumentNullException(nameof(voxelCoordinates));
         Material = material;
+        Scale = scale; // <--- Сохраняем масштаб
+
         Rotation = Quaternion.Identity;
         PrevRotation = Quaternion.Identity;
+        RecalculateBounds();
     }
     
     public void InitializePhysics(BodyHandle handle, Vector3 localCenterOfMass, Vector3 anchorWorldPos)
@@ -75,17 +76,15 @@ public class VoxelObject : IDisposable
         Rotation = new Quaternion(orientation.X, orientation.Y, orientation.Z, orientation.W);
     }
     
-    // --- ИНТЕРПОЛЯЦИЯ ---
     public Matrix4 GetInterpolatedModelMatrix(float alpha)
     {
         Vector3 interpPos = Vector3.Lerp(PrevPosition, Position, alpha);
         Quaternion interpRot = Quaternion.Slerp(PrevRotation, Rotation, alpha);
-        
-        // КРИТИЧНО: Model matrix для визуала
-        // 1. Translate(-CoM) — сдвиг к началу координат относительно ЛОКАЛЬНЫХ вокселей
-        // 2. Rotate — вращение
-        // 3. Translate(Position) — в физическую позицию (центр масс)
-        return Matrix4.CreateTranslation(-LocalCenterOfMass) * 
+    
+        // ДОБАВЛЕНО: Matrix4.CreateScale(Scale)
+        // Порядок важен: Сначала Скейл, потом Сдвиг в центр масс, потом Вращение, потом Позиция
+        return Matrix4.CreateScale(Scale) * 
+               Matrix4.CreateTranslation(-LocalCenterOfMass) * 
                Matrix4.CreateFromQuaternion(interpRot) * 
                Matrix4.CreateTranslation(interpPos);
     }
@@ -118,70 +117,62 @@ public class VoxelObject : IDisposable
     }
 
     public void RebuildMeshAndPhysics(PhysicsWorld physicsWorld)
-{
-    if (_isDisposed) return;
-    if (VoxelCoordinates.Count == 0) return; 
-    if (!physicsWorld.Simulation.Bodies.BodyExists(BodyHandle)) return;
-
-    var oldCoM = LocalCenterOfMass;
-    
-    // ✅ КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Нормализуем координаты к (0,0,0)
-    // Это гарантирует консистентность физики и инверсии Z
-    int minX = VoxelCoordinates.Min(v => v.X);
-    int minY = VoxelCoordinates.Min(v => v.Y);
-    int minZ = VoxelCoordinates.Min(v => v.Z);
-    
-    Vector3i offset = new Vector3i(minX, minY, minZ);
-    
-    // Если есть смещение — нормализуем список
-    if (offset != Vector3i.Zero)
     {
-        for (int i = 0; i < VoxelCoordinates.Count; i++)
+        if (_isDisposed) return;
+        if (VoxelCoordinates.Count == 0) return; 
+        if (!physicsWorld.Simulation.Bodies.BodyExists(BodyHandle)) return;
+
+        var oldCoM = LocalCenterOfMass;
+        
+        int minX = VoxelCoordinates.Min(v => v.X);
+        int minY = VoxelCoordinates.Min(v => v.Y);
+        int minZ = VoxelCoordinates.Min(v => v.Z);
+        
+        Vector3i offset = new Vector3i(minX, minY, minZ);
+        
+        if (offset != Vector3i.Zero)
         {
-            VoxelCoordinates[i] -= offset;
+            for (int i = 0; i < VoxelCoordinates.Count; i++)
+                VoxelCoordinates[i] -= offset;
+        }
+        
+        try
+        {
+            var newHandle = physicsWorld.UpdateVoxelObjectBody(BodyHandle, VoxelCoordinates, Material, out var newCenterOfMassBepu);
+            var newCoM = newCenterOfMassBepu.ToOpenTK();
+            
+            var bodyRef = physicsWorld.Simulation.Bodies.GetBodyReference(newHandle);
+            
+            var shiftLocal = (newCoM - oldCoM) + (offset.ToOpenTK() * Constants.VoxelSize);
+            var orientation = bodyRef.Pose.Orientation;
+            var tkOrientation = new Quaternion(orientation.X, orientation.Y, orientation.Z, orientation.W);
+            var shiftWorld = Vector3.Transform(shiftLocal, tkOrientation);
+            
+            bodyRef.Pose.Position -= shiftWorld.ToSystemNumerics();
+            bodyRef.Awake = true;
+
+            BodyHandle = newHandle;
+            LocalCenterOfMass = newCoM;
+            RecalculateBounds();
+            
+            Position = bodyRef.Pose.Position.ToOpenTK();
+            PrevPosition = Position;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[VoxelObject] Error updating: {ex.Message}");
         }
     }
-    
-    try
-    {
-        var newHandle = physicsWorld.UpdateVoxelObjectBody(BodyHandle, VoxelCoordinates, Material, out var newCenterOfMassBepu);
-        var newCoM = newCenterOfMassBepu.ToOpenTK();
-        
-        var bodyRef = physicsWorld.Simulation.Bodies.GetBodyReference(newHandle);
-        
-        // Корректируем позицию с учётом нового CoM И смещения координат
-        var shiftLocal = (newCoM - oldCoM) + (offset.ToOpenTK() * Constants.VoxelSize);
-        var orientation = bodyRef.Pose.Orientation;
-        var tkOrientation = new Quaternion(orientation.X, orientation.Y, orientation.Z, orientation.W);
-        var shiftWorld = Vector3.Transform(shiftLocal, tkOrientation);
-        
-        bodyRef.Pose.Position -= shiftWorld.ToSystemNumerics();
-        bodyRef.Awake = true;
-
-        BodyHandle = newHandle;
-        LocalCenterOfMass = newCoM;
-        RecalculateBounds();
-        
-        Position = bodyRef.Pose.Position.ToOpenTK();
-        PrevPosition = Position;
-    }
-    catch (Exception ex)
-    {
-        Console.WriteLine($"[VoxelObject] Error updating: {ex.Message}");
-    }
-}
 
     public bool RemoveVoxel(Vector3i localPos)
     {
         int index = VoxelCoordinates.FindIndex(v => v.X == localPos.X && v.Y == localPos.Y && v.Z == localPos.Z);
         if (index != -1)
         {
-            Console.WriteLine($"[VoxelObject] Removing voxel {localPos} at index {index}");
             VoxelCoordinates.RemoveAt(index);
             if (VoxelCoordinates.Count == 0) OnEmpty?.Invoke(this); 
             return true;
         }
-        Console.WriteLine($"[VoxelObject] FAILED: Voxel {localPos} not found");
         return false;
     }
 
@@ -225,5 +216,14 @@ public class VoxelObject : IDisposable
     {
         if (_isDisposed) return;
         _isDisposed = true;
+    }
+
+    // === Метод для вьюмодели ===
+    public void ForceSetTransform(Vector3 pos, Quaternion rot)
+    {
+        PrevPosition = Position; 
+        PrevRotation = Rotation;
+        Position = pos;
+        Rotation = rot;
     }
 }

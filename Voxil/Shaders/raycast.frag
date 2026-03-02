@@ -145,11 +145,40 @@ void main() {
 
     if (hit) {
         vec3 hitPos = uCamPos + rayDir * tFinal;
-        float ndotl = max(dot(normal, uSunDir), 0.0);
 
+        // === ВЫБОР ДОМИНИРУЮЩЕГО ИСТОЧНИКА СВЕТА ===
+        float sunIntensity = clamp(uSunDir.y * 5.0, 0.0, 1.0);
+        // Луна дает свет, только когда она выше горизонта И когда солнце село 
+        // (чтобы не перебивать дневной свет и не создавать двойных теней)
+        float moonIntensity = clamp(uMoonDir.y * 5.0, 0.0, 1.0) * 0.25 * clamp(-uSunDir.y * 5.0, 0.0, 1.0);
+
+        vec3 activeLightDir;
+        vec3 lightColor;
+        float lightIntensity;
+
+        if (sunIntensity > 0.05) {
+            // День / Закат
+            activeLightDir = uSunDir;
+            lightColor = vec3(1.0, 0.95, 0.85);
+            lightIntensity = sunIntensity;
+        } else if (moonIntensity > 0.01) {
+            // Ночь (Луна светит)
+            activeLightDir = uMoonDir;
+            lightColor = vec3(0.2, 0.35, 0.6); // Холодный лунный свет
+            lightIntensity = moonIntensity;
+        } else {
+            // Глухая ночь (Луна за горизонтом)
+            activeLightDir = vec3(0, 1, 0); // Вектор вверх, чтобы тени ушли вниз
+            lightColor = vec3(0.0);
+            lightIntensity = 0.0;
+        }
+
+        float ndotl = max(dot(normal, activeLightDir), 0.0);
         float shadow = 1.0;
-        if (ndotl > 0.0) {
-            shadow = CalculateShadow(hitPos, normal, uSunDir);
+
+        // Кастуем тени только если есть хоть какой-то направленный свет
+        if (ndotl > 0.0 && lightIntensity > 0.01) {
+            shadow = CalculateShadow(hitPos, normal, activeLightDir);
         }
 
         float ao = 1.0;
@@ -157,15 +186,18 @@ void main() {
         if (!isDynamic) ao = CalculateAO(hitPos, normal);
         #endif
 
-        vec3 direct = vec3(1.0, 0.98, 0.9) * ndotl * shadow;
-        vec3 ambient = vec3(0.6, 0.7, 0.9) * 0.3 * ao;
+        // Ambient (глобальный рассеянный свет) зависит ТОЛЬКО от солнца
+        float dayAmbient = 0.35;
+        float nightAmbient = 0.04;
+        float currentAmbient = mix(nightAmbient, dayAmbient, clamp(uSunDir.y * 3.0 + 0.2, 0.0, 1.0));
+        vec3 ambient = vec3(0.6, 0.7, 0.9) * currentAmbient * ao;
+
+        vec3 direct = lightColor * ndotl * shadow * lightIntensity;
 
         finalColor = albedo * (direct + ambient);
         finalColor = ApplyFog(finalColor, rayDir, uSunDir, tFinal, uRenderDistance);
 
         FragColor = vec4(ApplyPostProcess(finalColor), 1.0);
-
-        // Пишем глубину
         gl_FragDepth = ComputeDepth(hitPos);
     }
     else {

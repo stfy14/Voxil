@@ -52,7 +52,7 @@ public class SettingsWindow : IUIWindow
         
         if (ImGui.Begin("Game Settings", ref _isVisible))
         {
-            // --- Секция Графики ---
+            // --- СЕКЦИЯ ГРАФИКИ ---
             ImGui.Text("Graphics");
             ImGui.Separator();
             long totalVramBytes = (long)_renderer.TotalVramMb * 1024 * 1024;
@@ -71,6 +71,7 @@ public class SettingsWindow : IUIWindow
             else ImGui.Text($"Request: {futureMb:F0} MB / {budgetMb:F0} MB");
             if (ImGui.Button("Apply Render Distance")) { GameSettings.RenderDistance = _renderDist; _renderer.RequestReallocation(); }
 
+            // --- МАСШТАБ РЕНДЕРА ---
             ImGui.Spacing();
             ImGui.Separator();
             ImGui.Text("Render Scale");
@@ -81,6 +82,7 @@ public class SettingsWindow : IUIWindow
                 _renderer.ApplyRenderScale(); // <--- ВОТ ЭТОГО НЕ ХВАТАЛО!
             }
 
+            // --- ТИПЫ ТЕНЕЙ ---
             ImGui.Spacing();
             ImGui.Separator();
             ImGui.Text("Shadows Mode:");
@@ -88,7 +90,8 @@ public class SettingsWindow : IUIWindow
             if (ImGui.RadioButton("Hard", GameSettings.CurrentShadowMode == ShadowMode.Hard)) { GameSettings.CurrentShadowMode = ShadowMode.Hard; _renderer.ReloadShader(); } ImGui.SameLine();
             if (ImGui.RadioButton("Soft", GameSettings.CurrentShadowMode == ShadowMode.Soft)) { GameSettings.CurrentShadowMode = ShadowMode.Soft; _renderer.ReloadShader(); }
             if (GameSettings.CurrentShadowMode == ShadowMode.Soft) { if (ImGui.SliderInt("Soft Samples", ref _shadowSamples, 2, 64)) GameSettings.SoftShadowSamples = _shadowSamples; }
-
+            
+            // --- РАЗНЫЕ ЭФФЕКТЫ ---
             ImGui.Spacing();
             ImGui.Separator();
             ImGui.Text("Effects");
@@ -101,11 +104,42 @@ public class SettingsWindow : IUIWindow
             bool trans = GameSettings.EnableWaterTransparency; if (ImGui.Checkbox("Water Transparency (Disable)", ref trans)) { GameSettings.EnableWaterTransparency = trans; _renderer.ReloadShader(); }
             bool beam = GameSettings.BeamOptimization; if (ImGui.Checkbox("Beam Optimization", ref beam)) { GameSettings.BeamOptimization = beam; _renderer.ReloadShader(); }
             bool heatmap = GameSettings.ShowDebugHeatmap; if (ImGui.Checkbox("Debug Heatmap (Debug)", ref heatmap)) { GameSettings.ShowDebugHeatmap = heatmap; }
+            
+            // --- СЕКЦИЯ ВРЕМЕНИ ---
+            ImGui.Spacing();
+            ImGui.Separator();
+            ImGui.Text("Time & Day/Night Cycle");
+            
+            bool isDynamic = GameSettings.EnableDynamicTime;
+            if (ImGui.Checkbox("Enable Dynamic Time", ref isDynamic)) 
+                GameSettings.EnableDynamicTime = isDynamic;
 
+            // 1. Ползунок времени внутри одного дня (0.00 до 24.00)
+            float t = GameSettings.TimeOfDay;
+            if (ImGui.SliderFloat("Time of Day", ref t, 0.0f, 24.0f, "%.2f (Hours)")) 
+            {
+                double fullDays = Math.Floor(GameSettings.TotalTimeHours / 24.0) * 24.0;
+                GameSettings.TotalTimeHours = fullDays + t;
+            }
+
+            // 2. Ползунок прошедших дней (для смены фаз луны!)
+            int days = (int)(GameSettings.TotalTimeHours / 24.0);
+            if (ImGui.SliderInt("Passed Days", ref days, 0, 30, "%d days")) 
+            {
+                // При смене дня оставляем текущее время (солнце останется на месте, а луна сдвинется)
+                float currentHour = GameSettings.TimeOfDay;
+                GameSettings.TotalTimeHours = (days * 24.0) + currentHour;
+            }
+
+            // 3. Скорость времени
+            float ts = GameSettings.TimeScale;
+            if (ImGui.SliderFloat("Time Scale", ref ts, 0.0f, 5000.0f, "%.0f (Multiplier)")) 
+                GameSettings.TimeScale = ts;
+            
+            // ДЕБАГ
             ImGui.Spacing();
             ImGui.Separator();
             ImGui.Text("Collision Debug Mode:");
-            // Радио-кнопки для режимов
             if (ImGui.RadioButton("None##Col", GameSettings.DebugCollisionMode == CollisionDebugMode.None)) 
                 GameSettings.DebugCollisionMode = CollisionDebugMode.None;
             ImGui.SameLine();
@@ -118,8 +152,7 @@ public class SettingsWindow : IUIWindow
             if (ImGui.RadioButton("All##Col", GameSettings.DebugCollisionMode == CollisionDebugMode.All)) 
                 GameSettings.DebugCollisionMode = CollisionDebugMode.All;
             
-            // --- LOD SECTION ---
-
+            // --- ЛОДЫ ---
             ImGui.Spacing();
             ImGui.Separator();
             ImGui.Text("Level of Detail (LOD)");

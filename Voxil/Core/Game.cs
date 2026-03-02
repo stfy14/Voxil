@@ -25,12 +25,17 @@ public class Game : GameWindow
     private float _debugUpdateTimer = 0f;
     private bool _isInitialized = false;
 
+    private Player _player;
+    
     private WindowManager _uiManager;
     private SettingsWindow _settingsWindow;
     private MainMenuWindow _mainMenuWindow;
     private DebugStatsWindow _debugStatsWindow;
     
     private int _reallocationDelayFrames = 0;
+    
+    public static List<DynamiteEntity> Entities = new List<DynamiteEntity>();
+    public static void RegisterEntity(DynamiteEntity e) => Entities.Add(e);
 
     public Game(GameWindowSettings gameWindowSettings, NativeWindowSettings nativeWindowSettings)
         : base(gameWindowSettings, nativeWindowSettings)
@@ -41,9 +46,6 @@ public class Game : GameWindow
     {
         base.OnLoad();
 
-        //var tester = new VoxelSystemTester();
-        //tester.RunStressTest();
-        
         GL.ClearColor(0.5f, 0.7f, 0.9f, 1.0f);
         GL.Enable(EnableCap.DepthTest);
         GL.Disable(EnableCap.CullFace);
@@ -53,10 +55,16 @@ public class Game : GameWindow
 
         var startPosition = new System.Numerics.Vector3(8, 100, 8);
         _camera = new Camera(VectorExtensions.ToOpenTK(startPosition), ClientSize.X / (float)ClientSize.Y);
-        _playerController = new PlayerController(_physicsWorld, _camera, startPosition);
-        _physicsWorld.SetPlayerHandle(_playerController.BodyHandle);
+        
+        // Создаем контроллер и менеджера мира
+        var playerController = new PlayerController(_physicsWorld, _camera, startPosition);
+        _physicsWorld.SetPlayerHandle(playerController.BodyHandle);
 
-        _worldManager = new WorldManager(_physicsWorld, _playerController);
+        _worldManager = new WorldManager(_physicsWorld, playerController);
+
+        // --- ИНИЦИАЛИЗАЦИЯ ИГРОКА ---
+        _player = new Player(playerController, _camera, _worldManager);
+        var invWindow = new InventoryWindow(_player);
 
         _renderer = new GpuRaycastingRenderer(_worldManager);
         _renderer.Load();
@@ -77,7 +85,6 @@ public class Game : GameWindow
 
         _renderer.UploadAllVisibleChunks();
 
-        // UI INIT
         _uiManager = new WindowManager(this);
         _settingsWindow = new SettingsWindow(_worldManager, _renderer);
         _mainMenuWindow = new MainMenuWindow(this, _settingsWindow);
@@ -86,12 +93,12 @@ public class Game : GameWindow
         _uiManager.AddWindow(_settingsWindow);
         _uiManager.AddWindow(_mainMenuWindow);
         _uiManager.AddWindow(_debugStatsWindow);
+        _uiManager.AddWindow(invWindow);
 
         CursorState = CursorState.Grabbed;
         _input.ResetMouseDelta();
 
         _isInitialized = true;
-        Console.WriteLine("[Game] Initialization Complete.");
     }
 
     protected override void OnUpdateFrame(FrameEventArgs e)
@@ -100,11 +107,14 @@ public class Game : GameWindow
         if (!_isInitialized) return;
 
         float deltaTime = (float)e.Time;
+        
+        if (GameSettings.EnableDynamicTime)
+        {
+            GameSettings.TotalTimeHours += (deltaTime * GameSettings.TimeScale) / 3600.0;
+        }
 
-        // 1. СНАЧАЛА UI (чтобы ImGui.NewFrame всегда вызывался)
         _uiManager.Update(this, deltaTime);
 
-        // 2. ЛОГИКА ПЕРЕЗАГРУЗКИ ПАМЯТИ
         if (_renderer.IsReallocationPending())
         {
             _reallocationDelayFrames++;
@@ -114,31 +124,15 @@ public class Game : GameWindow
                 _worldManager.ReloadWorld();
                 _renderer.ReloadShader();
                 _reallocationDelayFrames = 0;
-                Console.WriteLine("[Game] Reallocation completed.");
                 GC.Collect();
             }
-            else
-            {
-                return; // Ждем драйвер, пропускаем остальную логику
-            }
+            else return;
         }
 
-        // 3. Управление курсором
         bool isMenuOpen = _mainMenuWindow.IsVisible || _settingsWindow.IsVisible;
-        if (isMenuOpen)
-        {
-            if (CursorState != CursorState.Normal) CursorState = CursorState.Normal;
-        }
-        else
-        {
-            if (CursorState != CursorState.Grabbed)
-            {
-                CursorState = CursorState.Grabbed;
-                _input.ResetMouseDelta(); 
-            }
-        }
+        if (isMenuOpen) { if (CursorState != CursorState.Normal) CursorState = CursorState.Normal; }
+        else { if (CursorState != CursorState.Grabbed) { CursorState = CursorState.Grabbed; _input.ResetMouseDelta(); } }
 
-        // 4. Ввод
         _input.Update(KeyboardState, MouseState);
         if (_input.IsKeyPressed(Keys.Escape))
         {
@@ -146,23 +140,63 @@ public class Game : GameWindow
             else _mainMenuWindow.Toggle();
         }
 
-        // 5. Геймплей
         if (!isMenuOpen)
         {
-            if (_input.IsKeyPressed(Keys.F3))
-            {
-                PerformanceMonitor.IsEnabled = !PerformanceMonitor.IsEnabled;
-                _debugStatsWindow.Toggle();
-            }
-            if (_input.IsKeyPressed(Keys.F)) _playerController.ToggleFly();
+            if (_input.IsKeyPressed(Keys.F3)) { PerformanceMonitor.IsEnabled = !PerformanceMonitor.IsEnabled; _debugStatsWindow.Toggle(); }
+            if (_input.IsKeyPressed(Keys.F)) _player.Controller.ToggleFly();
 
             _testManager.Update(deltaTime, _input);
-            _playerController.Update(_input, deltaTime);
             
-            if (_input.IsMouseButtonPressed(MouseButton.Left)) ProcessBlockDestruction();
+            // АНИМАЦИЯ РУК И ВЬЮМОДЕЛИ
+            var viewModel = _player.GetViewModel();
+            if (viewModel != null)
+            {
+                // Получаем матрицу "Камера -> Мир" (обратная ViewMatrix)
+                Matrix4 cameraWorld = _camera.GetViewMatrix().Inverted();
+
+                // Позиция "Хвата" относительно камеры
+                // Немного пододвинем ближе и правее
+                Vector3 handOffset = new Vector3(0.5f, -0.4f, -0.7f); 
+
+                // Покачивание при ходьбе
+                if (_input.GetMovementInput().LengthSquared > 0.1f)
+                {
+                    // Используем TimeOfDay, чтобы анимация была плавной, а не дерганой
+                    float time = GameSettings.TimeOfDay * 20.0f; 
+                    handOffset.Y += (float)Math.Sin(time) * 0.02f;
+                    handOffset.X += (float)Math.Cos(time * 0.5f) * 0.015f;
+                }
+
+                // Трансформируем смещение в мировые координаты
+                Vector3 worldPos = Vector3.TransformPosition(handOffset, cameraWorld);
+
+                // Поворот предмета: берем поворот камеры и добавляем наклон
+                Quaternion itemTilt = Quaternion.FromEulerAngles(
+                    MathHelper.DegreesToRadians(5),   // Небольшой наклон вперед
+                    MathHelper.DegreesToRadians(-10), // Поворот к центру
+                    MathHelper.DegreesToRadians(5)    // Наклон вбок
+                );
+                Quaternion finalRot = _camera.Rotation * itemTilt;
+
+                viewModel.ForceSetTransform(worldPos, finalRot);
+                _renderer.SetViewModel(viewModel);
+            }
+            else
+            {
+                _renderer.SetViewModel(null);
+            }
+            
+            // --- ОБНОВЛЕНИЕ ИГРОКА ---
+            _player.Update(deltaTime, _input);
+            
+            // --- ОБНОВЛЕНИЕ ДИНАМИТА ---
+            for (int i = Entities.Count - 1; i >= 0; i--)
+            {
+                Entities[i].Update(deltaTime);
+                if (Entities[i].IsDead) Entities.RemoveAt(i);
+            }
         }
 
-        // 6. Обновление мира
         if (!_renderer.IsReallocationPending())
         {
             _worldManager.Update(deltaTime);
@@ -205,16 +239,60 @@ public class Game : GameWindow
         if (hit.Hit) _worldManager.DestroyVoxelAt(hit.Collidable, pos + dir * hit.T, hit.Normal);
     }
 
-    protected override void OnRenderFrame(FrameEventArgs e)
+        protected override void OnRenderFrame(FrameEventArgs e)
     {
         base.OnRenderFrame(e);
         if (!_isInitialized) return;
         _frameCount++; 
         GL.Clear(ClearBufferMask.ColorBufferBit | ClearBufferMask.DepthBufferBit);
+        
+        // АНИМАЦИЯ РУК
+        var viewModel = _player.GetViewModel();
+        if (viewModel != null)
+        {
+            // Настройки позиции "Хвата" относительно камеры
+            // X: +Вправо
+            // Y: +Вверх (относительно взгляда)
+            // Z: +Назад (к игроку), -Вперед (от игрока)
+            
+            // Ставим руку справа снизу и чуть вперед
+            Vector3 handOffset = new Vector3(0.4f, -0.5f, -0.8f);
+
+            // Покачивание при ходьбе (Bobbing)
+            if (_input.IsKeyDown(Keys.W) || _input.IsKeyDown(Keys.A) || _input.IsKeyDown(Keys.S) || _input.IsKeyDown(Keys.D))
+            {
+                float time = (float)GameSettings.TotalTimeHours * 6000.0f; 
+                handOffset.Y += (float)Math.Sin(time) * 0.015f; // Вверх-вниз
+                handOffset.X += (float)Math.Cos(time * 0.5f) * 0.01f; // Влево-вправо
+            }
+
+            // 1. Позиция: Берем позицию камеры и прибавляем смещение, повернутое вместе с камерой
+            // Это "приклеивает" точку хвата к камере
+            Vector3 worldPos = _camera.Position + Vector3.Transform(handOffset, _camera.Rotation);
+
+            // 2. Поворот: Берем поворот камеры и доворачиваем сам предмет
+            // Наклоним динамит чуть вперед (X) и влево (Y), чтобы было видно верхушку
+            Quaternion itemTilt = Quaternion.FromEulerAngles(
+                MathHelper.DegreesToRadians(10),  // Наклон вперед
+                MathHelper.DegreesToRadians(-15), // Поворот влево (к центру экрана)
+                MathHelper.DegreesToRadians(10)   // Чуть наклон вбок
+            );
+            
+            Quaternion finalRot = _camera.Rotation * itemTilt;
+
+            // 3. Применяем
+            viewModel.ForceSetTransform(worldPos, finalRot);
+            _renderer.SetViewModel(viewModel);
+        }
+        else
+        {
+            _renderer.SetViewModel(null);
+        }
+
         _renderer.Render(_camera);
-        // Рисуем дебаг коллизий (поверх всего)
+        
         _physicsDebugger.Draw(_physicsWorld, _lineRenderer, _camera);
-        _lineRenderer.Render(_camera); // Фактическая отправка линий на GPU
+        _lineRenderer.Render(_camera); 
         if (!_mainMenuWindow.IsVisible && !_settingsWindow.IsVisible) _crosshair.Render();
         _uiManager.Render();
         SwapBuffers();

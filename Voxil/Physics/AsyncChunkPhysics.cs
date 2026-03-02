@@ -89,7 +89,9 @@ public class AsyncChunkPhysics : IDisposable
 
             long start = Stopwatch.GetTimestamp();
             
-            int count = VoxelPhysicsBuilder.GenerateColliders(matArray, _visitedBuffer, _scratchColliders);
+            int count = VoxelPhysicsBuilder.GenerateColliders(matArray, _visitedBuffer, _scratchColliders, 
+                Constants.ChunkResolution, Constants.ChunkResolution, Constants.ChunkResolution, 
+                1.0f);
             
             PhysicsBuildResultData finalData = new PhysicsBuildResultData();
             if (count > 0)

@@ -72,7 +72,11 @@ public class PlayerController
         var mouseDelta = input.GetMouseDelta();
         _camera.Rotate(mouseDelta.X, mouseDelta.Y);
 
-        // Хоткей F перенесен в Game.cs, здесь только логика движения
+        if (!_physicsWorld.Simulation.Bodies.BodyExists(BodyHandle))
+        {
+            // Если тело игрока исчезло (взрыв, баг физики), не пытаемся им управлять
+            return; 
+        }
         
         var bodyReference = _physicsWorld.Simulation.Bodies.GetBodyReference(BodyHandle);
         var settings = _playerState.Settings;
