@@ -7,14 +7,14 @@ layout(std430, binding = 7) buffer DynSVOBuffer { uvec4 svoNodes[]; };
 #define BLOCK_SIZE 4
 #define BLOCKS_PER_AXIS (VOXEL_RESOLUTION / BLOCK_SIZE) 
 #define VOXELS_IN_UINT 4
-#define SVO_STACK_SIZE 64
+#define SVO_STACK_SIZE 16
 
 uint GetVoxelData(uint chunkSlot, int voxelIdx) {
     uint bank = chunkSlot / uint(CHUNKS_PER_BANK);
     uint localSlot = chunkSlot % uint(CHUNKS_PER_BANK);
     uint chunkSizeUint = (uint(VOXEL_RESOLUTION)*uint(VOXEL_RESOLUTION)*uint(VOXEL_RESOLUTION)) / uint(VOXELS_IN_UINT);
     uint offset = localSlot * chunkSizeUint + (uint(voxelIdx) >> 2u);
-    
+
     // Теперь эта функция точно будет найдена
     uint rawVal = GetVoxelFromBank(bank, offset);
 
@@ -32,9 +32,6 @@ vec2 IntersectAABB(vec3 ro, vec3 invRd, vec3 boxMin, vec3 boxMax) {
     return vec2(tNear, tFar);
 }
 
-// Трассирует луч через SVO одного динамического объекта.
-// localRo/localRd — луч в ЛОКАЛЬНЫХ координатах объекта.
-// Возвращает material ID (0 = промах).
 uint TraceSVO(
     vec3  localRo,
     vec3  localRd,
@@ -46,45 +43,56 @@ out   vec3  outNormal)
 {
     outNormal = vec3(0.0);
 
+    if (gridSize == 0u || voxelSize == 0.0) return 0u;
+
     float objSize = float(gridSize) * voxelSize;
     vec3  invRd   = 1.0 / localRd;
 
-    // Быстрая проверка корневого AABB
     vec2 tRoot = IntersectAABB(localRo, invRd, vec3(0.0), vec3(objSize));
-    if (tRoot.x > tRoot.y || tRoot.y < 0.0 || tRoot.x >= tHit)
-    return 0u;
+    if (tRoot.x > tRoot.y || tRoot.y < 0.0 || tRoot.x >= tHit) return 0u;
 
-    // Стек обхода
-    uint  stkNode[SVO_STACK_SIZE];
-    vec3  stkMin [SVO_STACK_SIZE];
-    float stkSize[SVO_STACK_SIZE];
-    int   top = 0;
+    uint stkNode  [SVO_STACK_SIZE];
+    uint stkPacked[SVO_STACK_SIZE];
+    int  top = 0;
 
-    stkNode[0] = svoOffset;
-    stkMin [0] = vec3(0.0);
-    stkSize[0] = objSize;
+    stkNode  [0] = svoOffset;
+    stkPacked[0] = 0u;
 
     float bestT   = tHit;
     uint  bestMat = 0u;
     vec3  bestN   = vec3(0.0);
 
+    // Объявляем ДО цикла:
+    uint nx, ny, nz, depth;
+    uint halfVoxels;
+    float nSize, halfSize;
+    uint nextDepth;
+
     while (top >= 0)
     {
-        uint  nIdx  = stkNode[top];
-        vec3  nMin  = stkMin [top];
-        float nSize = stkSize[top];
+        uint nodeIdx = stkNode[top];
+        // ИСПРАВЛЕНИЕ: Переименовано packed -> packedData
+        uint packedData = stkPacked[top];
         top--;
 
-        vec3 nMax = nMin + nSize;
+        // Теперь только присваивание, без объявления:
+        nx    =  packedData         & 0xFFu;
+        ny    = (packedData >>  8u) & 0xFFu;
+        nz    = (packedData >> 16u) & 0xFFu;
+        depth = (packedData >> 24u) & 0x0Fu;
+
+        nSize = float(gridSize >> depth) * voxelSize;
+        vec3  nMin  = vec3(float(nx), float(ny), float(nz)) * voxelSize;
+        vec3  nMax  = nMin + nSize;
+
         vec2 tBox = IntersectAABB(localRo, invRd, nMin, nMax);
         if (tBox.x > tBox.y || tBox.y < 0.0 || tBox.x >= bestT) continue;
 
-        uvec4 node        = svoNodes[nIdx];
+        uvec4 node        = svoNodes[nodeIdx];
         uint  childMask   = node.x;
         uint  childOffset = node.y;
         uint  material    = node.z;
 
-        // Лист
         if (childMask == 0u)
         {
             if (material != 0u)
@@ -95,74 +103,43 @@ out   vec3  outNormal)
                     bestT   = t;
                     bestMat = material;
 
-                    // Определяем входящую грань по максимальному компоненту tNears
-                    vec3 tNears = min(
-                        (nMin - localRo) * invRd,
-                        (nMax - localRo) * invRd);
+                    vec3 tNears = min((nMin - localRo) * invRd,
+                                      (nMax - localRo) * invRd);
                     float eps = 1e-4 * (1.0 + abs(tBox.x));
                     if      (abs(tNears.x - tBox.x) < eps) bestN = vec3(-sign(localRd.x), 0.0, 0.0);
                     else if (abs(tNears.y - tBox.x) < eps) bestN = vec3(0.0, -sign(localRd.y), 0.0);
-                    else                                    bestN = vec3(0.0, 0.0, -sign(localRd.z));
+                    else                                   bestN = vec3(0.0, 0.0, -sign(localRd.z));
                 }
             }
             continue;
         }
 
-        // Внутренний узел: пушим детей, отсортированных по tNear
-        float halfSize = nSize * 0.5;
+        halfVoxels = gridSize >> (depth + 1u);
+        halfSize   = nSize * 0.5;
+        nextDepth  = depth + 1u;
 
-        // Insertion sort по tNear для 8 детей (дёшево для малых n)
-        int   sortedOct[8];
-        float sortedT  [8];
-        int   sortCount = 0;
-
-        for (int i = 0; i < 8; i++)
+        for (int i = 7; i >= 0; i--)
         {
             if ((childMask & (1u << i)) == 0u) continue;
+            if (top + 1 >= SVO_STACK_SIZE) break;
 
-            vec3 cMin = nMin + vec3(
-            float((i & 1) != 0) * halfSize,
-            float((i & 2) != 0) * halfSize,
-            float((i & 4) != 0) * halfSize);
+            uint cNx = nx + ((uint(i) & 1u) != 0u ? halfVoxels : 0u);
+            uint cNy = ny + ((uint(i) & 2u) != 0u ? halfVoxels : 0u);
+            uint cNz = nz + ((uint(i) & 4u) != 0u ? halfVoxels : 0u);
 
-            vec2 ct = IntersectAABB(localRo, invRd, cMin, cMin + halfSize);
+            vec3 cMin = vec3(float(cNx), float(cNy), float(cNz)) * voxelSize;
+            vec2 ct   = IntersectAABB(localRo, invRd, cMin, cMin + halfSize);
             if (ct.x > ct.y || ct.y < 0.0 || ct.x >= bestT) continue;
 
-            int pos = sortCount;
-            while (pos > 0 && sortedT[pos - 1] > ct.x)
-            {
-                if (pos < 8) { sortedT[pos] = sortedT[pos-1]; sortedOct[pos] = sortedOct[pos-1]; }
-                pos--;
-            }
-            sortedT  [pos] = ct.x;
-            sortedOct[pos] = i;
-            sortCount++;
-        }
+            uint localIdx = uint(bitCount(childMask & ((1u << uint(i)) - 1u)));
 
-        // Пушим в обратном порядке: дальние первыми → ближние на вершине стека
-        for (int i = sortCount - 1; i >= 0; i--)
-        {
-            if (top + 1 >= SVO_STACK_SIZE) break;
             top++;
-
-            int  oct      = sortedOct[i];
-            // Позиция ребёнка через popcount: childOffset + кол-во битов до oct в childMask
-            uint localIdx = bitCount(childMask & ((1u << uint(oct)) - 1u));
-
-            stkNode[top] = childOffset + localIdx;
-            stkMin [top] = nMin + vec3(
-            float((oct & 1) != 0) * halfSize,
-            float((oct & 2) != 0) * halfSize,
-            float((oct & 4) != 0) * halfSize);
-            stkSize[top] = halfSize;
+            stkNode  [top] = childOffset + localIdx;
+            stkPacked[top] = cNx | (cNy << 8u) | (cNz << 16u) | (nextDepth << 24u);
         }
     }
 
-    if (bestMat != 0u)
-    {
-        tHit      = bestT;
-        outNormal = bestN;
-    }
+    if (bestMat != 0u) { tHit = bestT; outNormal = bestN; }
     return bestMat;
 }
 
@@ -196,7 +173,8 @@ bool TraceDynamicRay(vec3 ro, vec3 rd, float maxDist, inout float tHit, inout in
             int bufferIdx = nodeIndex - 1;
             uint objID = listNodes[bufferIdx].objectID;
             nodeIndex = listNodes[bufferIdx].nextNode;
-            if (objID > 0) {
+
+            if (objID > 0u) {
                 DynamicObject obj = dynObjects[int(objID) - 1];
                 vec3 localRo = (obj.invModel * vec4(ro, 1.0)).xyz;
                 vec3 localRd = (obj.invModel * vec4(rd, 0.0)).xyz;
@@ -204,9 +182,8 @@ bool TraceDynamicRay(vec3 ro, vec3 rd, float maxDist, inout float tHit, inout in
                 vec2 tBox = IntersectAABB(localRo, lInvRd, obj.boxMin.xyz, obj.boxMax.xyz);
                 if (tBox.x < tBox.y && tBox.y > 0.0 && tBox.x < tHit)
                 {
-                    // Верхняя граница поиска = текущий лучший хит (не точка входа в AABB!)
-                    // tHit и localT — в одних единицах (t-параметр, не метры),
-                    // потому что invModel сохраняет параметрическое t.
+                    if (obj.gridSize == 0u || obj.voxelSize == 0.0) continue;
+
                     float svoT = tHit;
                     vec3  svoNormal;
                     uint  hitMat = TraceSVO(
@@ -214,15 +191,15 @@ bool TraceDynamicRay(vec3 ro, vec3 rd, float maxDist, inout float tHit, inout in
                         obj.svoOffset,
                         obj.gridSize,
                         obj.voxelSize,
-                        svoT,       // inout: на входе = лучший хит, на выходе = t найденного вокселя
+                        svoT,
                         svoNormal);
 
-                    if (hitMat != 0u) // TraceSVO уже гарантирует svoT < исходного tHit
+                    if (hitMat != 0u)
                     {
-                        tHit          = svoT;
-                        outObjID      = int(objID) - 1;
+                        tHit           = svoT;
+                        outObjID       = int(objID) - 1;
                         outLocalNormal = normalize((transpose(obj.invModel) * vec4(svoNormal, 0.0)).xyz);
-                        hitAny        = true;
+                        hitAny         = true;
                     }
                 }
             }
@@ -260,6 +237,8 @@ bool TraceStaticRay(vec3 ro, vec3 rd, float maxDist, float tStart, inout float t
     if (tMin > tCurrent) {
         tCurrent = tMin + 0.001;
     }
+
+    float tDdaStart = tCurrent;
 
     vec3 rayOrigin = ro + rd * tCurrent;
     vec3 clampMin = worldMin + 0.001;
@@ -342,7 +321,7 @@ bool TraceStaticRay(vec3 ro, vec3 rd, float maxDist, float tStart, inout float t
                     if (any(lessThan(blockPos, ivec3(0))) || any(greaterThanEqual(blockPos, ivec3(BLOCKS_PER_AXIS)))) break;
 
                     int blockIdx = blockPos.x + BLOCKS_PER_AXIS * (blockPos.y + BLOCKS_PER_AXIS * blockPos.z);
-                    uvec2 maskVal = packedMasks[maskBaseOffset + blockIdx];
+                    uvec2 maskVal = packedMasks[maskBaseOffset + uint(blockIdx)];
 
                     if (maskVal.x != 0u || maskVal.y != 0u) {
                         ivec3 blockOrigin = blockPos * BLOCK_SIZE;
@@ -435,7 +414,7 @@ bool TraceStaticRay(vec3 ro, vec3 rd, float maxDist, float tStart, inout float t
 
                     ivec3 bMapPos = vMapPos / BLOCK_SIZE;
                     int blockIdx = bMapPos.x + BLOCKS_PER_AXIS * (bMapPos.y + BLOCKS_PER_AXIS * bMapPos.z);
-                    uvec2 maskVal = packedMasks[maskBaseOffset + blockIdx];
+                    uvec2 maskVal = packedMasks[maskBaseOffset + uint(blockIdx)];
 
                     if (maskVal.x == 0u && maskVal.y == 0u) {
                         for(int s=0; s<64; s++) {
@@ -476,7 +455,8 @@ bool TraceStaticRay(vec3 ro, vec3 rd, float maxDist, float tStart, inout float t
         cMask = (cSideDist.x < cSideDist.y) ? ((cSideDist.x < cSideDist.z) ? vec3(1,0,0) : vec3(0,0,1)) : ((cSideDist.y < cSideDist.z) ? vec3(0,1,0) : vec3(0,0,1));
         cSideDist += cMask * cDeltaDist;
         cMapPos += ivec3(cMask) * cStepDir;
-        tCurrent = tStart + dot(cMask, cSideDist - cDeltaDist);
+
+        tCurrent = tDdaStart + dot(cMask, cSideDist - cDeltaDist);
     }
     return false;
 }
@@ -561,7 +541,7 @@ bool TraceShadowRay(vec3 ro, vec3 rd, float maxDist, inout float tHit, inout uin
                 if (((vMapPos.x | vMapPos.y | vMapPos.z) & ~BIT_MASK) != 0) break;
                 ivec3 bMapPos = vMapPos / BLOCK_SIZE;
                 int blockIdx = bMapPos.x + BLOCKS_PER_AXIS * (bMapPos.y + BLOCKS_PER_AXIS * bMapPos.z);
-                uvec2 maskVal = packedMasks[maskBaseOffset + blockIdx];
+                uvec2 maskVal = packedMasks[maskBaseOffset + uint(blockIdx)];
 
                 if (maskVal.x == 0u && maskVal.y == 0u) {
                     for(int s=0; s<64; s++) {

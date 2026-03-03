@@ -494,7 +494,6 @@ public class GpuRaycastingRenderer : IDisposable
         // =========================================================
         // 4. ОБНОВЛЯЕМ ДИНАМИЧЕСКИЕ ОБЪЕКТЫ И СЕТКУ (TEARDOWN PHYSICS)
         // =========================================================
-        UpdateDynamicObjectsAndGrid();
         var allForSvo = _worldManager.GetAllVoxelObjects();
         if (_currentViewModel != null)
         {
@@ -505,6 +504,7 @@ public class GpuRaycastingRenderer : IDisposable
         {
             _svoManager.Update(allForSvo);
         }
+        UpdateDynamicObjectsAndGrid();
     }
 
     public void UnloadChunk(Vector3i pos) 

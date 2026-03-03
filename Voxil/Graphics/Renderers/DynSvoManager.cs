@@ -1,16 +1,10 @@
 // --- DynSvoManager.cs ---
 // Управляет единым GPU-пулом SVO-данных для всех динамических VoxelObject.
 //
-// Архитектура:
-//   - Один SSBO (binding = 7) — пул из MAX_POOL_NODES узлов (32 MB)
-//   - При изменении объекта (SvoDirty=true): запускается Task.Run → async rebuild
-//   - Когда Task завершён: данные загружаются на GPU через BufferSubData
-//   - Пока Task работает: GPU продолжает рендерить старый SVO (лаг 1 кадр)
-//   - При нехватке пула: полная перепаковка (compaction) всех активных объектов
-//
-// Обновление позиций в GpuDynamicObject:
-//   FillGpuObject в GpuRaycastingRenderer читает obj.SvoGpuOffset каждый кадр,
-//   поэтому смена оффсета во время compaction подхватывается автоматически.
+// Оптимизации:
+//   - Синхронный билд для малых объектов (≤256 вокселей) — результат в том же кадре
+//   - HashSet для O(1) проверки мёртвых слотов вместо O(n) List.Contains
+//   - Async билд для больших объектов — не блокирует главный тред
 
 using OpenTK.Graphics.OpenGL4;
 using OpenTK.Mathematics;
@@ -27,13 +21,16 @@ public sealed class DynSvoManager : IDisposable
     public const int BindingSlot = 7;
 
     // 32 MB = 2 000 000 узлов × 16 байт
-    // Типичный игровой объект 64³ при 20% заполнении: ~30 000 узлов ≈ 480 KB
-    // → пул вмещает ~65 таких объектов одновременно
     private const int  MAX_POOL_NODES  = 2_000_000;
-    private const int  NODE_SIZE_BYTES = 16; // uvec4
+    private const int  NODE_SIZE_BYTES = 16;
+
+    // Объекты с количеством вокселей <= порога строятся синхронно (без Task.Run),
+    // чтобы SVO был готов в том же кадре где был создан объект.
+    // TNT = 13 вокселей — попадает сюда.
+    private const int  SYNC_BUILD_THRESHOLD = 256;
 
     // -------------------------------------------------------------------------
-    // Состояние
+    // GPU буфер
     // -------------------------------------------------------------------------
 
     private int  _ssbo;
@@ -42,19 +39,24 @@ public sealed class DynSvoManager : IDisposable
     // Курсор последовательного аллокатора (в узлах, не байтах)
     private uint _cursor;
 
-    // Информация об одном объекте в пуле
+    // -------------------------------------------------------------------------
+    // Слот одного объекта
+    // -------------------------------------------------------------------------
+
     private sealed class Slot
     {
-        public uint     GpuOffset;    // смещение в пуле (в узлах)
-        public uint[]?  CurrentData;  // последние загруженные данные
-        public Task<uint[]>? RebuildTask; // работающий async rebuild, null = простой
-        // Если объект стал dirty пока задача уже работала — запустим ещё раз после
-        public bool     PendingRebuild;
+        public uint          GpuOffset;
+        public uint[]?       CurrentData;
+        public Task<uint[]>? RebuildTask;
+        public bool          PendingRebuild;
     }
 
-    // Используем ReferenceEquality — объекты идентифицируются по ссылке, не по значению
     private readonly Dictionary<VoxelObject, Slot> _slots =
         new(ReferenceEqualityComparer.Instance);
+
+    // Синхронные апгрейды текущего кадра
+    // Заполняется в StartRebuild, обрабатывается в Update после foreach
+    private readonly List<(VoxelObject obj, Slot slot)> _pendingSyncUploads = new();
 
     // -------------------------------------------------------------------------
     // Инициализация / Dispose
@@ -76,18 +78,21 @@ public sealed class DynSvoManager : IDisposable
         GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, BindingSlot, _ssbo);
 
     // -------------------------------------------------------------------------
-    // Обновление — вызывать каждый кадр из GpuRaycastingRenderer.Update()
+    // Update — вызывать каждый кадр ДО UpdateDynamicObjectsAndGrid(),
+    // чтобы FillGpuObject читал уже актуальные SvoGpuOffset
     // -------------------------------------------------------------------------
 
     public void Update(List<VoxelObject> objects)
     {
-        // --- Фаза 1: Запустить/завершить async задачи ---
+        // Сбрасываем список синхронных апгрейдов с прошлого вызова
+        _pendingSyncUploads.Clear();
 
+        // ── Фаза 1: Запустить/завершить задачи ──────────────────────────────
         foreach (var obj in objects)
         {
             if (!_slots.TryGetValue(obj, out var slot))
             {
-                // Новый объект — создаём слот и сразу помечаем для сборки
+                // Новый объект
                 slot = new Slot();
                 _slots[obj] = slot;
                 obj.SvoDirty = true;
@@ -95,7 +100,8 @@ public sealed class DynSvoManager : IDisposable
 
             if (obj.SvoDirty && slot.RebuildTask == null)
             {
-                obj.SvoDirty = false;
+                // Нет активной задачи — запускаем сразу
+                obj.SvoDirty        = false;
                 slot.PendingRebuild = false;
                 StartRebuild(obj, slot);
             }
@@ -103,15 +109,15 @@ public sealed class DynSvoManager : IDisposable
             {
                 // Задача уже работает — запомним что нужна ещё одна пересборка
                 slot.PendingRebuild = true;
-                obj.SvoDirty = false;
+                obj.SvoDirty        = false;
             }
 
-            // Задача завершена — забираем результат
+            // Async задача завершена — забираем результат
             if (slot.RebuildTask != null && slot.RebuildTask.IsCompleted)
             {
                 if (slot.RebuildTask.IsFaulted)
                 {
-                    Console.WriteLine($"[DynSvoManager] Rebuild error for object: " +
+                    Console.WriteLine($"[DynSvoManager] Rebuild error: " +
                                       $"{slot.RebuildTask.Exception?.GetBaseException().Message}");
                 }
                 else
@@ -122,7 +128,7 @@ public sealed class DynSvoManager : IDisposable
 
                 slot.RebuildTask = null;
 
-                // Если за время работы задачи объект снова изменился — перезапускаем
+                // Объект изменился пока задача работала — перезапускаем
                 if (slot.PendingRebuild)
                 {
                     slot.PendingRebuild = false;
@@ -131,16 +137,27 @@ public sealed class DynSvoManager : IDisposable
             }
         }
 
-        // --- Фаза 2: Удалить слоты мёртвых объектов ---
-        // Собираем ключи для удаления (нельзя изменять словарь в foreach)
+        // ── Фаза 2: Загрузить синхронные апгрейды ───────────────────────────
+        // Данные уже готовы (построены синхронно в StartRebuild),
+        // здесь только отправляем на GPU
+        foreach (var (obj, slot) in _pendingSyncUploads)
+        {
+            UploadSlot(obj, slot, objects);
+        }
+
+        // ── Фаза 3: Удалить слоты мёртвых объектов ──────────────────────────
+        // HashSet даёт O(1) Contains вместо O(n) у List → нет O(n²) при 1000 объектах
+        var objectSet = new HashSet<VoxelObject>(objects, ReferenceEqualityComparer.Instance);
+
         List<VoxelObject>? toRemove = null;
         foreach (var key in _slots.Keys)
         {
-            if (!objects.Contains(key))
+            if (!objectSet.Contains(key))
                 (toRemove ??= new List<VoxelObject>()).Add(key);
         }
         if (toRemove != null)
-            foreach (var dead in toRemove) _slots.Remove(dead);
+            foreach (var dead in toRemove)
+                _slots.Remove(dead);
     }
 
     // -------------------------------------------------------------------------
@@ -149,21 +166,41 @@ public sealed class DynSvoManager : IDisposable
 
     private void StartRebuild(VoxelObject obj, Slot slot)
     {
-        // Снимаем snapshot на главном треде — Task.Run не должен трогать VoxelObject
-        var coords      = obj.VoxelCoordinates.ToArray(); // иммутабельная копия
-        var matDict     = new Dictionary<Vector3i, uint>(obj.VoxelMaterials); // копия
+        // Снимаем snapshot на главном треде — фоновый Task не должен трогать VoxelObject
+        var  coords     = obj.VoxelCoordinates.ToArray();
+        var  matDict    = new Dictionary<Vector3i, uint>(obj.VoxelMaterials);
         uint defaultMat = (uint)obj.Material;
-        int gridSize    = ComputeGridSize(obj);
+        int  gridSize   = ComputeGridSize(obj);
 
-        // Сохраняем в объект чтобы GpuDynamicObject мог читать правильный gridSize
         obj.SvoGridSize       = gridSize;
-        obj.SvoVoxelWorldSize = Constants.VoxelSize;
+        obj.SvoVoxelWorldSize = Constants.VoxelSize; // Scale НЕ включаем — invModel его уберёт
 
-        slot.RebuildTask = Task.Run(() =>
-            SVOBuilder.Build(
+        if (coords.Length <= SYNC_BUILD_THRESHOLD)
+        {
+            // ── Синхронный путь ──────────────────────────────────────────────
+            // SVO готов прямо сейчас, без лага в 1 кадр
+            // Выгоден для малых объектов: Task overhead (~0.3ms) > сам билд (~0.01ms)
+            slot.CurrentData = SVOBuilder.Build(
                 coords,
                 pos => matDict.TryGetValue(pos, out var m) ? m : defaultMat,
-                gridSize));
+                gridSize);
+
+            slot.RebuildTask = null;
+
+            // Нельзя вызвать UploadSlot здесь — мы внутри foreach по _slots.
+            // Откладываем на фазу 2 в Update()
+            _pendingSyncUploads.Add((obj, slot));
+        }
+        else
+        {
+            // ── Async путь ───────────────────────────────────────────────────
+            // Для больших объектов — не блокируем главный тред
+            slot.RebuildTask = Task.Run(() =>
+                SVOBuilder.Build(
+                    coords,
+                    pos => matDict.TryGetValue(pos, out var m) ? m : defaultMat,
+                    gridSize));
+        }
     }
 
     private void UploadSlot(VoxelObject obj, Slot slot, List<VoxelObject> allObjects)
@@ -172,12 +209,9 @@ public sealed class DynSvoManager : IDisposable
 
         uint nodeCount = (uint)(slot.CurrentData.Length / 4);
 
-        // Пытаемся выделить место в пуле
+        // Пул переполнен — перепаковываем
         if (_cursor + nodeCount > MAX_POOL_NODES)
-        {
-            // Пул переполнен — перепаковываем все активные объекты
             Compact(allObjects);
-        }
 
         slot.GpuOffset   = _cursor;
         obj.SvoGpuOffset = _cursor;
@@ -192,8 +226,8 @@ public sealed class DynSvoManager : IDisposable
     }
 
     /// <summary>
-    /// Сбрасывает курсор и перепаковывает все активные объекты в начало пула.
-    /// Вызывается только при переполнении — нечасто.
+    /// Перепаковывает все активные объекты в начало пула.
+    /// Вызывается только при переполнении.
     /// </summary>
     private void Compact(List<VoxelObject> objects)
     {
@@ -207,8 +241,7 @@ public sealed class DynSvoManager : IDisposable
             if (!_slots.TryGetValue(obj, out var slot)) continue;
             if (slot.CurrentData == null) continue;
 
-            uint nodeCount = (uint)(slot.CurrentData.Length / 4);
-
+            uint nodeCount   = (uint)(slot.CurrentData.Length / 4);
             slot.GpuOffset   = _cursor;
             obj.SvoGpuOffset = _cursor;
 
@@ -221,12 +254,12 @@ public sealed class DynSvoManager : IDisposable
             _cursor += nodeCount;
         }
 
-        Console.WriteLine($"[DynSvoManager] After compaction: {_cursor}/{MAX_POOL_NODES} nodes used.");
+        Console.WriteLine($"[DynSvoManager] After compaction: {_cursor}/{MAX_POOL_NODES} nodes.");
     }
 
     /// <summary>
-    /// Вычисляет размер сетки SVO для объекта (ближайшая степень двойки >= max координата).
-    /// После RebuildMeshAndPhysics координаты нормализованы к [0, maxCoord].
+    /// Ближайшая степень двойки >= максимальной координате объекта.
+    /// После нормализации координат в VoxelObject они начинаются с 0.
     /// </summary>
     public static int ComputeGridSize(VoxelObject obj)
     {
