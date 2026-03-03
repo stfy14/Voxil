@@ -136,7 +136,8 @@ inout int   steps)
             uint localIdx = uint(bitCount(childMask & ((1u << uint(i)) - 1u)));
 
             top++;
-            stkNode  [top] = childOffset + localIdx;
+            // Добавляем svoOffset, чтобы перейти от локального индекса к глобальному
+            stkNode[top] = svoOffset + childOffset + localIdx;
             stkPacked[top] = cNx | (cNy << 8u) | (cNz << 16u) | (nextDepth << 24u);
         }
     }
