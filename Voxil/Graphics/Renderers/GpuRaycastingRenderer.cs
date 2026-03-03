@@ -668,8 +668,6 @@ public class GpuRaycastingRenderer : IDisposable
     // Вспомогательный метод для заполнения структуры
     private void FillGpuObject(ref GpuDynamicObject gpuObj, VoxelObject vo, float alpha, bool isViewModel)
     {
-        Console.WriteLine($"[FillGpu] obj={vo.GetHashCode()} isViewModel={isViewModel} | " +
-                          $"SvoOffset={vo.SvoGpuOffset} GridSize={vo.SvoGridSize} VoxelSize={vo.SvoVoxelWorldSize}");
         Matrix4 model;
         if (isViewModel)
         {

@@ -114,21 +114,6 @@ public class Game : GameWindow
         _isInitialized = true;
         
         CursorState = CursorState.Grabbed;
-
-        unsafe
-        {
-            var winPtr = this.WindowPtr;
-            if (GLFW.RawMouseMotionSupported())
-            {
-                GLFW.SetInputMode(winPtr, (CursorStateAttribute)0x00033005, (CursorModeValue)1);
-                var status = GLFW.GetInputMode(winPtr, (CursorStateAttribute)0x00033005);
-                Console.WriteLine($"[Input] Raw Mouse Motion Request: ON. Result Status: {status} (1 = Success)");
-            }
-            else
-            {
-                Console.WriteLine("[Input] Raw Mouse Motion NOT supported by your driver!");
-            }
-        }
     }
 
     protected override void OnMouseMove(MouseMoveEventArgs e)
@@ -308,5 +293,25 @@ public class Game : GameWindow
         
         _uiManager.Render();
         SwapBuffers();
+    }
+    
+    protected override void OnResize(ResizeEventArgs e)
+    {
+        base.OnResize(e);
+
+        // Если компоненты еще не загружены, выходим, чтобы избежать NullReferenceException
+        if (!_isInitialized) return;
+
+        // 1. Обновляем FBO и текстуры в рендерере
+        _renderer.OnResize(e.Width, e.Height);
+
+        // 2. Обновляем соотношение сторон камеры (чтобы картинка не растягивалась)
+        _camera.UpdateAspectRatio((float)e.Width / e.Height);
+
+        // 3. Обновляем размеры для ImGui интерфейса
+        _uiManager.Resize(e.Width, e.Height);
+
+        // 4. Обновляем прицел, чтобы он оставался точно по центру
+        _crosshair.UpdateSize(e.Width, e.Height);
     }
 }

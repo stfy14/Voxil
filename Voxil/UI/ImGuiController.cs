@@ -158,7 +158,7 @@ public class ImGuiController : IDisposable
         }
     }
 
-    private unsafe void RenderImDrawData(ImDrawDataPtr draw_data)
+    private void RenderImDrawData(ImDrawDataPtr draw_data)
     {
         if (draw_data.CmdListsCount == 0) return;
 
@@ -184,7 +184,7 @@ public class ImGuiController : IDisposable
 
         for (int i = 0; i < draw_data.CmdListsCount; i++)
         {
-            ImDrawListPtr cmd_list = new ImDrawListPtr(((IntPtr*)draw_data.CmdLists.Data)[i]);
+            ImDrawListPtr cmd_list = draw_data.CmdLists[i];
 
             int vertexSize = cmd_list.VtxBuffer.Size * Unsafe.SizeOf<ImDrawVert>();
             if (vertexSize > _vertexBufferSize)

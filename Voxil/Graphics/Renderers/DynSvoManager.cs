@@ -173,15 +173,6 @@ public void Update(List<VoxelObject> objects, VoxelObject viewModel)
         obj.SvoGridSize       = 0;
         obj.SvoVoxelWorldSize = 0.0f;
 
-        // === ДИАГНОСТИКА ===
-        Console.WriteLine($"[StartRebuild] obj={obj.GetHashCode()} voxels={coords.Length} gridSize={gridSize} defaultMat={defaultMat}");
-        foreach (var c in coords.Take(5))
-        {
-            matDict.TryGetValue(c, out uint m);
-            Console.WriteLine($"  {c} -> mat={( m != 0 ? m : defaultMat)}");
-        }
-        // ==================
-
         Func<Vector3i, uint> getMaterial = pos =>
             matDict.TryGetValue(pos, out var m) ? m : defaultMat;
 
@@ -210,17 +201,6 @@ public void Update(List<VoxelObject> objects, VoxelObject viewModel)
 
         slot.GpuOffset   = _cursor;
         obj.SvoGpuOffset = _cursor;
-
-        // === ДИАГНОСТИКА ===
-        Console.WriteLine($"[UploadSlot] obj={obj.GetHashCode()} gpuOffset={_cursor} nodeCount={nodeCount}");
-        for (int i = 0; i < Math.Min((int)nodeCount, 8); i++)
-        {
-            uint childMask = slot.CurrentData[i * 4 + 0];
-            uint material  = slot.CurrentData[i * 4 + 2];
-            if (material != 0 || childMask != 0)
-                Console.WriteLine($"  node[{i}]: childMask={childMask} mat={material}");
-        }
-        // ==================
 
         _cursor += nodeCount;
 
