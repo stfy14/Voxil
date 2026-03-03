@@ -1,0 +1,16 @@
+﻿#version 450 core
+// Размер рабочей группы 8x8x8 = 512 потоков
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 8) in;
+
+// Наша текстура сетки (Binding 1, как в grid_update)
+layout(binding = 1, r32i) uniform iimage3D uObjectGridHead;
+
+void main() {
+    ivec3 pos = ivec3(gl_GlobalInvocationID);
+
+    // Сетка у нас 64x64x64. Если вышли за пределы - выходим.
+    if (pos.x >= 64 || pos.y >= 64 || pos.z >= 64) return;
+
+    // Записываем 0 (очистка)
+    imageStore(uObjectGridHead, pos, ivec4(0));
+}

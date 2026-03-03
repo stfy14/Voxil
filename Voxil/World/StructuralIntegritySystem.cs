@@ -83,6 +83,8 @@ public class StructuralIntegritySystem : IDisposable
         }
     }
 
+    // (Часть файла, замените метод TraverseCluster)
+
     private void TraverseCluster(Vector3i startNode, HashSet<Vector3i> globalChecked)
     {
         List<Vector3i> cluster = new List<Vector3i>();
@@ -102,7 +104,14 @@ public class StructuralIntegritySystem : IDisposable
             var current = queue.Dequeue();
 
             if (current.Y <= 0) { isGrounded = true; break; }
-            if (cluster.Count > maxClusterSize) { isGrounded = true; break; }
+            
+            // ИЗМЕНЕНИЕ: Уведомление в консоль
+            if (cluster.Count > maxClusterSize) 
+            { 
+                Console.WriteLine($"[Integrity] Cluster too large ({cluster.Count}+), keeping static.");
+                isGrounded = true; 
+                break; 
+            }
 
             var dirs = new Vector3i[] { new(1, 0, 0), new(-1, 0, 0), new(0, 1, 0), new(0, -1, 0), new(0, 0, 1), new(0, 0, -1) };
 

@@ -1,8 +1,7 @@
-﻿// /Physics/VoxelPhysicsBuilder.cs
+﻿// --- START OF FILE VoxelPhysicsBuilder.cs ---
 using OpenTK.Mathematics;
 using System;
-using System.Buffers; // <--- Не забудь!
-using System.Collections.Generic;
+using System.Runtime.CompilerServices;
 using BepuVector3 = System.Numerics.Vector3;
 
 public struct VoxelCollider
@@ -11,102 +10,137 @@ public struct VoxelCollider
     public BepuVector3 HalfSize;
 }
 
-// Структура-результат, чтобы вернуть массив и его реальную длину
-public struct PhysicsBuildResultData : IDisposable
+public struct PhysicsBuildResultData
 {
     public VoxelCollider[] CollidersArray;
     public int Count;
-
-    public void Dispose()
-    {
-        if (CollidersArray != null)
-        {
-            ArrayPool<VoxelCollider>.Shared.Return(CollidersArray);
-            CollidersArray = null;
-        }
-    }
 }
 
 public static class VoxelPhysicsBuilder
 {
-    // Меняем возвращаемый тип с List на нашу структуру
-    public static PhysicsBuildResultData GenerateColliders(MaterialType[] voxels, Vector3i chunkPos)
+    private static readonly bool[] _solidLookup = new bool[256];
+
+    static VoxelPhysicsBuilder()
     {
-        int size = Chunk.ChunkSize;
-        int volume = Chunk.Volume;
+        for (int i = 0; i < 256; i++) _solidLookup[i] = MaterialRegistry.IsSolidForPhysics((MaterialType)i);
+    }
 
-        // 1. Арендуем массив visited (вместо new bool[])
-        bool[] visited = ArrayPool<bool>.Shared.Rent(volume);
-        Array.Clear(visited, 0, volume); // Обязательно чистим, так как он из пула
+    // Старый метод для Чанков (оставляем для совместимости, вызывает универсальный)
+    public static int GenerateColliders(MaterialType[] voxels, bool[] visitedBuffer, VoxelCollider[] scratchBuffer)
+    {
+        return GenerateColliders(voxels, visitedBuffer, scratchBuffer, Constants.ChunkResolution, Constants.ChunkResolution, Constants.ChunkResolution);
+    }
 
-        // 2. Арендуем массив для коллайдеров (максимум коллайдеров = объему чанка, хоть это и редкость)
-        // Это предотвращает ресайзы List<>, которые убивают память.
-        VoxelCollider[] collidersBuffer = ArrayPool<VoxelCollider>.Shared.Rent(volume);
+    // НОВЫЙ универсальный метод (для чанков и объектов)
+    public static unsafe int GenerateColliders(
+        MaterialType[] voxels, 
+        bool[] visitedBuffer, 
+        VoxelCollider[] scratchBuffer,
+        int sizeX, int sizeY, int sizeZ,
+        float scale = 1.0f) // <--- НОВЫЙ ПАРАМЕТР
+    {
+        Array.Clear(visitedBuffer, 0, visitedBuffer.Length);
         int colliderCount = 0;
+        float voxelSize = Constants.VoxelSize * scale; 
 
-        try
+        fixed (MaterialType* pVoxels = voxels)
+        fixed (bool* pVisited = visitedBuffer)
+        fixed (bool* pSolidLookup = _solidLookup)
+        fixed (VoxelCollider* pOutput = scratchBuffer)
         {
-            bool IsSolid(int x, int y, int z)
+            for (int z = 0; z < sizeZ; z++)
             {
-                if (x < 0 || x >= size || y < 0 || y >= size || z < 0 || z >= size) return false;
-                // ВАЖНО: voxels тоже может быть больше объема (из-за пула), используем правильный индекс
-                return MaterialRegistry.IsSolidForPhysics(voxels[x + size * (y + size * z)]);
-            }
-
-            for (int y = 0; y < size; y++)
-            {
-                for (int z = 0; z < size; z++)
+                int zOffset = z * sizeX * sizeY;
+                for (int y = 0; y < sizeY; y++)
                 {
-                    for (int x = 0; x < size; x++)
+                    int yOffset = zOffset + y * sizeX;
+                    for (int x = 0; x < sizeX; x++)
                     {
-                        int index = x + size * (y + size * z);
+                        int index = yOffset + x;
 
-                        if (!visited[index] && MaterialRegistry.IsSolidForPhysics(voxels[index]))
+                        if (pVisited[index]) continue;
+                        // Проверка границ массива на всякий случай
+                        if (index >= voxels.Length) continue; 
+                        
+                        if (!pSolidLookup[(byte)pVoxels[index]]) continue;
+
+                        // --- GREEDY MESHING X ---
+                        int width = 1;
+                        while (x + width < sizeX)
                         {
-                            // Оптимизация внутренних блоков (без изменений)
-                            if (IsSolid(x + 1, y, z) && IsSolid(x - 1, y, z) &&
-                                IsSolid(x, y + 1, z) && IsSolid(x, y - 1, z) &&
-                                IsSolid(x, y, z + 1) && IsSolid(x, y, z - 1))
+                            int nextIdx = index + width;
+                            if (pVisited[nextIdx] || !pSolidLookup[(byte)pVoxels[nextIdx]]) break;
+                            width++;
+                        }
+
+                        // --- GREEDY MESHING Y ---
+                        int height = 1;
+                        while (y + height < sizeY)
+                        {
+                            int nextRowBase = zOffset + (y + height) * sizeX;
+                            bool rowValid = true;
+                            for (int k = 0; k < width; k++)
                             {
-                                visited[index] = true;
-                                continue;
+                                int idx2 = nextRowBase + x + k;
+                                if (pVisited[idx2] || !pSolidLookup[(byte)pVoxels[idx2]]) { rowValid = false; break; }
                             }
+                            if (!rowValid) break;
+                            height++;
+                        }
 
-                            // Greedy Strip по X
-                            int width = 1;
-                            while (x + width < size)
+                        // --- GREEDY MESHING Z ---
+                        int depth = 1;
+                        while (z + depth < sizeZ)
+                        {
+                            int nextSliceBase = (z + depth) * sizeX * sizeY;
+                            bool sliceValid = true;
+                            for (int py = 0; py < height; py++)
                             {
-                                int nextIdx = (x + width) + size * (y + size * z);
-                                if (visited[nextIdx] || !MaterialRegistry.IsSolidForPhysics(voxels[nextIdx])) break;
-                                width++;
+                                int rowBase = nextSliceBase + (y + py) * sizeX;
+                                for (int px = 0; px < width; px++)
+                                {
+                                    int idx3 = rowBase + x + px;
+                                    if (pVisited[idx3] || !pSolidLookup[(byte)pVoxels[idx3]]) 
+                                    { 
+                                        sliceValid = false; 
+                                        goto EndDepthCheck; 
+                                    }
+                                }
                             }
+                            EndDepthCheck:
+                            if (!sliceValid) break;
+                            depth++;
+                        }
 
-                            for (int k = 0; k < width; k++) visited[(x + k) + size * (y + size * z)] = true;
-
-                            // Записываем в массив вместо List.Add
-                            collidersBuffer[colliderCount] = new VoxelCollider
+                        // Помечаем как посещенные
+                        for (int d = 0; d < depth; d++)
+                        {
+                            int markZ = (z + d) * sizeX * sizeY;
+                            for (int h = 0; h < height; h++)
                             {
-                                Position = new BepuVector3(x + width / 2f, y + 0.5f, z + 0.5f),
-                                HalfSize = new BepuVector3(width / 2f, 0.5f, 0.5f)
+                                int markRow = markZ + (y + h) * sizeX + x;
+                                for (int w = 0; w < width; w++) pVisited[markRow + w] = true;
+                            }
+                        }
+
+                        // Рассчитываем центр и размер (в локальных координатах массива)
+                        float cx = (x + width * 0.5f) * voxelSize;
+                        float cy = (y + height * 0.5f) * voxelSize;
+                        float cz = (z + depth * 0.5f) * voxelSize;
+
+                        if (colliderCount < scratchBuffer.Length)
+                        {
+                            pOutput[colliderCount] = new VoxelCollider
+                            {
+                                Position = new BepuVector3(cx, cy, cz),
+                                HalfSize = new BepuVector3(width * voxelSize * 0.5f, height * voxelSize * 0.5f, depth * voxelSize * 0.5f)
                             };
                             colliderCount++;
-                            
-                            x += width - 1;
                         }
                     }
                 }
             }
-
-            return new PhysicsBuildResultData 
-            { 
-                CollidersArray = collidersBuffer, 
-                Count = colliderCount 
-            };
         }
-        finally
-        {
-            // Возвращаем visited сразу же
-            ArrayPool<bool>.Shared.Return(visited);
-        }
+        return colliderCount;
     }
 }

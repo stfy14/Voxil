@@ -1,166 +1,222 @@
-﻿uniform int uSoftShadowSamples; // Приходит из C#
+﻿// --- START OF FILE include/lighting.glsl ---
 
-float GetCornerOcclusion(ivec3 pos, ivec3 side1, ivec3 side2) {
-    bool s1 = IsSolid(pos + side1), s2 = IsSolid(pos + side2), c = IsSolid(pos + side1 + side2);
+#define AO_STRENGTH 0.6
+#define BLOCKER_SAMPLES 6
+#define SOFT_SHADOW_RADIUS 0.08
+#define SHADOW_BIAS 0.1
+
+bool IsSolidForAO(ivec3 pos) {
+    ivec3 boundMin = ivec3(uBoundMinX, uBoundMinY, uBoundMinZ) * VOXEL_RESOLUTION;
+    ivec3 boundMax = ivec3(uBoundMaxX, uBoundMaxY, uBoundMaxZ) * VOXEL_RESOLUTION;
+    if (any(lessThan(pos, boundMin)) || any(greaterThanEqual(pos, boundMax))) return false;
+
+    ivec3 chunkCoord = pos >> BIT_SHIFT;
+    uint chunkSlot = imageLoad(uPageTable, chunkCoord & (PAGE_TABLE_SIZE - 1)).r;
+    if (chunkSlot == 0xFFFFFFFFu) return false;
+
+    // === SOLID CHUNK CHECK ===
+    if ((chunkSlot & 0x80000000u) != 0u) {
+        return true;
+    }
+    // =========================
+
+    #ifdef ENABLE_LOD
+        vec3 chunkCenter = (vec3(chunkCoord) + 0.5) * float(CHUNK_SIZE);
+    float distChunkToCam = distance(uCamPos, chunkCenter);
+    bool isLodChunk = (distChunkToCam > uLodDistance);
+
+    if (isLodChunk) {
+        // === LOD AO: Проверяем БЛОК 4x4x4, а не воксель ===
+        ivec3 local = pos & BIT_MASK;
+        ivec3 bMapPos = local / BLOCK_SIZE;
+        int blockIdx = bMapPos.x + BLOCKS_PER_AXIS * (bMapPos.y + BLOCKS_PER_AXIS * bMapPos.z);
+        uint maskBaseOffset = chunkSlot * (uint(BLOCKS_PER_AXIS)*uint(BLOCKS_PER_AXIS)*uint(BLOCKS_PER_AXIS));
+        uvec2 maskVal = packedMasks[maskBaseOffset + blockIdx];
+
+        // Если блок не пустой — считаем его твердым
+        return (maskVal.x != 0u || maskVal.y != 0u);
+    }
+    #endif
+
+    // Обычная проверка вокселя
+    ivec3 local = pos & BIT_MASK;
+    ivec3 bMapPos = local / BLOCK_SIZE;
+    int blockIdx = bMapPos.x + BLOCKS_PER_AXIS * (bMapPos.y + BLOCKS_PER_AXIS * bMapPos.z);
+    uint maskBaseOffset = chunkSlot * (uint(BLOCKS_PER_AXIS)*uint(BLOCKS_PER_AXIS)*uint(BLOCKS_PER_AXIS));
+    uvec2 maskVal = packedMasks[maskBaseOffset + blockIdx];
+
+    if (maskVal.x == 0u && maskVal.y == 0u) return false;
+
+    int lx = local.x % BLOCK_SIZE; int ly = local.y % BLOCK_SIZE; int lz = local.z % BLOCK_SIZE;
+    int bitIdx = lx + BLOCK_SIZE * (ly + BLOCK_SIZE * lz);
+    bool hasVoxel = (bitIdx < 32) ? ((maskVal.x & (1u << bitIdx)) != 0u) : ((maskVal.y & (1u << (bitIdx - 32))) != 0u);
+    if (!hasVoxel) return false;
+
+    int idx = local.x + VOXEL_RESOLUTION * (local.y + VOXEL_RESOLUTION * local.z);
+    uint matID = GetVoxelData(chunkSlot, idx);
+    return (matID != 0u && matID != 4u);
+}
+
+bool IsSolidVoxelSpace(ivec3 pos) { return IsSolidForAO(pos); }
+
+float GetCornerOcclusionScaled(ivec3 basePos, ivec3 side1, ivec3 side2, int stride) {
+    bool s1 = IsSolidForAO(basePos + side1 * stride);
+    bool s2 = IsSolidForAO(basePos + side2 * stride);
+    bool c = IsSolidForAO(basePos + (side1 + side2) * stride);
     if (s1 && s2) return 3.0;
     return float(s1) + float(s2) + float(c);
 }
 
 float CalculateAO(vec3 hitPos, vec3 normal) {
-    ivec3 ipos = ivec3(floor(hitPos + normal * 0.01)), n = ivec3(normal);
-    vec3 localPos = hitPos - vec3(ipos);
-    ivec3 t, b; vec2 uvSurf;
+
+    // === СИНХРОНИЗАЦИЯ AO С ЧАНКАМИ ===
+    // Вместо дистанции до пикселя, считаем дистанцию до ЦЕНТРА ЧАНКА, в котором пиксель.
+    // Это заставит AO переключаться ровно по границам чанков, как и геометрия.
+
+    vec3 chunkCoordFloat = floor(hitPos / float(CHUNK_SIZE));
+    vec3 chunkCenter = (chunkCoordFloat + 0.5) * float(CHUNK_SIZE);
+    float distChunkToCam = distance(uCamPos, chunkCenter);
+
+    #ifdef ENABLE_LOD
+        bool useLodAO = (distChunkToCam > uLodDistance);
+    if (useLodAO && uDisableEffectsOnLOD == 1) return 1.0;
+    #else
+        bool useLodAO = false;
+    #endif
+    // ===================================
+
+    int stepDist = useLodAO ? BLOCK_SIZE : 1;
+
+    vec3 aoRayOrigin = hitPos + normal * 0.01 * float(stepDist);
+    vec3 voxelPos = aoRayOrigin * VOXELS_PER_METER;
+
+    ivec3 ipos = ivec3(floor(voxelPos));
+    ivec3 n = ivec3(normal);
+
+    // На LOD выравниваем позицию внутри блока, чтобы убрать шум
+    vec3 localPos = useLodAO ? fract(voxelPos / float(BLOCK_SIZE)) : fract(voxelPos);
+
+    ivec3 t, b;
+    vec2 uvSurf;
     if (abs(n.y) > 0.5) { t = ivec3(1, 0, 0); b = ivec3(0, 0, 1); uvSurf = localPos.xz; }
     else if (abs(n.x) > 0.5) { t = ivec3(0, 0, 1); b = ivec3(0, 1, 0); uvSurf = localPos.zy; }
     else { t = ivec3(1, 0, 0); b = ivec3(0, 1, 0); uvSurf = localPos.xy; }
-    uvSurf = fract(uvSurf);
-    float occ00 = GetCornerOcclusion(ipos, -t, -b), occ10 = GetCornerOcclusion(ipos, t, -b);
-    float occ01 = GetCornerOcclusion(ipos, -t, b), occ11 = GetCornerOcclusion(ipos, t, b);
+
+    float occ00 = GetCornerOcclusionScaled(ipos, -t, -b, stepDist);
+    float occ10 = GetCornerOcclusionScaled(ipos,  t, -b, stepDist);
+    float occ01 = GetCornerOcclusionScaled(ipos, -t,  b, stepDist);
+    float occ11 = GetCornerOcclusionScaled(ipos,  t,  b, stepDist);
+
     vec2 smoothUV = uvSurf * uvSurf * (3.0 - 2.0 * uvSurf);
     float finalOcc = mix(mix(occ00, occ10, smoothUV.x), mix(occ01, occ11, smoothUV.x), smoothUV.y);
-    return clamp(pow(0.8, finalOcc) + (IGN(gl_FragCoord.xy) - 0.5) / 64.0, 0.0, 1.0);
+
+    float ao = pow(0.5, finalOcc);
+    if (!useLodAO) ao += (IGN(gl_FragCoord.xy) - 0.5) * 0.1;
+
+    return clamp(mix(1.0, ao, AO_STRENGTH), 0.0, 1.0);
 }
 
-// === HARD SHADOWS ===
-// Кидаем один луч точно в солнце. Если попали в блок - тень 0.0.
-float CalculateHardShadow(vec3 ro, vec3 sunDir) {
-    vec3 shadowOrigin = ro + sunDir * 0.01; // Сдвиг от поверхности
-    vec3 shadowDir = sunDir; // Точно на солнце
+// Функции теней оставляем старые, они используют TraceShadowRay из tracing.glsl,
+// который уже настроен на работу "по чанкам" (он использует cMapPos для определения LOD).
 
-    ivec3 sMapPos = ivec3(floor(shadowOrigin));
-    ivec3 sStepDir = ivec3(sign(shadowDir));
-    vec3 sDeltaDist = abs(1.0 / shadowDir);
-    vec3 sSideDist = (sign(shadowDir) * (vec3(sMapPos) - shadowOrigin) + (0.5 + 0.5 * sign(shadowDir))) * sDeltaDist;
+float CalculateSoftShadow(vec3 hitPos, vec3 normal, vec3 sunDir) {
+    float distToCam = length(hitPos - uCamPos);
+    vec3 shadowOrigin = hitPos + normal * SHADOW_BIAS;
+    float maxShadowDist = 200.0;
 
-    ivec3 bMin = ivec3(uBoundMinX, uBoundMinY, uBoundMinZ) * 16;
-    ivec3 bMax = ivec3(uBoundMaxX, uBoundMaxY, uBoundMaxZ) * 16;
+    vec3 up    = abs(sunDir.y) < 0.999 ? vec3(0,1,0) : vec3(0,0,1);
+    vec3 right = normalize(cross(sunDir, up));
+    up         = cross(right, sunDir);
 
-    ivec3 sCachedChunkCoord = ivec3(-999999); int sCachedChunkIdx = -1;
+    float noiseVal = IGN(gl_FragCoord.xy);
 
-    // Лимит шагов меньше, чем для основного луча, т.к. нас интересует только "закрыто или нет"
-    for (int step = 0; step < 200; step++) {
-        // Выход за границы рендера
-        if (any(lessThan(sMapPos, bMin)) || any(greaterThanEqual(sMapPos, bMax))) return 1.0; // Свет
+    // Центральный луч — если не перекрыт, сразу выходим
+    float tHardHit = 0.0; uint matHard = 0u;
+    if (!TraceShadowRay(shadowOrigin, sunDir, maxShadowDist, tHardHit, matHard))
+    return 1.0;
 
-        ivec3 chunkCoord = sMapPos >> 4;
-        if (chunkCoord != sCachedChunkCoord) {
-            sCachedChunkCoord = chunkCoord;
-            sCachedChunkIdx = imageLoad(uPageTable, chunkCoord & (PAGE_TABLE_SIZE - 1)).r;
+    // Blocker search — среднее расстояние до блокера
+    float avgBlockerDist = 0.0;
+    int   blockerCount   = 0;
+    for (int k = 0; k < BLOCKER_SAMPLES; k++) {
+        float angle = (float(k) + noiseVal) * 2.39996;
+        float r     = sqrt(float(k) + 0.5) / sqrt(float(BLOCKER_SAMPLES));
+        vec2  off   = vec2(cos(angle), sin(angle)) * r * SOFT_SHADOW_RADIUS;
+        vec3  dir   = normalize(sunDir + right * off.x + up * off.y);
+        float tHit  = 0.0; uint matID = 0u;
+        if (TraceShadowRay(shadowOrigin, dir, maxShadowDist, tHit, matID)) {
+            avgBlockerDist += tHit;
+            blockerCount++;
         }
-
-        if (sCachedChunkIdx != -1) {
-            ivec3 local = sMapPos & 15;
-            int idx = local.x + 16 * (local.y + 16 * local.z);
-            uint sMat = (packedVoxels[sCachedChunkIdx + (idx >> 2)] >> ((idx & 3) * 8)) & 0xFFu;
-            // 4u = Вода, она прозрачная для тени (упрощение)
-            if (sMat != 0u && sMat != 4u) {
-                return 0.0; // Тень
-            }
-        }
-
-        vec3 sMask = (sSideDist.x < sSideDist.y) ?
-        ((sSideDist.x < sSideDist.z) ? vec3(1,0,0) : vec3(0,0,1)) :
-        ((sSideDist.y < sSideDist.z) ? vec3(0,1,0) : vec3(0,0,1));
-
-        sSideDist += sMask * sDeltaDist;
-        sMapPos += ivec3(sMask) * sStepDir;
     }
+    if (blockerCount == 0) return 1.0;
+    avgBlockerDist /= float(blockerCount);
 
+    // Penumbra: чем дальше поверхность от блокера — тем шире тень
+    float penumbra = clamp(avgBlockerDist / maxShadowDist, 0.0, 1.0);
+    float shadowRadius = penumbra * SOFT_SHADOW_RADIUS;
+    if (shadowRadius < 0.0005) return 0.0;
+
+    // PCF с адаптивным радиусом — uSoftShadowSamples из настроек игры
+    int   effectiveSamples = uSoftShadowSamples;
+    float currentRadius    = shadowRadius;
+    if (distToCam > 80.0)      { effectiveSamples = 2;                              currentRadius *= 0.5; }
+    else if (distToCam > 40.0) { effectiveSamples = max(4, uSoftShadowSamples / 4); }
+    else if (distToCam > 15.0) { effectiveSamples = max(8, uSoftShadowSamples / 2); }
+    if (effectiveSamples < 1)    effectiveSamples = 1;
+
+    float totalVisibility = 0.0;
+    for (int k = 0; k < effectiveSamples; k++) {
+        float angle     = (float(k) + noiseVal) * 2.39996;
+        float r         = sqrt(float(k) + 0.5) / sqrt(float(effectiveSamples));
+        vec2  off       = vec2(cos(angle), sin(angle)) * r * currentRadius;
+        vec3  shadowDir = normalize(sunDir + right * off.x + up * off.y);
+        bool  hit       = false;
+        if (distToCam < 150.0 && uObjectCount > 0) {
+            float tDyn = 100000.0; int idDyn = -1; vec3 nDyn = vec3(0); uint dummyMat = 0u; int dummy = 0;
+            if (TraceDynamicRay(shadowOrigin, shadowDir, maxShadowDist, tDyn, idDyn, nDyn, dummyMat, dummy)) hit = true;
+        }
+        if (!hit) {
+            float tHit = 0.0; uint matID = 0u;
+            if (TraceShadowRay(shadowOrigin, shadowDir, maxShadowDist, tHit, matID)) hit = true;
+        }
+        if (!hit) totalVisibility += 1.0;
+    }
+    return smoothstep(0.0, 1.0, totalVisibility / float(effectiveSamples));
+}
+
+float CalculateHardShadow(vec3 hitPos, vec3 normal, vec3 sunDir) {
+    vec3 shadowOrigin = hitPos + normal * SHADOW_BIAS;
+    float tHit = 0.0; uint matID = 0u;
+    if (TraceShadowRay(shadowOrigin, sunDir, 200.0, tHit, matID)) return 0.0;
     return 1.0;
 }
 
-// === SOFT SHADOWS ===
-// Кидаем N лучей конусом в сторону солнца.
-float CalculateSoftShadow(vec3 ro, vec3 normal, vec3 sunDir) {
-    vec3 shadowOrigin = ro + normal * 0.005;
+float CalculateShadow(vec3 hitPos, vec3 normal, vec3 sunDir) {
+    #ifdef ENABLE_LOD
+        vec3 chunkCoordFloat = floor(hitPos / float(CHUNK_SIZE));
+    vec3 chunkCenter = (chunkCoordFloat + 0.5) * float(CHUNK_SIZE);
+    float distChunkToCam = distance(uCamPos, chunkCenter);
 
-    // Базис для диска солнца
-    vec3 up = abs(sunDir.y) < 0.999 ? vec3(0, 1, 0) : vec3(0, 0, 1);
-    vec3 right = normalize(cross(sunDir, up));
-    up = cross(right, sunDir);
-
-    float currentShadow = 0.0;
-    float diskRadius = 0.04; // Размер солнечного диска (размытие)
-
-    // Шум для вращения сэмплов (чтобы убрать бандинг)
-    float noiseVal = random(gl_FragCoord.xy);
-
-    ivec3 bMin = ivec3(uBoundMinX, uBoundMinY, uBoundMinZ) * 16;
-    ivec3 bMax = ivec3(uBoundMaxX, uBoundMaxY, uBoundMaxZ) * 16;
-
-    // Используем uSoftShadowSamples из настроек
-    int samples = uSoftShadowSamples;
-    if (samples <= 0) samples = 1;
-
-    for (int k = 0; k < samples; k++) {
-        // Процедурная генерация смещения (Golden Angle Distribution)
-        // Это позволяет менять кол-во сэмплов без фиксированных массивов
-        float angle = (float(k) + noiseVal) * 2.39996; // Golden Angle
-        float r = sqrt(float(k) + 0.5) / sqrt(float(samples)); // Равномерное распределение
-        vec2 offset = vec2(cos(angle), sin(angle)) * r * diskRadius;
-
-        vec3 offsetDir = right * offset.x + up * offset.y;
-        vec3 shadowDir = normalize(sunDir + offsetDir);
-        if (abs(shadowDir.x) < 1e-6) shadowDir.x = 1e-6;
-
-        // Ray Traversal (копия логики Hard Shadow, но с подсчетом hit)
-        ivec3 sMapPos = ivec3(floor(shadowOrigin));
-        ivec3 sStepDir = ivec3(sign(shadowDir));
-        vec3 sDeltaDist = abs(1.0 / shadowDir);
-        vec3 sSideDist = (sign(shadowDir) * (vec3(sMapPos) - shadowOrigin) + (0.5 + 0.5 * sign(shadowDir))) * sDeltaDist;
-
-        bool hit = false;
-        float hitDist = 0.0;
-        ivec3 sCachedChunkCoord = ivec3(-999999); int sCachedChunkIdx = -1;
-
-        // Ограничиваем дистанцию проверки тени (60 блоков достаточно для мягких теней)
-        for (int step = 0; step < 60; step++) {
-            if (min(sSideDist.x, min(sSideDist.y, sSideDist.z)) > 60.0) break;
-            if (any(lessThan(sMapPos, bMin)) || any(greaterThanEqual(sMapPos, bMax))) break;
-
-            ivec3 chunkCoord = sMapPos >> 4;
-            if (chunkCoord != sCachedChunkCoord) {
-                sCachedChunkCoord = chunkCoord;
-                sCachedChunkIdx = imageLoad(uPageTable, chunkCoord & (PAGE_TABLE_SIZE - 1)).r;
-            }
-            if (sCachedChunkIdx != -1) {
-                ivec3 local = sMapPos & 15;
-                int idx = local.x + 16 * (local.y + 16 * local.z);
-                uint sMat = (packedVoxels[sCachedChunkIdx + (idx >> 2)] >> ((idx & 3) * 8)) & 0xFFu;
-                if (sMat != 0u && sMat != 4u) {
-                    hit = true;
-                    hitDist = distance(shadowOrigin, vec3(sMapPos) + 0.5);
-                    break;
-                }
-            }
-            vec3 sMask = (sSideDist.x < sSideDist.y) ?
-            ((sSideDist.x < sSideDist.z) ? vec3(1,0,0) : vec3(0,0,1)) :
-            ((sSideDist.y < sSideDist.z) ? vec3(0,1,0) : vec3(0,0,1));
-            sSideDist += sMask * sDeltaDist; sMapPos += ivec3(sMask) * sStepDir;
-        }
-
-        if (!hit) {
-            currentShadow += 1.0; // Свет
-        } else {
-            // Penumbra estimation: чем дальше объект, тем мягче тень
-            currentShadow += smoothstep(2.0, 25.0, hitDist) * 0.9;
-        }
+    // ИСПРАВЛЕНИЕ:
+    // 1. СНАЧАЛА проверяем, нужно ли ВЫКЛЮЧИТЬ тени для LOD
+    if (distChunkToCam > uLodDistance && uDisableEffectsOnLOD == 1) {
+        return 1.0; // Возвращаем полный свет (тени отключены)
     }
 
-    float rawShadow = currentShadow / float(samples);
-    float shadowFactor = smoothstep(0.0, 1.0, rawShadow);
-    // Dithering для скрытия артефактов малого кол-ва сэмплов
-    shadowFactor += (noiseVal - 0.5) * 0.05;
-    return clamp(shadowFactor, 0.0, 1.0);
-}
+    // 2. ПОТОМ решаем, какой тип теней использовать (если они НЕ выключены)
+    // Если это LOD чанк — принудительно используем только твердые тени
+    if (distChunkToCam > uLodDistance) {
+        return CalculateHardShadow(hitPos, normal, sunDir);
+    }
+    #endif
 
-// === ОБЩАЯ ФУНКЦИЯ ===
-float CalculateShadow(vec3 hitPos, vec3 normal, vec3 sunDir) {
+    // Логика для обычных, не-LOD чанков остается без изменений
     #ifdef SHADOW_MODE_HARD
-    return CalculateHardShadow(hitPos + normal * 0.005, sunDir);
+        return CalculateHardShadow(hitPos, normal, sunDir);
     #elif defined(SHADOW_MODE_SOFT)
-    return CalculateSoftShadow(hitPos, normal, sunDir);
+        return CalculateSoftShadow(hitPos, normal, sunDir);
     #else
-    return 1.0; // Тени выключены
+        return 1.0;
     #endif
 }

@@ -12,7 +12,6 @@ public class LineRenderer : IDisposable
 
     public LineRenderer()
     {
-        // Простейший шейдер для линий
         string vert = @"
             #version 330 core
             layout (location = 0) in vec3 aPos;
@@ -81,7 +80,6 @@ public class LineRenderer : IDisposable
         DrawLine(new Vector3(min.X, min.Y, max.Z), new Vector3(min.X, max.Y, max.Z), color);
     }
 
-    // Рисует крестик в точке (для Центра Масс)
     public void DrawPoint(Vector3 pos, float size, Vector3 color)
     {
         DrawLine(pos - Vector3.UnitX * size, pos + Vector3.UnitX * size, color);
@@ -89,11 +87,16 @@ public class LineRenderer : IDisposable
         DrawLine(pos - Vector3.UnitZ * size, pos + Vector3.UnitZ * size, color);
     }
 
-    public void Render(Camera camera)
+    // ИЗМЕНЕНИЕ: Добавлен параметр enableDepthTest
+    public void Render(Camera camera, bool enableDepthTest = true)
     {
         if (_vertices.Count == 0) return;
 
-        GL.Disable(EnableCap.DepthTest);
+        // Настройка теста глубины
+        if (enableDepthTest)
+            GL.Enable(EnableCap.DepthTest);
+        else
+            GL.Disable(EnableCap.DepthTest);
 
         _shader.Use();
         _shader.SetMatrix4("uView", camera.GetViewMatrix());
@@ -103,11 +106,12 @@ public class LineRenderer : IDisposable
         GL.BindBuffer(BufferTarget.ArrayBuffer, _vbo);
         GL.BufferData(BufferTarget.ArrayBuffer, _vertices.Count * sizeof(float), _vertices.ToArray(), BufferUsageHint.DynamicDraw);
 
-        GL.DrawArrays(PrimitiveType.Lines, 0, _vertices.Count / 6); // 6 floats per vertex
+        GL.DrawArrays(PrimitiveType.Lines, 0, _vertices.Count / 6);
 
         GL.BindVertexArray(0);
-        _vertices.Clear(); // Очищаем после отрисовки
+        _vertices.Clear(); // Очищаем буфер после отрисовки
 
+        // Возвращаем дефолтное состояние (обычно DepthTest включен)
         GL.Enable(EnableCap.DepthTest);
     }
 

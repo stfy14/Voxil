@@ -1,0 +1,76 @@
+#version 430 core
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+struct VoxelEdit {
+    uint chunkSlot;
+    uint voxelIndex;
+    uint newMaterial;
+    uint padding;
+};
+
+layout(std430, binding = 6) readonly buffer EditBuffer {
+    VoxelEdit edits[];
+};
+
+layout(std430, binding = 5) buffer MaskSSBO {
+    uvec2 packedMasks[];
+};
+
+// ВСТАВКА КОДА БАНКОВ
+/*__BANKS_INJECTION__*/
+
+#define BLOCK_SIZE 4u
+#define BLOCKS_PER_AXIS (uint(VOXEL_RESOLUTION) / BLOCK_SIZE)
+#define VOXELS_IN_UINT 4u
+
+uniform int uEditCount;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= uint(uEditCount)) return;
+
+    VoxelEdit edit = edits[idx];
+    uint chunkSlot = edit.chunkSlot;
+    uint voxelIdx = edit.voxelIndex;
+    uint mat = edit.newMaterial;
+
+    // 1. === ОБНОВЛЕНИЕ ВОКСЕЛЕЙ В БАНКАХ ===
+    uint bank = chunkSlot / uint(CHUNKS_PER_BANK);
+    uint localSlot = chunkSlot % uint(CHUNKS_PER_BANK);
+    uint chunkSizeUint = (uint(VOXEL_RESOLUTION) * uint(VOXEL_RESOLUTION) * uint(VOXEL_RESOLUTION)) / VOXELS_IN_UINT;
+    
+    uint offset = localSlot * chunkSizeUint + (voxelIdx / VOXELS_IN_UINT);
+    uint shift = (voxelIdx % VOXELS_IN_UINT) * 8u;
+
+    uint maskClear = ~(0xFFu << shift);
+    uint matInsert = (mat & 0xFFu) << shift;
+
+    // Вызываем сгенерированную функцию записи
+    WriteVoxelToBank(bank, offset, maskClear, matInsert);
+
+    // 2. === ОБНОВЛЕНИЕ БИТОВЫХ МАСОК ===
+    uint vx = voxelIdx % uint(VOXEL_RESOLUTION);
+    uint vy = (voxelIdx / uint(VOXEL_RESOLUTION)) % uint(VOXEL_RESOLUTION);
+    uint vz = voxelIdx / (uint(VOXEL_RESOLUTION) * uint(VOXEL_RESOLUTION));
+
+    uint bx = vx / BLOCK_SIZE;
+    uint by = vy / BLOCK_SIZE;
+    uint bz = vz / BLOCK_SIZE;
+
+    uint blockIdx = bx + BLOCKS_PER_AXIS * (by + BLOCKS_PER_AXIS * bz);
+    uint maskBaseOffset = chunkSlot * (BLOCKS_PER_AXIS * BLOCKS_PER_AXIS * BLOCKS_PER_AXIS);
+    uint globalBlockIdx = maskBaseOffset + blockIdx;
+
+    uint lx = vx % BLOCK_SIZE;
+    uint ly = vy % BLOCK_SIZE;
+    uint lz = vz % BLOCK_SIZE;
+    uint bitIdx = lx + BLOCK_SIZE * (ly + BLOCK_SIZE * lz);
+
+    if (mat == 0u) {
+        if (bitIdx < 32u) atomicAnd(packedMasks[globalBlockIdx].x, ~(1u << bitIdx));
+        else              atomicAnd(packedMasks[globalBlockIdx].y, ~(1u << (bitIdx - 32u)));
+    } else {
+        if (bitIdx < 32u) atomicOr(packedMasks[globalBlockIdx].x, (1u << bitIdx));
+        else              atomicOr(packedMasks[globalBlockIdx].y, (1u << (bitIdx - 32u)));
+    }
+}

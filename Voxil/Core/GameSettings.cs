@@ -1,34 +1,45 @@
-﻿public enum ShadowMode
-{
-    None,
-    Hard,
-    Soft
-}
+﻿// --- START OF FILE GameSettings.cs ---
+using System;
+
+public enum ShadowMode { None, Hard, Soft }
 
 public static class GameSettings
 {
-    // Дальность прорисовки (в чанках)
-    public static int RenderDistance = 16;
-    
-    // Лимит загрузки чанков в GPU за кадр
-    public static int GpuUploadSpeed = 200;
-    
-    // Кол-во потоков генерации (Perlin noise)
-    public static int GenerationThreads = 1;
-    
-    // Кол-во потоков физики (Bepu)
-    public static int PhysicsThreads = 1;
-    
-    // Тип воды: true = Procedural (Gerstner), false = Texture
-    public static bool UseProceduralWater = false; 
+    // === ВРЕМЯ И ЦИКЛ ДНЯ/НОЧИ ===
+    public static bool EnableDynamicTime = true;
+    public static double TotalTimeHours = 12.0; 
+    public static float TimeOfDay => (float)(TotalTimeHours % 24.0); 
+    public static float TimeScale = 120.0f;
 
-    // --- НОВЫЕ НАСТРОЙКИ ТЕНЕЙ ---
-    
-    // Режим теней
-    public static ShadowMode CurrentShadowMode = ShadowMode.Soft;
-
-    // Качество мягких теней (кол-во лучей). 
-    // Меньше = быстрее/шумнее, Больше = медленнее/качественнее.
-    // Рекомендуемые значения: 4, 8, 16, 32.
+    // === ГРАФИКА ===
+    public static int RenderDistance = 32;
+    public static float RenderScale = 1.0f;
+    public static bool EnableAO = true;
+    public static bool EnableTAA = true;
+    public static ShadowMode CurrentShadowMode = ShadowMode.Hard;
     public static int SoftShadowSamples = 8; 
+    public static bool UseProceduralWater = false; 
+    public static bool EnableWaterTransparency = false; 
+    
+    // === ОПТИМИЗАЦИЯ ===
+    public static bool BeamOptimization = true;
+    public static bool EnableLOD = true; 
+    public static float LodPercentage = 0.85f;  
+    public static bool DisableEffectsOnLOD = true; 
+
+    // === ПОТОКИ И ПРОИЗВОДИТЕЛЬНОСТЬ ===
+    public static int GpuUploadSpeed = 10000;
+    public static int GenerationThreads = 2;
+    public static int PhysicsThreads = 1;
+    public static int TargetFPSForBudgeting = 60;
+    public static float WorldUpdateBudgetPercentage = 0.3f;
+    
+    // === ДЕБАГ ===
+    public static bool ShowDebugHeatmap = false;
+    
+    // Новые настройки визуального дебага (галочки)
+    public static bool ShowStaticCollisions = false;
+    public static bool ShowDynamicCollisions = false;
+    public static bool ShowExplosionRays = false;
+    public static bool ShowExplosionRadius = false;
 }
