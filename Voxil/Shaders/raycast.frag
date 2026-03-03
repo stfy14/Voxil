@@ -118,8 +118,7 @@ void main() {
 
     if (hitDyn && tDyn < tStatic) {
         hit = true; tFinal = tDyn;
-        mat3 rotMatrix = mat3(dynObjects[idDyn].model);
-        normal = normalize(rotMatrix * normDyn);
+        normal = normalize(normDyn);
         albedo = dynObjects[idDyn].color.rgb;
         isDynamic = true;
     } else if (hitStatic) {

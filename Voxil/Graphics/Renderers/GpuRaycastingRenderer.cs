@@ -17,6 +17,7 @@ public class GpuRaycastingRenderer : IDisposable
     private readonly WorldManager _worldManager;
 
     private int _pageTableTexture;
+    private DynSvoManager _svoManager;
     
     // --- ПАМЯТЬ SSBO ---
     private const int MAX_TOTAL_BANKS = 8;
@@ -104,7 +105,8 @@ public class GpuRaycastingRenderer : IDisposable
     //Compute Shader Updater
     private int _editSsbo;
     private ConcurrentQueue<GpuVoxelEdit> _editQueue = new ConcurrentQueue<GpuVoxelEdit>();
-    private GpuVoxelEdit[] _editUploadArray = new GpuVoxelEdit[1024]; [StructLayout(LayoutKind.Sequential)]
+    private GpuVoxelEdit[] _editUploadArray = new GpuVoxelEdit[1024]; 
+    [StructLayout(LayoutKind.Sequential)]
     struct GpuVoxelEdit
     {
         public uint ChunkSlot;
@@ -114,7 +116,19 @@ public class GpuRaycastingRenderer : IDisposable
     }
 
     [StructLayout(LayoutKind.Sequential)]
-    struct GpuDynamicObject { public Matrix4 Model; public Matrix4 InvModel; public Vector4 Color; public Vector4 BoxMin; public Vector4 BoxMax; }
+    struct GpuDynamicObject
+    {
+        public Matrix4 Model;       // 64 байта
+        public Matrix4 InvModel;    // 64 байта
+        public Vector4 Color;       // 16 байт
+        public Vector4 BoxMin;      // 16 байт
+        public Vector4 BoxMax;      // 16 байт
+        public uint    SvoOffset;   //  4 байта — смещение в SVO-пуле (в узлах)
+        public uint    GridSize;    //  4 байта — размер сетки (32, 64, 128...)
+        public float   VoxelSize;   //  4 байта — мировой размер одного вокселя
+        public uint    Padding;     //  4 байта — выравнивание std430
+        // ИТОГО: 192 байта — должно совпасть с sizeof(DynamicObject) в GLSL
+    }
 
     public GpuRaycastingRenderer(WorldManager worldManager)
     {
@@ -128,10 +142,14 @@ public class GpuRaycastingRenderer : IDisposable
     {
         _gridComputeShader = new Shader("Shaders/grid_update.comp");
         _taaShader = new Shader("Shaders/raycast.vert", "Shaders/taa.frag");
-
+        
+        _svoManager = new DynSvoManager();
+        _svoManager.Initialize();
         _quadVao = GL.GenVertexArray(); 
+        
         GL.BindVertexArray(_quadVao);
-        int dummy = GL.GenBuffer(); GL.BindBuffer(BufferTarget.ArrayBuffer, dummy);
+        int dummy = GL.GenBuffer(); 
+        GL.BindBuffer(BufferTarget.ArrayBuffer, dummy);
         GL.BufferData(BufferTarget.ArrayBuffer, sizeof(float)*8, new float[]{-1,-1,1,-1,-1,1,1,1}, BufferUsageHint.StaticDraw);
         GL.BindVertexArray(0); GL.BindBuffer(BufferTarget.ArrayBuffer, 0);
 
@@ -477,6 +495,16 @@ public class GpuRaycastingRenderer : IDisposable
         // 4. ОБНОВЛЯЕМ ДИНАМИЧЕСКИЕ ОБЪЕКТЫ И СЕТКУ (TEARDOWN PHYSICS)
         // =========================================================
         UpdateDynamicObjectsAndGrid();
+        var allForSvo = _worldManager.GetAllVoxelObjects();
+        if (_currentViewModel != null)
+        {
+            var withViewModel = new List<VoxelObject>(allForSvo) { _currentViewModel };
+            _svoManager.Update(withViewModel);
+        }
+        else
+        {
+            _svoManager.Update(allForSvo);
+        }
     }
 
     public void UnloadChunk(Vector3i pos) 
@@ -672,11 +700,15 @@ public class GpuRaycastingRenderer : IDisposable
         }
         
         var col = MaterialRegistry.GetColor(vo.Material); 
-        gpuObj.Model = model; 
-        gpuObj.InvModel = Matrix4.Invert(model); 
-        gpuObj.Color = new Vector4(col.r, col.g, col.b, 1.0f); 
-        gpuObj.BoxMin = new Vector4(vo.LocalBoundsMin, 0); 
-        gpuObj.BoxMax = new Vector4(vo.LocalBoundsMax, 0); 
+        gpuObj.Model    = model;
+        gpuObj.InvModel = Matrix4.Invert(model);
+        gpuObj.Color    = new Vector4(col.r, col.g, col.b, 1.0f);
+        gpuObj.BoxMin   = new Vector4(vo.LocalBoundsMin, 0);
+        gpuObj.BoxMax   = new Vector4(vo.LocalBoundsMax, 0);
+        gpuObj.SvoOffset = vo.SvoGpuOffset;
+        gpuObj.GridSize  = (uint)vo.SvoGridSize;
+        gpuObj.VoxelSize = vo.SvoVoxelWorldSize;
+        gpuObj.Padding   = 0u;
     }
 
     public void Render(Camera cam)
@@ -760,6 +792,7 @@ public class GpuRaycastingRenderer : IDisposable
         GL.BindImageTexture(1, _gridHeadTexture, 0, true, 0, TextureAccess.ReadOnly, SizedInternalFormat.R32i);
         GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 2, _dynamicObjectsBuffer);
         GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 3, _linkedListSsbo);
+        _svoManager.Bind();
         shader.SetTexture("uNoiseTexture", _noiseTexture, TextureUnit.Texture0);
         shader.SetVector3("uGridOrigin", _lastGridOrigin);
         shader.SetFloat("uGridStep", _gridCellSize);
@@ -919,7 +952,14 @@ public class GpuRaycastingRenderer : IDisposable
     }
     public void ReloadShader() { _shaderSystem.Compile(MAX_TOTAL_BANKS, _chunksPerBank); }
     public void UploadAllVisibleChunks() { foreach (var c in _worldManager.GetChunksSnapshot()) NotifyChunkLoaded(c); }
-    public void Dispose() { CleanupBuffers(); _quadVao = 0; _shaderSystem?.Dispose(); _gridComputeShader?.Dispose(); }
+    public void Dispose()
+    {
+        CleanupBuffers();
+        _quadVao = 0;
+        _shaderSystem?.Dispose();
+        _gridComputeShader?.Dispose();
+        _svoManager?.Dispose();  // ← ДОБАВИТЬ
+    }
     private int LoadTexture(string path) { if (!File.Exists(path)) return 0; int handle = GL.GenTexture(); GL.BindTexture(TextureTarget.Texture2D, handle); StbImage.stbi_set_flip_vertically_on_load(1); using (Stream stream = File.OpenRead(path)) { ImageResult image = ImageResult.FromStream(stream, ColorComponents.RedGreenBlueAlpha); GL.TexImage2D(TextureTarget.Texture2D, 0, PixelInternalFormat.Rgba, image.Width, image.Height, 0, PixelFormat.Rgba, PixelType.UnsignedByte, image.Data); } GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, (int)TextureWrapMode.Repeat); GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)TextureWrapMode.Repeat); GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.LinearMipmapLinear); GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMinFilter.Linear); GL.GenerateMipmap(GenerateMipmapTarget.Texture2D); return handle; }
     private int GetPageTableIndex(Vector3i p) => (p.X & MASK_X) + PT_X * ((p.Y & MASK_Y) + PT_Y * (p.Z & MASK_Z));
     // дебаг

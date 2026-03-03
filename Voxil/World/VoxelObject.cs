@@ -9,6 +9,14 @@ public class VoxelObject : IDisposable
 {
     public List<Vector3i> VoxelCoordinates { get; }
     public MaterialType Material { get; }
+    // Материалы per-voxel. Если позиция отсутствует — используется Material (единый).
+    public Dictionary<Vector3i, uint> VoxelMaterials { get; } = new();
+
+    // SVO статус для GPU-рендера
+    public bool  SvoDirty           { get; set; } = true;   // true = нужна пересборка
+    public uint  SvoGpuOffset       { get; set; } = 0;      // смещение в SVO-пуле (в узлах)
+    public int   SvoGridSize        { get; set; } = 0;      // степень двойки, e.g. 128
+    public float SvoVoxelWorldSize  { get; set; } = 0f;     // Scale * Constants.VoxelSize
     
     public BodyHandle BodyHandle { get; private set; }
     public Vector3 LocalCenterOfMass { get; private set; }
@@ -170,7 +178,9 @@ public class VoxelObject : IDisposable
         if (index != -1)
         {
             VoxelCoordinates.RemoveAt(index);
-            if (VoxelCoordinates.Count == 0) OnEmpty?.Invoke(this); 
+            VoxelMaterials.Remove(localPos);   // ← ДОБАВИТЬ: очищаем per-voxel материал
+            SvoDirty = true;                   // ← ДОБАВИТЬ: триггер пересборки SVO
+            if (VoxelCoordinates.Count == 0) OnEmpty?.Invoke(this);
             return true;
         }
         return false;

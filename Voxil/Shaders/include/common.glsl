@@ -37,8 +37,16 @@ layout(binding = 0, r32ui) uniform uimage3D uPageTable;
 const ivec3 PAGE_TABLE_SIZE = ivec3(512, 16, 512);
 
 struct DynamicObject {
-    mat4 model; mat4 invModel; vec4 color; vec4 boxMin; vec4 boxMax;
-};
+    mat4  model;
+    mat4  invModel;
+    vec4  color;
+    vec4  boxMin;
+    vec4  boxMax;
+    uint  svoOffset;   // ← ДОЛЖНЫ БЫТЬ ЭТИ 4 ПОЛЯ
+    uint  gridSize;
+    float voxelSize;
+    uint  padding;
+};                // ИТОГО: 192 байта
 
 struct ListNode {
     uint objectID;
@@ -47,6 +55,7 @@ struct ListNode {
 
 layout(std430, binding = 2) buffer DynObjects { DynamicObject dynObjects[]; };
 layout(std430, binding = 3) buffer LinkedList { ListNode listNodes[]; };
+
 layout(binding = 1, r32i) uniform iimage3D uObjectGridHead;
 
 // === HELPERS ===
