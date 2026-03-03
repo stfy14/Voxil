@@ -1,19 +1,22 @@
-﻿// --- START OF FILE TestManager.cs ---
+﻿using OpenTK.Mathematics;
 using OpenTK.Windowing.GraphicsLibraryFramework;
 using System;
-using System.Collections.Generic; // Не забудь добавить
-using System.Diagnostics;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
 
 public class TestManager
 {
     private readonly WorldManager _worldManager;
     private readonly Camera _camera;
 
-    private bool _isSpawning = false;
-    private int _spawnCount = 0;
-    private int _targetSpawnCount = 0;
-    private float _spawnTimer = 0f;
-    private float _spawnDelay = 0.2f;
+    private enum TestState { Idle, WaitingForSpawn, WaitingForSplit }
+    private TestState _state = TestState.Idle;
+    
+    private VoxelObject _testObject;
+    private Vector3 _spawnPosition;
+    private float _waitTimer = 0f;
+    private int _lastSeconds = -1; // Для красивого вывода в консоль
 
     public TestManager(WorldManager worldManager, Camera camera)
     {
@@ -23,108 +26,132 @@ public class TestManager
 
     public void Update(float deltaTime, InputManager input)
     {
-        // 'T' - Поштучный спавн (стресс-тест количества объектов)
-        if (input.IsKeyPressed(Keys.T))
+        // F5 запускает тест!
+        if (input.IsKeyPressed(Keys.F5))
         {
-            StartSpawnTest(100, 0.05f); 
-            Console.WriteLine("[Test] Started spawning 100 voxels...");
+            RunAutomatedBreakTest();
         }
 
-        // 'Y' - Взрыв (много мелких объектов в одной куче - стресс для GPU Grid)
-        if (input.IsKeyPressed(Keys.Y))
+        if (_state == TestState.Idle) return;
+        
+        _waitTimer -= deltaTime;
+
+        // Печатаем обратный отсчет, чтобы понимать, что тест идет
+        int currentSeconds = (int)Math.Ceiling(_waitTimer);
+        if (currentSeconds != _lastSeconds && currentSeconds >= 0)
         {
-             SpawnExplosionTest(1000);
-             Console.WriteLine("[Test] SPAWNED 1000 VOXELS INSTANTLY (Explosion)");
+            Console.WriteLine($"[Test] Waiting... {currentSeconds}s");
+            _lastSeconds = currentSeconds;
         }
 
-        // 'U' - Большой куб (1000 вокселей в одном теле - тест Greedy Meshing)
-        if (input.IsKeyPressed(Keys.U))
-        {
-            SpawnLargeCubeTest(10); // 10x10x10
-            Console.WriteLine("[Test] SPAWNED LARGE CUBE 10x10x10");
-        }
+        if (_waitTimer > 0) return;
 
-        if (_isSpawning)
+        if (_state == TestState.WaitingForSpawn)
         {
-            _spawnTimer += deltaTime;
-            while (_spawnTimer >= _spawnDelay && _spawnCount < _targetSpawnCount)
+            // Ищем наш заспавненный объект
+            // Условия:
+            // 1. Дистанция до спавна < 5 метров (25.0f squared) — чтобы учесть смещение центра масс и отталкивание физики
+            // 2. Количество вокселей == 3 (мы спавнили палку из 3 блоков)
+            _testObject = _worldManager.GetAllVoxelObjects()
+                .FirstOrDefault(o => o.VoxelCoordinates.Count == 3 && 
+                                     (o.Position - _spawnPosition).LengthSquared < 25.0f);
+
+            if (_testObject != null)
             {
-                _spawnTimer -= _spawnDelay;
-                SpawnSingleVoxel();
-                _spawnCount++;
+                Console.WriteLine("\n=== [AUTOMATED TEST PHASE 1] ===");
+                Console.WriteLine($"OBJECT FOUND! Dist: {(_testObject.Position - _spawnPosition).Length:F2}m");
+                LogVoxelObjectState(_testObject, "Original Object");
+
+                Console.WriteLine("\n[Test] Automatically breaking voxel at (1,0,0)...");
+                // Ломаем центральный блок, чтобы палка развалилась на 2 части
+                _worldManager.TestBreakVoxel(_testObject, new Vector3i(1, 0, 0));
+                
+                _state = TestState.WaitingForSplit;
+                _waitTimer = 1.0f; 
             }
-
-            if (_spawnCount >= _targetSpawnCount)
+            else
             {
-                _isSpawning = false;
-                Console.WriteLine("[Test] Spawning finished.");
-            }
-        }
-    }
+                // Дебаг: если не нашли, покажем, что вообще есть рядом
+                Console.WriteLine("[Test ERROR] Target object not found within 5m!");
+                Console.WriteLine("Nearby objects:");
+                var nearby = _worldManager.GetAllVoxelObjects()
+                    .Where(o => (o.Position - _spawnPosition).LengthSquared < 100.0f);
+                
+                foreach(var o in nearby)
+                    Console.WriteLine($" - Obj at {o.Position} (Dist: {(o.Position - _spawnPosition).Length:F1}m), Voxels: {o.VoxelCoordinates.Count}");
 
-    private void StartSpawnTest(int count, float delay)
-    {
-        _targetSpawnCount = count;
-        _spawnCount = 0;
-        _spawnDelay = delay;
-        _spawnTimer = 0f;
-        _isSpawning = true;
-    }
-
-    private void SpawnSingleVoxel()
-    {
-        var spawnPos = _camera.Position + _camera.Front * 3.0f;
-        var rnd = new Random();
-        float offset = 0.5f;
-        spawnPos.X += (float)(rnd.NextDouble() * offset * 2 - offset);
-        spawnPos.Z += (float)(rnd.NextDouble() * offset * 2 - offset);
-
-        _worldManager.SpawnTestVoxel(spawnPos.ToSystemNumerics(), MaterialType.Wood);
-    }
-
-    private void SpawnExplosionTest(int count)
-    {
-        var rnd = new Random();
-        var basePos = _camera.Position + _camera.Front * 5.0f;
-
-        // Спавним 1000 ОТДЕЛЬНЫХ объектов
-        for(int i=0; i<count; i++)
-        {
-             var pos = basePos + new OpenTK.Mathematics.Vector3(
-                 (float)rnd.NextDouble() * 4,
-                 (float)rnd.NextDouble() * 4,
-                 (float)rnd.NextDouble() * 4
-             );
-             _worldManager.SpawnTestVoxel(pos.ToSystemNumerics(), MaterialType.Stone);
-        }
-    }
-
-    private void SpawnLargeCubeTest(int size)
-    {
-        // Генерируем список координат для одного большого объекта
-        List<OpenTK.Mathematics.Vector3i> voxels = new List<OpenTK.Mathematics.Vector3i>();
-        for (int x = 0; x < size; x++)
-        {
-            for (int y = 0; y < size; y++)
-            {
-                for (int z = 0; z < size; z++)
-                {
-                    voxels.Add(new OpenTK.Mathematics.Vector3i(x, y, z));
-                }
+                _state = TestState.Idle;
             }
         }
+        else if (_state == TestState.WaitingForSplit)
+        {
+            Console.WriteLine("\n===[AUTOMATED TEST PHASE 2] ===");
+            Console.WriteLine("OBJECTS AFTER SPLIT:");
+            
+            // Логируем оставшийся кусок (если он выжил)
+            if (_testObject.VoxelCoordinates.Count > 0)
+            {
+                LogVoxelObjectState(_testObject, "Main Object (Remaining)");
+            }
 
-        // Спавним перед камерой
-        var spawnPos = (_camera.Position + _camera.Front * 5.0f).ToSystemNumerics();
+            // Ищем новые осколки (они должны быть рядом)
+            var fragments = _worldManager.GetAllVoxelObjects()
+                .Where(o => o != _testObject && (o.Position - _testObject.Position).LengthSquared < 25.0f);
+
+            int fragIndex = 1;
+            foreach (var frag in fragments)
+            {
+                LogVoxelObjectState(frag, $"Fragment #{fragIndex++}");
+            }
+            
+            Console.WriteLine("=== [AUTOMATED TEST FINISHED] ===\n");
+            _state = TestState.Idle;
+        }
+    }
+
+    private void RunAutomatedBreakTest()
+    {
+        if (_state != TestState.Idle)
+        {
+            Console.WriteLine("[Test] Test already in progress!");
+            return;
+        }
+
+        // Создаем палку 3x1x1 (три разных материала)
+        var voxels = new List<Vector3i> { new(0, 0, 0), new(1, 0, 0), new(2, 0, 0) };
+        var materials = new Dictionary<Vector3i, uint>
+        {
+            [new(0,0,0)] = (uint)MaterialType.Dirt,
+            [new(1,0,0)] = (uint)MaterialType.Stone,
+            [new(2,0,0)] = (uint)MaterialType.Wood,
+        };
+
+        _spawnPosition = _camera.Position + _camera.Front * 5.0f;
         
-        // Используем метод создания объекта напрямую через WorldManager (нужно добавить метод или использовать очередь)
-        // В WorldManager уже есть метод CreateDetachedObject, но он удаляет воксели из мира.
-        // Нам нужно просто создать новый. Добавим воксели в очередь создания.
+        Console.WriteLine($"\n[Test] Spawning 3x1x1 block at {_spawnPosition}...");
+        _worldManager.SpawnComplexObject(_spawnPosition.ToSystemNumerics(), voxels, MaterialType.Stone, materials);
         
-        // Для этого нам придется хакнуть/расширить WorldManager, чтобы он принимал готовый список
-        // В твоем коде есть структура VoxelObjectCreationData.
+        _state = TestState.WaitingForSpawn;
+        _waitTimer = 1.0f; 
+        _lastSeconds = -1;
+    }
+
+    private void LogVoxelObjectState(VoxelObject vo, string prefix)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine($"[{prefix}]");
+        sb.AppendLine($"  Position : {vo.Position}");
+        sb.AppendLine($"  Rotation : {vo.Rotation.Xyz}, {vo.Rotation.W}");
+        sb.AppendLine($"  Scale    : {vo.Scale}");
+        sb.AppendLine($"  CenterOfMass (Local) : {vo.LocalCenterOfMass}");
+        sb.AppendLine($"  Voxel Count : {vo.VoxelCoordinates.Count}");
         
-        // Внимание: мы используем приватную структуру через публичный метод, который сейчас добавим в WorldManager (см. ниже).
-        _worldManager.SpawnComplexObject(spawnPos, voxels, MaterialType.Wood);
+        sb.AppendLine("  Voxels & Materials:");
+        foreach (var voxelPos in vo.VoxelCoordinates.OrderBy(v => v.X).ThenBy(v => v.Y).ThenBy(v => v.Z))
+        {
+            vo.VoxelMaterials.TryGetValue(voxelPos, out uint matId);
+            sb.AppendLine($"    - {voxelPos} -> {(MaterialType)matId}");
+        }
+        Console.WriteLine(sb.ToString());
     }
 }

@@ -66,6 +66,22 @@ public class Chunk : IDisposable
         return false;
     }
 
+    public MaterialType GetMaterialAt(Vector3i localPos)
+    {
+        if (_isDisposed || _voxels == null) return MaterialType.Air;
+        if (localPos.X < 0 || localPos.X >= ChunkSize || 
+            localPos.Y < 0 || localPos.Y >= ChunkSize || 
+            localPos.Z < 0 || localPos.Z >= ChunkSize) return MaterialType.Air;
+
+        _lock.EnterReadLock();
+        try 
+        { 
+            int index = localPos.X + ChunkSize * (localPos.Y + ChunkSize * localPos.Z);
+            return (MaterialType)_voxels[index];
+        }
+        finally { _lock.ExitReadLock(); }
+    }
+    
     public void SetDataFromArray(MaterialType[] sourceArray)
     {
         if (_isDisposed) return;

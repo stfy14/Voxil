@@ -59,7 +59,13 @@ public class WorldManager : IDisposable
     private const float TargetFrameTimeMs = 1000f / 75f; 
     private const float WorldUpdateBudgetPercentage = 0.3f;
 
-    private struct VoxelObjectCreationData { public List<Vector3i> Voxels; public MaterialType Material; public System.Numerics.Vector3 WorldPosition; }
+    private struct VoxelObjectCreationData 
+    { 
+        public List<Vector3i> Voxels; 
+        public MaterialType BaseMaterial; // Переименовали для ясности (fallback)
+        public Dictionary<Vector3i, uint> PerVoxelMaterials; // <--- НОВОЕ ПОЛЕ
+        public System.Numerics.Vector3 WorldPosition; 
+    }
     
     // СЧЕТЧИКИ
     public int LoadedChunkCount => _chunks.Count;
@@ -373,12 +379,25 @@ public class WorldManager : IDisposable
         } 
     }
     
+    public void SpawnComplexObject(System.Numerics.Vector3 position, List<Vector3i> localVoxels, MaterialType material, Dictionary<Vector3i, uint> perVoxelMaterials)
+    {
+        _objectsCreationQueue.Enqueue(new VoxelObjectCreationData 
+        { 
+            Voxels = localVoxels, 
+            BaseMaterial = material,
+            PerVoxelMaterials = perVoxelMaterials,
+            WorldPosition = position 
+        });
+    }
+
+    // И оставь старый метод для совместимости
     public void SpawnComplexObject(System.Numerics.Vector3 position, List<Vector3i> localVoxels, MaterialType material)
     {
         _objectsCreationQueue.Enqueue(new VoxelObjectCreationData 
         { 
             Voxels = localVoxels, 
-            Material = material, 
+            BaseMaterial = material, 
+            PerVoxelMaterials = null, // Материалы не заданы
             WorldPosition = position 
         });
     }
@@ -413,25 +432,22 @@ public class WorldManager : IDisposable
     {
         while (_objectsCreationQueue.TryDequeue(out var data))
         {
-            Console.WriteLine($"[ProcessDebris] Creating object with {data.Voxels.Count} voxels");
-            Console.WriteLine($"[ProcessDebris] First 3 voxels: {string.Join(", ", data.Voxels.Take(3))}");
-            Console.WriteLine($"[ProcessDebris] WorldPosition (anchor): {data.WorldPosition}");
-
-            var vo = new VoxelObject(data.Voxels, data.Material);
+            // Используем новый конструктор (см. Шаг 4)
+            var vo = new VoxelObject(data.Voxels, data.BaseMaterial, 1.0f, data.PerVoxelMaterials);
+            
             vo.OnEmpty += QueueForRemoval;
 
             var handle = PhysicsWorld.CreateVoxelObjectBody(
                 data.Voxels, 
-                data.Material, 
+                data.BaseMaterial, 
+                1.0f, // Scale
                 data.WorldPosition, 
                 out var localCoM
             );
 
-            Console.WriteLine($"[ProcessDebris] LocalCoM returned: {localCoM}");
+            if (handle.Value == -1) continue;
 
             var finalWorldPos = data.WorldPosition + localCoM;
-            Console.WriteLine($"[ProcessDebris] Final physics position: {finalWorldPos}");
-
             var bodyRef = PhysicsWorld.Simulation.Bodies.GetBodyReference(handle);
             bodyRef.Pose.Position = finalWorldPos;
 
@@ -439,10 +455,9 @@ public class WorldManager : IDisposable
 
             _voxelObjects.Add(vo);
             RegisterVoxelObject(handle, vo);
-        
-            Console.WriteLine($"[ProcessDebris] Object initialized. CoM: {vo.LocalCenterOfMass}");
         }
     }
+    
     private void ProcessVoxelObjects() { foreach (var vo in _voxelObjects) { if (PhysicsWorld.Simulation.Bodies.BodyExists(vo.BodyHandle)) { var pose = PhysicsWorld.GetPose(vo.BodyHandle); vo.UpdatePose(pose); } } }
     private void ProcessRemovals() { foreach (var obj in _objectsToRemove) { try { _bodyToVoxelObjectMap.Remove(obj.BodyHandle); _voxelObjects.Remove(obj); PhysicsWorld.RemoveBody(obj.BodyHandle); obj.Dispose(); } catch { } } _objectsToRemove.Clear(); }
     public OpenTK.Mathematics.Vector3 GetPlayerPosition()
@@ -486,12 +501,9 @@ public class WorldManager : IDisposable
     public void NotifyVoxelEdited(Chunk chunk, Vector3i pos, MaterialType mat) => OnVoxelEdited?.Invoke(chunk, pos, mat);
     public void CreateDetachedObject(List<Vector3i> globalCluster)
     {
-        foreach (var pos in globalCluster) 
-            RemoveVoxelGlobal(pos);
-
         if (globalCluster.Count == 0) return;
 
-        // Находим минимум
+        // 1. Сначала находим границы и собираем данные о материалах
         Vector3i minIdx = globalCluster[0];
         foreach (var v in globalCluster)
         {
@@ -500,14 +512,29 @@ public class WorldManager : IDisposable
             if (v.Z < minIdx.Z) minIdx.Z = v.Z;
         }
 
-        // Преобразуем в локальные координаты
         List<Vector3i> localVoxels = new List<Vector3i>();
+        Dictionary<Vector3i, uint> materials = new Dictionary<Vector3i, uint>();
+        MaterialType dominantMat = MaterialType.Stone; // Временный дефолт
+
+        // Читаем материалы ДО того, как удалим воксели из мира
         foreach (var v in globalCluster)
         {
-            localVoxels.Add(v - minIdx);
+            Vector3i localPos = v - minIdx;
+            localVoxels.Add(localPos);
+            
+            MaterialType mat = GetMaterialGlobal(v);
+            if (mat != MaterialType.Air)
+            {
+                materials[localPos] = (uint)mat;
+                dominantMat = mat; // Запоминаем последний как "базовый"
+            }
         }
 
-        // ✅ Сортировка для предсказуемого порядка
+        // 2. Теперь удаляем их из мира
+        foreach (var pos in globalCluster) 
+            RemoveVoxelGlobal(pos);
+
+        // 3. Сортировка для порядка
         localVoxels.Sort((a, b) => {
             if (a.X != b.X) return a.X.CompareTo(b.X);
             if (a.Y != b.Y) return a.Y.CompareTo(b.Y);
@@ -520,23 +547,25 @@ public class WorldManager : IDisposable
             minIdx.Z * Constants.VoxelSize
         );
 
+        // 4. Отправляем в очередь с материалами
         _objectsCreationQueue.Enqueue(new VoxelObjectCreationData
         {
             Voxels = localVoxels,
-            Material = MaterialType.Stone,
+            BaseMaterial = dominantMat, // Используем найденный материал как базу
+            PerVoxelMaterials = materials,
             WorldPosition = worldPos
         });
     }
+    
     public void QueueForRemoval(VoxelObject obj) => _objectsToRemove.Add(obj);
     // В методе DestroyVoxelAt, секция Dynamic Objects
 
-public void DestroyVoxelAt(CollidableReference collidable, BepuVector3 worldHitLocation, BepuVector3 worldHitNormal)
+    public void DestroyVoxelAt(CollidableReference collidable, BepuVector3 worldHitLocation, BepuVector3 worldHitNormal)
 {
     var pointInside = worldHitLocation - worldHitNormal * (Constants.VoxelSize * 0.5f);
 
     if (collidable.Mobility == CollidableMobility.Static)
     {
-        // Статика без изменений
         Vector3i globalVoxelIndex = new Vector3i(
             (int)Math.Floor(pointInside.X / Constants.VoxelSize), 
             (int)Math.Floor(pointInside.Y / Constants.VoxelSize), 
@@ -548,61 +577,77 @@ public void DestroyVoxelAt(CollidableReference collidable, BepuVector3 worldHitL
             _integritySystem.QueueCheck(globalVoxelIndex);
         }
     }
-// ============================================================================
-// WorldManager.cs — ИСПОЛЬЗУЕМ ИНТЕРПОЛИРОВАННУЮ ПОЗИЦИЮ ДЛЯ ХИТА
-// ============================================================================
-
-else if (collidable.Mobility == CollidableMobility.Dynamic && 
-         _bodyToVoxelObjectMap.TryGetValue(collidable.BodyHandle, out var voxelObj))
-{
-    // Используем интерполированную позицию/вращение (как в рендере)
-    float alpha = PhysicsWorld.PhysicsAlpha;
-    Vector3 interpPos = Vector3.Lerp(voxelObj.PrevPosition, voxelObj.Position, alpha);
-    Quaternion interpRot = Quaternion.Slerp(voxelObj.PrevRotation, voxelObj.Rotation, alpha);
-    
-    // Обратная трансформация: мировые координаты → локальные
-    Matrix4 invModel = Matrix4.CreateTranslation(-interpPos) *
-                      Matrix4.CreateFromQuaternion(interpRot.Inverted()) *
-                      Matrix4.CreateTranslation(voxelObj.LocalCenterOfMass);
-    
-    Vector4 localHitMeters = new Vector4(pointInside.ToOpenTK(), 1.0f) * invModel;
-    
-    // ✅ КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Инверсия оси Z
-    // Причина: несоответствие систем координат между рендером и физикой
-    int maxZ = voxelObj.VoxelCoordinates.Max(v => v.Z);
-    
-    Vector3i localVoxelIndex = new Vector3i(
-        (int)Math.Floor(localHitMeters.X / Constants.VoxelSize),
-        (int)Math.Floor(localHitMeters.Y / Constants.VoxelSize),
-        maxZ - (int)Math.Floor(localHitMeters.Z / Constants.VoxelSize)
-    );
-
-    if (voxelObj.RemoveVoxel(localVoxelIndex))
+    else if (collidable.Mobility == CollidableMobility.Dynamic && 
+             _bodyToVoxelObjectMap.TryGetValue(collidable.BodyHandle, out var voxelObj))
     {
-        if (voxelObj.VoxelCoordinates.Count == 0) return;
+        float alpha = PhysicsWorld.PhysicsAlpha;
+        Matrix4 modelMatrix = voxelObj.GetInterpolatedModelMatrix(alpha);
+        Matrix4 invModel = Matrix4.Invert(modelMatrix);
 
-        var clusters = voxelObj.GetConnectedClusters();
-        if (clusters.Count == 1)
-        {
-            voxelObj.RebuildMeshAndPhysics(PhysicsWorld);
-        }
-        else
-        {
-            clusters.Sort((a, b) => b.Count.CompareTo(a.Count));
-            var mainCluster = clusters[0];
-            var mainSet = new HashSet<Vector3i>(mainCluster);
-            voxelObj.VoxelCoordinates.RemoveAll(v => !mainSet.Contains(v));
-            voxelObj.RebuildMeshAndPhysics(PhysicsWorld);
+        Vector4 localHitRaw = new Vector4(worldHitLocation.ToOpenTK(), 1.0f) * invModel;
+        Vector3 localHitPos = localHitRaw.Xyz;
 
-            for (int i = 1; i < clusters.Count; i++)
+        Quaternion invRot = Quaternion.Invert(Quaternion.Slerp(voxelObj.PrevRotation, voxelObj.Rotation, alpha));
+        Vector3 localNormal = Vector3.Transform(worldHitNormal.ToOpenTK(), invRot);
+
+        // ИСПРАВЛЕНИЕ: Переименовано, чтобы избежать конфликта имен
+        Vector3 pointInsideLocal = localHitPos - localNormal * (Constants.VoxelSize * 0.5f);
+
+        Vector3i localVoxelIndex = new Vector3i(
+            (int)Math.Floor(pointInsideLocal.X / Constants.VoxelSize),
+            (int)Math.Floor(pointInsideLocal.Y / Constants.VoxelSize),
+            (int)Math.Floor(pointInsideLocal.Z / Constants.VoxelSize)
+        );
+
+        if (voxelObj.RemoveVoxel(localVoxelIndex))
+        {
+            if (voxelObj.VoxelCoordinates.Count == 0) return;
+
+            var clusters = voxelObj.GetConnectedClusters();
+            if (clusters.Count == 1)
             {
-                SpawnSplitCluster(clusters[i], voxelObj);
+                voxelObj.RebuildMeshAndPhysics(PhysicsWorld);
+            }
+            else
+            {
+                clusters.Sort((a, b) => b.Count.CompareTo(a.Count));
+                
+                var mainCluster = clusters[0];
+                var mainSet = new HashSet<Vector3i>(mainCluster);
+                voxelObj.VoxelCoordinates.RemoveAll(v => !mainSet.Contains(v));
+                
+                var savedPos = voxelObj.Position;
+                var savedCoM = voxelObj.LocalCenterOfMass;
+                var savedRot = voxelObj.Rotation;
+                
+                voxelObj.RebuildMeshAndPhysics(PhysicsWorld);
+
+                for (int i = 1; i < clusters.Count; i++)
+                {
+                    SpawnSplitCluster(clusters[i], voxelObj, savedPos, savedCoM, savedRot);
+                }
             }
         }
     }
 }
-}
     
+    public MaterialType GetMaterialGlobal(Vector3i globalPos)
+    {
+        lock (_chunksLock) // <--- ГЛАВНОЕ ИСПРАВЛЕНИЕ!
+        {
+            Vector3i chunkPos = GetChunkPosFromVoxelIndex(globalPos);
+            if (_chunks.TryGetValue(chunkPos, out var chunk) && chunk.IsLoaded)
+            {
+                int res = Constants.ChunkResolution;
+                int lx = globalPos.X % res; if (lx < 0) lx += res;
+                int ly = globalPos.Y % res; if (ly < 0) ly += res;
+                int lz = globalPos.Z % res; if (lz < 0) lz += res;
+                return chunk.GetMaterialAt(new Vector3i(lx, ly, lz));
+            }
+            return MaterialType.Air;
+        }
+    }
+
     // 1. Спавн динамического объекта (Динамит)
     public void SpawnDynamicObject(VoxelObject vo, System.Numerics.Vector3 position, System.Numerics.Vector3 velocity)
     {
@@ -694,7 +739,61 @@ else if (collidable.Mobility == CollidableMobility.Dynamic &&
         }
     }
 
-    private void SpawnSplitCluster(List<Vector3i> localClusterVoxels, VoxelObject parentObj) { Vector3i anchorIdx = localClusterVoxels[0]; List<Vector3i> newLocalVoxels = new List<Vector3i>(); foreach(var v in localClusterVoxels) newLocalVoxels.Add(v - anchorIdx); System.Numerics.Vector3 calculatedLocalCoM = System.Numerics.Vector3.Zero; foreach (var v in newLocalVoxels) calculatedLocalCoM += (v.ToSystemNumerics() + new System.Numerics.Vector3(0.5f)) * Constants.VoxelSize; if (newLocalVoxels.Count > 0) calculatedLocalCoM /= newLocalVoxels.Count; System.Numerics.Vector3 anchorPosInParent = (anchorIdx.ToSystemNumerics() + new System.Numerics.Vector3(0.5f)) * Constants.VoxelSize; anchorPosInParent -= parentObj.LocalCenterOfMass.ToSystemNumerics(); System.Numerics.Vector3 anchorWorldPos = parentObj.Position.ToSystemNumerics() + System.Numerics.Vector3.Transform(anchorPosInParent, parentObj.Rotation.ToSystemNumerics()); System.Numerics.Vector3 anchorInNewLocal = new System.Numerics.Vector3(0.5f) * Constants.VoxelSize; System.Numerics.Vector3 offset = anchorInNewLocal - calculatedLocalCoM; System.Numerics.Vector3 rotatedOffset = System.Numerics.Vector3.Transform(offset, parentObj.Rotation.ToSystemNumerics()); System.Numerics.Vector3 finalSpawnPos = anchorWorldPos - rotatedOffset; _objectsCreationQueue.Enqueue(new VoxelObjectCreationData { Voxels = newLocalVoxels, Material = parentObj.Material, WorldPosition = finalSpawnPos }); }
+    private void SpawnSplitCluster(
+    List<Vector3i> localClusterVoxels, 
+    VoxelObject parentObj,
+    Vector3 savedParentPos,    // Позиция ДО пересчёта
+    Vector3 savedParentCoM,    // Центр масс ДО пересчёта
+    Quaternion savedParentRot) // Поворот (обычно не меняется, но для надёжности)
+{
+    if (localClusterVoxels.Count == 0) return;
+
+    Vector3i anchorIdx = localClusterVoxels[0];
+    List<Vector3i> newLocalVoxels = new List<Vector3i>();
+    Dictionary<Vector3i, uint> newMaterials = new Dictionary<Vector3i, uint>();
+
+    foreach (var originalPosInParent in localClusterVoxels)
+    {
+        Vector3i newPos = originalPosInParent - anchorIdx;
+        newLocalVoxels.Add(newPos);
+        if (parentObj.VoxelMaterials.TryGetValue(originalPosInParent, out uint matId))
+            newMaterials[newPos] = matId;
+        else
+            newMaterials[newPos] = (uint)parentObj.Material;
+    }
+
+    // Используем savedParentCoM и savedParentPos!
+    System.Numerics.Vector3 anchorPosInParentLocal = 
+        (anchorIdx.ToSystemNumerics() - savedParentCoM.ToSystemNumerics()) 
+        * Constants.VoxelSize * parentObj.Scale;
+    
+    System.Numerics.Vector3 anchorWorldPos = savedParentPos.ToSystemNumerics() + 
+        System.Numerics.Vector3.Transform(anchorPosInParentLocal, savedParentRot.ToSystemNumerics());
+
+    var newObj = new VoxelObject(newLocalVoxels, parentObj.Material, parentObj.Scale, newMaterials);
+    newObj.OnEmpty += QueueForRemoval;
+
+    var handle = PhysicsWorld.CreateVoxelObjectBody(
+        newLocalVoxels, newObj.Material, newObj.Scale, anchorWorldPos, out var newBodyCoM);
+
+    if (handle.Value == -1) return;
+    
+    var bodyRef = PhysicsWorld.Simulation.Bodies.GetBodyReference(handle);
+    System.Numerics.Vector3 rotatedCoMOffset = System.Numerics.Vector3.Transform(
+        newBodyCoM, savedParentRot.ToSystemNumerics());
+    
+    // ЭТО БЫЛ ЗНАК "-", НУЖЕН "+"!
+    // anchorWorldPos — это угол вокселя, CoM внутри этого вокселя смещён на +rotatedCoMOffset
+    bodyRef.Pose.Position = anchorWorldPos + rotatedCoMOffset;
+    bodyRef.Pose.Orientation = savedParentRot.ToSystemNumerics();
+    
+    if (PhysicsWorld.Simulation.Bodies.BodyExists(parentObj.BodyHandle))
+        bodyRef.Velocity = PhysicsWorld.Simulation.Bodies.GetBodyReference(parentObj.BodyHandle).Velocity;
+
+    newObj.InitializePhysics(handle, newBodyCoM.ToOpenTK());
+    _voxelObjects.Add(newObj);
+    RegisterVoxelObject(handle, newObj);
+}
     private Vector3i GetChunkPosFromVoxelIndex(Vector3i voxelIndex) => new Vector3i((int)Math.Floor((float)voxelIndex.X / Constants.ChunkResolution), (int)Math.Floor((float)voxelIndex.Y / Constants.ChunkResolution), (int)Math.Floor((float)voxelIndex.Z / Constants.ChunkResolution));
     public bool IsVoxelSolidGlobal(Vector3i globalVoxelIndex) { Vector3i chunkPos = GetChunkPosFromVoxelIndex(globalVoxelIndex); if (_chunks.TryGetValue(chunkPos, out var chunk) && chunk.IsLoaded) { int res = Constants.ChunkResolution; int lx = globalVoxelIndex.X % res; if (lx < 0) lx += res; int ly = globalVoxelIndex.Y % res; if (ly < 0) ly += res; int lz = globalVoxelIndex.Z % res; if (lz < 0) lz += res; return chunk.IsVoxelSolidAt(new Vector3i(lx, ly, lz)); } return false; }
     public bool IsChunkLoadedAt(Vector3i globalVoxelIndex) { Vector3i chunkPos = GetChunkPosFromVoxelIndex(globalVoxelIndex); lock(_chunksLock) return _chunks.ContainsKey(chunkPos) && _chunks[chunkPos].IsLoaded; }
@@ -713,5 +812,35 @@ else if (collidable.Mobility == CollidableMobility.Dynamic &&
         }
         return System.Numerics.Vector3.Zero;
     }
-    public void SpawnTestVoxel(System.Numerics.Vector3 position, MaterialType material) { var voxels = new List<Vector3i> { new Vector3i(0, 0, 0) }; _objectsCreationQueue.Enqueue(new VoxelObjectCreationData { Voxels = voxels, Material = material, WorldPosition = position }); }
+    public void SpawnTestVoxel(System.Numerics.Vector3 position, MaterialType material) { var voxels = new List<Vector3i> { new Vector3i(0, 0, 0) }; _objectsCreationQueue.Enqueue(new VoxelObjectCreationData { Voxels = voxels, BaseMaterial = material, PerVoxelMaterials = null, WorldPosition = position }); }
+    public void TestBreakVoxel(VoxelObject vo, Vector3i localPos)
+    {
+        if (vo.RemoveVoxel(localPos))
+        {
+            if (vo.VoxelCoordinates.Count == 0) return;
+
+            var clusters = vo.GetConnectedClusters();
+            if (clusters.Count == 1)
+            {
+                vo.RebuildMeshAndPhysics(PhysicsWorld);
+            }
+            else
+            {
+                clusters.Sort((a, b) => b.Count.CompareTo(a.Count));
+                var mainCluster = clusters[0];
+                var mainSet = new HashSet<Vector3i>(mainCluster);
+                vo.VoxelCoordinates.RemoveAll(v => !mainSet.Contains(v));
+                var savedPos = vo.Position;
+                var savedCoM = vo.LocalCenterOfMass;
+                var savedRot = vo.Rotation;
+
+                vo.RebuildMeshAndPhysics(PhysicsWorld);
+
+                for (int i = 1; i < clusters.Count; i++)
+                {
+                    SpawnSplitCluster(clusters[i], vo, savedPos, savedCoM, savedRot);
+                }
+            }
+        }
+    }
 }

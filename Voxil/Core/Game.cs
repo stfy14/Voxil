@@ -94,13 +94,48 @@ public class Game : GameWindow
         _uiManager.AddWindow(_mainMenuWindow);
         _uiManager.AddWindow(_debugStatsWindow);
         _uiManager.AddWindow(invWindow);
-
-        CursorState = CursorState.Grabbed;
+        
         _input.ResetMouseDelta();
-
+        
         _isInitialized = true;
+        
+        // === 1. СНАЧАЛА ХВАТАЕМ КУРСОР ===
+        CursorState = CursorState.Grabbed;
+
+        // === 2. ПОТОМ ВКЛЮЧАЕМ RAW INPUT ===
+        // Это единственный правильный способ для твоей версии OpenTK
+        unsafe
+        {
+            var winPtr = this.WindowPtr;
+            
+            // Проверяем, поддерживает ли железо/драйвер этот режим
+            if (GLFW.RawMouseMotionSupported())
+            {
+                // 0x00033005 = GLFW_RAW_MOUSE_MOTION
+                // (CursorModeValue)1 = GLFW_TRUE
+                GLFW.SetInputMode(winPtr, (CursorStateAttribute)0x00033005, (CursorModeValue)1);
+                
+                // === ПРОВЕРКА: Проверяем, включилось ли на самом деле ===
+                var status = GLFW.GetInputMode(winPtr, (CursorStateAttribute)0x00033005);
+                Console.WriteLine($"[Input] Raw Mouse Motion Request: ON. Result Status: {status} (1 = Success)");
+            }
+            else
+            {
+                Console.WriteLine("[Input] Raw Mouse Motion NOT supported by your driver!");
+            }
+        }
     }
 
+    protected override void OnMouseMove(MouseMoveEventArgs e)
+    {
+        // base.OnMouseMove(e); // <--- УБРАТЬ (снижает нагрузку на CPU)
+        
+        if (_input != null)
+        {
+            _input.AddRawMouseDelta(e.Delta);
+        }
+    }
+    
     protected override void OnUpdateFrame(FrameEventArgs e)
     {
         base.OnUpdateFrame(e);
@@ -112,8 +147,9 @@ public class Game : GameWindow
         {
             GameSettings.TotalTimeHours += (deltaTime * GameSettings.TimeScale) / 3600.0;
         }
-
+        
         _uiManager.Update(this, deltaTime);
+        
 
         if (_renderer.IsReallocationPending())
         {
@@ -130,8 +166,21 @@ public class Game : GameWindow
         }
 
         bool isMenuOpen = _mainMenuWindow.IsVisible || _settingsWindow.IsVisible;
-        if (isMenuOpen) { if (CursorState != CursorState.Normal) CursorState = CursorState.Normal; }
-        else { if (CursorState != CursorState.Grabbed) { CursorState = CursorState.Grabbed; _input.ResetMouseDelta(); } }
+        // Говорим инпуту, можно ли сейчас крутить камерой
+        _input.SetCursorGrabbed(!isMenuOpen); 
+
+        if (isMenuOpen) 
+        { 
+            if (CursorState != CursorState.Normal) CursorState = CursorState.Normal; 
+        }
+        else 
+        { 
+            if (CursorState != CursorState.Grabbed) 
+            { 
+                CursorState = CursorState.Grabbed; 
+                _input.ResetMouseDelta(); 
+            } 
+        }
 
         _input.Update(KeyboardState, MouseState);
         if (_input.IsKeyPressed(Keys.Escape))
@@ -139,13 +188,12 @@ public class Game : GameWindow
             if (_settingsWindow.IsVisible) _settingsWindow.Toggle();
             else _mainMenuWindow.Toggle();
         }
-
+        _testManager.Update(deltaTime, _input);
+        
         if (!isMenuOpen)
         {
             if (_input.IsKeyPressed(Keys.F3)) { PerformanceMonitor.IsEnabled = !PerformanceMonitor.IsEnabled; _debugStatsWindow.Toggle(); }
             if (_input.IsKeyPressed(Keys.F)) _player.Controller.ToggleFly();
-
-            _testManager.Update(deltaTime, _input);
             
             // АНИМАЦИЯ РУК И ВЬЮМОДЕЛИ
             var viewModel = _player.GetViewModel();

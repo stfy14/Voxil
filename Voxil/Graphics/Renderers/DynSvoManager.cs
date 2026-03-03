@@ -45,10 +45,11 @@ public sealed class DynSvoManager : IDisposable
 
     private sealed class Slot
     {
-        public uint          GpuOffset;
-        public uint[]?       CurrentData;
-        public Task<uint[]>? RebuildTask;
-        public bool          PendingRebuild;
+        public uint GpuOffset;
+        public uint[] CurrentData;
+        public Task<uint[]> RebuildTask;
+        public bool PendingRebuild;
+        public int BuiltGridSize; // ← новое
     }
 
     private readonly Dictionary<VoxelObject, Slot> _slots =
@@ -82,140 +83,146 @@ public sealed class DynSvoManager : IDisposable
     // чтобы FillGpuObject читал уже актуальные SvoGpuOffset
     // -------------------------------------------------------------------------
 
-    public void Update(List<VoxelObject> objects)
+public void Update(List<VoxelObject> objects, VoxelObject viewModel)
     {
-        // Сбрасываем список синхронных апгрейдов с прошлого вызова
         _pendingSyncUploads.Clear();
 
-        // ── Фаза 1: Запустить/завершить задачи ──────────────────────────────
-        foreach (var obj in objects)
+        // 1. Обрабатываем обычные объекты
+        for (int i = 0; i < objects.Count; i++)
         {
-            if (!_slots.TryGetValue(obj, out var slot))
-            {
-                // Новый объект
-                slot = new Slot();
-                _slots[obj] = slot;
-                obj.SvoDirty = true;
-            }
+            ProcessSingleObject(objects[i], objects);
+        }
 
-            if (obj.SvoDirty && slot.RebuildTask == null)
+        // 1.5. Обрабатываем ViewModel (Динамит в руке)
+        if (viewModel != null)
+        {
+            ProcessSingleObject(viewModel, objects);
+        }
+
+        // 2. Загружаем быстрые обновления
+        for (int i = 0; i < _pendingSyncUploads.Count; i++)
+        {
+            UploadSlot(_pendingSyncUploads[i].obj, _pendingSyncUploads[i].slot, objects);
+        }
+
+        // 3. Очищаем удаленные объекты
+        List<VoxelObject> toRemove = null;
+        foreach (var key in _slots.Keys)
+        {
+            // ВАЖНО: Не удаляем viewModel из памяти!
+            if (key != viewModel && !objects.Contains(key)) 
             {
-                // Нет активной задачи — запускаем сразу
-                obj.SvoDirty        = false;
+                if (toRemove == null) toRemove = new List<VoxelObject>();
+                toRemove.Add(key);
+            }
+        }
+        
+        if (toRemove != null)
+        {
+            for (int i = 0; i < toRemove.Count; i++) _slots.Remove(toRemove[i]);
+        }
+    }
+
+    // Вынесли логику в отдельный метод, чтобы код был чистым
+    private void ProcessSingleObject(VoxelObject obj, List<VoxelObject> allObjects)
+    {
+        if (!_slots.TryGetValue(obj, out var slot))
+        {
+            slot = new Slot();
+            _slots[obj] = slot;
+            obj.SvoDirty = true;
+        }
+
+        if (obj.SvoDirty && slot.RebuildTask == null)
+        {
+            obj.SvoDirty = false;
+            slot.PendingRebuild = false;
+            StartRebuild(obj, slot);
+        }
+        else if (obj.SvoDirty && slot.RebuildTask != null)
+        {
+            slot.PendingRebuild = true;
+            obj.SvoDirty = false;
+        }
+
+        if (slot.RebuildTask != null && slot.RebuildTask.IsCompleted)
+        {
+            if (!slot.RebuildTask.IsFaulted)
+            {
+                slot.CurrentData = slot.RebuildTask.Result;
+                UploadSlot(obj, slot, allObjects);
+            }
+            slot.RebuildTask = null;
+
+            if (slot.PendingRebuild)
+            {
                 slot.PendingRebuild = false;
                 StartRebuild(obj, slot);
             }
-            else if (obj.SvoDirty && slot.RebuildTask != null)
-            {
-                // Задача уже работает — запомним что нужна ещё одна пересборка
-                slot.PendingRebuild = true;
-                obj.SvoDirty        = false;
-            }
-
-            // Async задача завершена — забираем результат
-            if (slot.RebuildTask != null && slot.RebuildTask.IsCompleted)
-            {
-                if (slot.RebuildTask.IsFaulted)
-                {
-                    Console.WriteLine($"[DynSvoManager] Rebuild error: " +
-                                      $"{slot.RebuildTask.Exception?.GetBaseException().Message}");
-                }
-                else
-                {
-                    slot.CurrentData = slot.RebuildTask.Result;
-                    UploadSlot(obj, slot, objects);
-                }
-
-                slot.RebuildTask = null;
-
-                // Объект изменился пока задача работала — перезапускаем
-                if (slot.PendingRebuild)
-                {
-                    slot.PendingRebuild = false;
-                    StartRebuild(obj, slot);
-                }
-            }
         }
-
-        // ── Фаза 2: Загрузить синхронные апгрейды ───────────────────────────
-        // Данные уже готовы (построены синхронно в StartRebuild),
-        // здесь только отправляем на GPU
-        foreach (var (obj, slot) in _pendingSyncUploads)
-        {
-            UploadSlot(obj, slot, objects);
-        }
-
-        // ── Фаза 3: Удалить слоты мёртвых объектов ──────────────────────────
-        // HashSet даёт O(1) Contains вместо O(n) у List → нет O(n²) при 1000 объектах
-        var objectSet = new HashSet<VoxelObject>(objects, ReferenceEqualityComparer.Instance);
-
-        List<VoxelObject>? toRemove = null;
-        foreach (var key in _slots.Keys)
-        {
-            if (!objectSet.Contains(key))
-                (toRemove ??= new List<VoxelObject>()).Add(key);
-        }
-        if (toRemove != null)
-            foreach (var dead in toRemove)
-                _slots.Remove(dead);
     }
-
-    // -------------------------------------------------------------------------
-    // Вспомогательные методы
-    // -------------------------------------------------------------------------
-
+    
     private void StartRebuild(VoxelObject obj, Slot slot)
     {
-        // Снимаем snapshot на главном треде — фоновый Task не должен трогать VoxelObject
-        var  coords     = obj.VoxelCoordinates.ToArray();
-        var  matDict    = new Dictionary<Vector3i, uint>(obj.VoxelMaterials);
+        var coords      = obj.VoxelCoordinates.ToArray();
+        var matDict     = new Dictionary<Vector3i, uint>(obj.VoxelMaterials);
         uint defaultMat = (uint)obj.Material;
-        int  gridSize   = ComputeGridSize(obj);
+        int gridSize    = ComputeGridSize(obj);
 
-        obj.SvoGridSize       = gridSize;
-        obj.SvoVoxelWorldSize = Constants.VoxelSize; // Scale НЕ включаем — invModel его уберёт
+        slot.BuiltGridSize    = gridSize;
+        obj.SvoGridSize       = 0;
+        obj.SvoVoxelWorldSize = 0.0f;
+
+        // === ДИАГНОСТИКА ===
+        Console.WriteLine($"[StartRebuild] obj={obj.GetHashCode()} voxels={coords.Length} gridSize={gridSize} defaultMat={defaultMat}");
+        foreach (var c in coords.Take(5))
+        {
+            matDict.TryGetValue(c, out uint m);
+            Console.WriteLine($"  {c} -> mat={( m != 0 ? m : defaultMat)}");
+        }
+        // ==================
+
+        Func<Vector3i, uint> getMaterial = pos =>
+            matDict.TryGetValue(pos, out var m) ? m : defaultMat;
 
         if (coords.Length <= SYNC_BUILD_THRESHOLD)
         {
-            // ── Синхронный путь ──────────────────────────────────────────────
-            // SVO готов прямо сейчас, без лага в 1 кадр
-            // Выгоден для малых объектов: Task overhead (~0.3ms) > сам билд (~0.01ms)
-            slot.CurrentData = SVOBuilder.Build(
-                coords,
-                pos => matDict.TryGetValue(pos, out var m) ? m : defaultMat,
-                gridSize);
-
-            slot.RebuildTask = null;
-
-            // Нельзя вызвать UploadSlot здесь — мы внутри foreach по _slots.
-            // Откладываем на фазу 2 в Update()
+            slot.CurrentData  = SVOBuilder.Build(coords, getMaterial, gridSize);
+            slot.RebuildTask  = null;
             _pendingSyncUploads.Add((obj, slot));
         }
         else
         {
-            // ── Async путь ───────────────────────────────────────────────────
-            // Для больших объектов — не блокируем главный тред
             slot.RebuildTask = Task.Run(() =>
-                SVOBuilder.Build(
-                    coords,
-                    pos => matDict.TryGetValue(pos, out var m) ? m : defaultMat,
-                    gridSize));
+                SVOBuilder.Build(coords, getMaterial, gridSize));
         }
     }
 
     private void UploadSlot(VoxelObject obj, Slot slot, List<VoxelObject> allObjects)
     {
-        if (slot.CurrentData == null) return;
+        if (slot.CurrentData == null || slot.CurrentData.Length == 0) return;
 
         uint nodeCount = (uint)(slot.CurrentData.Length / 4);
+        if (nodeCount == 0) return;
 
-        // Пул переполнен — перепаковываем
         if (_cursor + nodeCount > MAX_POOL_NODES)
             Compact(allObjects);
 
         slot.GpuOffset   = _cursor;
         obj.SvoGpuOffset = _cursor;
-        _cursor         += nodeCount;
+
+        // === ДИАГНОСТИКА ===
+        Console.WriteLine($"[UploadSlot] obj={obj.GetHashCode()} gpuOffset={_cursor} nodeCount={nodeCount}");
+        for (int i = 0; i < Math.Min((int)nodeCount, 8); i++)
+        {
+            uint childMask = slot.CurrentData[i * 4 + 0];
+            uint material  = slot.CurrentData[i * 4 + 2];
+            if (material != 0 || childMask != 0)
+                Console.WriteLine($"  node[{i}]: childMask={childMask} mat={material}");
+        }
+        // ==================
+
+        _cursor += nodeCount;
 
         GL.BindBuffer(BufferTarget.ShaderStorageBuffer, _ssbo);
         GL.BufferSubData(
@@ -223,6 +230,9 @@ public sealed class DynSvoManager : IDisposable
             (IntPtr)((long)slot.GpuOffset * NODE_SIZE_BYTES),
             slot.CurrentData.Length * sizeof(uint),
             slot.CurrentData);
+
+        obj.SvoGridSize       = slot.BuiltGridSize;
+        obj.SvoVoxelWorldSize = Constants.VoxelSize;
     }
 
     /// <summary>

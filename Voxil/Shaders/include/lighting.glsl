@@ -173,8 +173,8 @@ float CalculateSoftShadow(vec3 hitPos, vec3 normal, vec3 sunDir) {
         vec3  shadowDir = normalize(sunDir + right * off.x + up * off.y);
         bool  hit       = false;
         if (distToCam < 150.0 && uObjectCount > 0) {
-            float tDyn = 100000.0; int idDyn = -1; vec3 nDyn = vec3(0); int dummy = 0;
-            if (TraceDynamicRay(shadowOrigin, shadowDir, maxShadowDist, tDyn, idDyn, nDyn, dummy)) hit = true;
+            float tDyn = 100000.0; int idDyn = -1; vec3 nDyn = vec3(0); uint dummyMat = 0u; int dummy = 0;
+            if (TraceDynamicRay(shadowOrigin, shadowDir, maxShadowDist, tDyn, idDyn, nDyn, dummyMat, dummy)) hit = true;
         }
         if (!hit) {
             float tHit = 0.0; uint matID = 0u;

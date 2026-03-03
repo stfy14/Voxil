@@ -106,12 +106,15 @@ void main() {
     float tDyn = uRenderDistance; 
     int idDyn = -1; 
     vec3 normDyn = vec3(0);
+    uint dynMatID = 0u;    // ← НОВОЕ
     bool hitDyn = false;
 
     float maxDynSearch = hitStatic ? tStatic : uRenderDistance;
-    
+
     if (uObjectCount > 0) {
-        hitDyn = TraceDynamicRay(uCamPos, rayDir, min(tStatic, uRenderDistance), tDyn, idDyn, normDyn, steps);
+        hitDyn = TraceDynamicRay(
+            uCamPos, rayDir, min(tStatic, uRenderDistance),
+            tDyn, idDyn, normDyn, dynMatID, steps);  // ← передаём dynMatID
     }
 
     bool hit = false; float tFinal = uRenderDistance; vec3 normal = vec3(0); vec3 albedo = vec3(0); uint matID = 0u; bool isDynamic = false;
@@ -119,9 +122,11 @@ void main() {
     if (hitDyn && tDyn < tStatic) {
         hit = true; tFinal = tDyn;
         normal = normalize(normDyn);
-        albedo = dynObjects[idDyn].color.rgb;
+        // Используем per-voxel материал из SVO, если есть
+        albedo = (dynMatID != 0u) ? GetColor(dynMatID) : dynObjects[idDyn].color.rgb;
         isDynamic = true;
-    } else if (hitStatic) {
+    } 
+    else if (hitStatic) {
         hit = true; tFinal = tStatic; normal = normStatic; matID = matStatic; albedo = GetColor(matID);
     }
 

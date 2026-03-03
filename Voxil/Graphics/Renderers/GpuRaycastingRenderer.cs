@@ -13,6 +13,7 @@ public class GpuRaycastingRenderer : IDisposable
 {
     private readonly ShaderSystem _shaderSystem;
     private Shader _gridComputeShader;
+    private Shader _clearGridShader; // <--- НОВОЕ
     private int _quadVao;
     private readonly WorldManager _worldManager;
 
@@ -141,6 +142,7 @@ public class GpuRaycastingRenderer : IDisposable
     public void Load()
     {
         _gridComputeShader = new Shader("Shaders/grid_update.comp");
+        _clearGridShader = new Shader("Shaders/clear_grid.comp"); // <--- НОВОЕ
         _taaShader = new Shader("Shaders/raycast.vert", "Shaders/taa.frag");
         
         _svoManager = new DynSvoManager();
@@ -494,17 +496,7 @@ public class GpuRaycastingRenderer : IDisposable
         // =========================================================
         // 4. ОБНОВЛЯЕМ ДИНАМИЧЕСКИЕ ОБЪЕКТЫ И СЕТКУ (TEARDOWN PHYSICS)
         // =========================================================
-        var allForSvo = _worldManager.GetAllVoxelObjects();
-        if (_currentViewModel != null)
-        {
-            var withViewModel = new List<VoxelObject>(allForSvo) { _currentViewModel };
-            _svoManager.Update(withViewModel);
-        }
-        else
-        {
-            _svoManager.Update(allForSvo);
-        }
-        UpdateDynamicObjectsAndGrid();
+        UpdateDynamicObjectsAndGrid(); // SVO Manager теперь вызывается внутри этого метода!
     }
 
     public void UnloadChunk(Vector3i pos) 
@@ -610,12 +602,12 @@ public class GpuRaycastingRenderer : IDisposable
     { 
         var voxelObjects = _worldManager.GetAllVoxelObjects(); 
         
-        // === ВНЕДРЕНИЕ ВЬЮМОДЕЛИ ===
-        // Создаем временный список, включающий обычные объекты + вьюмодель
         int totalCount = voxelObjects.Count;
         if (_currentViewModel != null) totalCount++;
 
-        // Ресайз буфера если надо
+        // Вызываем SVO Manager БЕЗ создания новых списков каждый кадр
+        _svoManager.Update(voxelObjects, _currentViewModel);
+
         if (totalCount > _tempGpuObjectsArray.Length) 
         { 
             Array.Resize(ref _tempGpuObjectsArray, totalCount + 1024); 
@@ -623,22 +615,17 @@ public class GpuRaycastingRenderer : IDisposable
             GL.BufferData(BufferTarget.ShaderStorageBuffer, _tempGpuObjectsArray.Length * Marshal.SizeOf<GpuDynamicObject>(), IntPtr.Zero, BufferUsageHint.DynamicDraw); 
         } 
         
-        // Заполняем буфер
         int currentIndex = 0;
-
-        // 1. Обычные объекты
         float alpha = _worldManager.PhysicsWorld.PhysicsAlpha;
+
         for (int i = 0; i < voxelObjects.Count; i++) 
         { 
-            var vo = voxelObjects[i]; 
-            FillGpuObject(ref _tempGpuObjectsArray[currentIndex], vo, alpha, false);
+            FillGpuObject(ref _tempGpuObjectsArray[currentIndex], voxelObjects[i], alpha, false);
             currentIndex++;
         } 
 
-        // 2. Вьюмодель (всегда последняя, или как удобно)
         if (_currentViewModel != null)
         {
-            // Для вьюмодели alpha = 1.0, так как мы обновляем её позицию каждый кадр в Update, без физики
             FillGpuObject(ref _tempGpuObjectsArray[currentIndex], _currentViewModel, 1.0f, true);
             currentIndex++;
         }
@@ -647,25 +634,29 @@ public class GpuRaycastingRenderer : IDisposable
         { 
             GL.BindBuffer(BufferTarget.ShaderStorageBuffer, _dynamicObjectsBuffer); 
             GL.BufferSubData(BufferTarget.ShaderStorageBuffer, IntPtr.Zero, totalCount * Marshal.SizeOf<GpuDynamicObject>(), _tempGpuObjectsArray); 
-        } 
-        
-        // ... (Остальной код очистки сетки и вызова компутера остается тем же) ...
-        // ВНИМАНИЕ: uObjectCount теперь равен totalCount!
-        
-        // [КОПИРУЕМ СТАРУЮ ЛОГИКУ СЕТКИ, НО МЕНЯЕМ count НА totalCount]
-        float snap = _gridCellSize; 
-        Vector3 playerPos = _worldManager.GetPlayerPosition(); 
-        Vector3 snappedCenter = new Vector3((float)Math.Floor(playerPos.X / snap) * snap, (float)Math.Floor(playerPos.Y / snap) * snap, (float)Math.Floor(playerPos.Z / snap) * snap); 
-        float halfExtent = (OBJ_GRID_SIZE * _gridCellSize) / 2.0f; 
-        _lastGridOrigin = snappedCenter - new Vector3(halfExtent); 
-        uint zero = 0; 
-        GL.BindBuffer(BufferTarget.AtomicCounterBuffer, _atomicCounterBuffer); 
-        GL.BufferSubData(BufferTarget.AtomicCounterBuffer, IntPtr.Zero, sizeof(uint), ref zero); 
-        GL.ClearTexImage(_gridHeadTexture, 0, PixelFormat.RedInteger, PixelType.Int, IntPtr.Zero); 
-        
-        if (totalCount > 0) { // <--- ТУТ totalCount
+            
+            // --- ИСПРАВЛЕНИЕ: ДЕЛАЕМ ЭТО ТОЛЬКО ЕСЛИ ЕСТЬ ОБЪЕКТЫ ---
+            float snap = _gridCellSize; 
+            Vector3 playerPos = _worldManager.GetPlayerPosition(); 
+            Vector3 snappedCenter = new Vector3((float)Math.Floor(playerPos.X / snap) * snap, (float)Math.Floor(playerPos.Y / snap) * snap, (float)Math.Floor(playerPos.Z / snap) * snap); 
+            float halfExtent = (OBJ_GRID_SIZE * _gridCellSize) / 2.0f; 
+            _lastGridOrigin = snappedCenter - new Vector3(halfExtent); 
+            
+            uint zero = 0; 
+            GL.BindBuffer(BufferTarget.AtomicCounterBuffer, _atomicCounterBuffer); 
+            GL.BufferSubData(BufferTarget.AtomicCounterBuffer, IntPtr.Zero, sizeof(uint), ref zero); 
+            
+            // Вместо тормозящего ClearTexImage используем компьют-шейдер
+            _clearGridShader.Use();
+            GL.BindImageTexture(1, _gridHeadTexture, 0, true, 0, TextureAccess.WriteOnly, SizedInternalFormat.R32i);
+            // Сетка 64x64x64. Группа 8x8x8. Значит запускаем 8x8x8 групп.
+            GL.DispatchCompute(8, 8, 8); 
+
+            // Ставим барьер, чтобы гарантировать, что очистка завершится ДО того, как начнется заполнение
+            GL.MemoryBarrier(MemoryBarrierFlags.ShaderImageAccessBarrierBit);
+
             _gridComputeShader.Use(); 
-            _gridComputeShader.SetInt("uObjectCount", totalCount); // <--- И ТУТ
+            _gridComputeShader.SetInt("uObjectCount", totalCount); 
             _gridComputeShader.SetVector3("uGridOrigin", _lastGridOrigin); 
             _gridComputeShader.SetFloat("uGridStep", _gridCellSize); 
             _gridComputeShader.SetInt("uGridSize", OBJ_GRID_SIZE); 
@@ -673,7 +664,8 @@ public class GpuRaycastingRenderer : IDisposable
             GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 2, _dynamicObjectsBuffer); 
             GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 3, _linkedListSsbo); 
             GL.BindBufferBase(BufferRangeTarget.AtomicCounterBuffer, 4, _atomicCounterBuffer); 
-            GL.DispatchCompute((totalCount + 63) / 64, 1, 1); // <--- И ТУТ
+            
+            GL.DispatchCompute((totalCount + 63) / 64, 1, 1); 
             GL.MemoryBarrier(MemoryBarrierFlags.ShaderImageAccessBarrierBit | MemoryBarrierFlags.AtomicCounterBarrierBit | MemoryBarrierFlags.ShaderStorageBarrierBit); 
         } 
     }
@@ -681,14 +673,13 @@ public class GpuRaycastingRenderer : IDisposable
     // Вспомогательный метод для заполнения структуры
     private void FillGpuObject(ref GpuDynamicObject gpuObj, VoxelObject vo, float alpha, bool isViewModel)
     {
+        Console.WriteLine($"[FillGpu] obj={vo.GetHashCode()} isViewModel={isViewModel} | " +
+                          $"SvoOffset={vo.SvoGpuOffset} GridSize={vo.SvoGridSize} VoxelSize={vo.SvoVoxelWorldSize}");
         Matrix4 model;
         if (isViewModel)
         {
-            // Берем масштаб из самого объекта!
             float scale = vo.Scale;
-     
             Vector3 centeringPivot = new Vector3(-1.0f * Constants.VoxelSize, 0.0f, -1.0f * Constants.VoxelSize);
-     
             model = Matrix4.CreateTranslation(centeringPivot) * 
                     Matrix4.CreateScale(scale) *
                     Matrix4.CreateFromQuaternion(vo.Rotation) *
@@ -703,8 +694,12 @@ public class GpuRaycastingRenderer : IDisposable
         gpuObj.Model    = model;
         gpuObj.InvModel = Matrix4.Invert(model);
         gpuObj.Color    = new Vector4(col.r, col.g, col.b, 1.0f);
-        gpuObj.BoxMin   = new Vector4(vo.LocalBoundsMin, 0);
-        gpuObj.BoxMax   = new Vector4(vo.LocalBoundsMax, 0);
+        
+        // === ИСПРАВЛЕНИЕ: Добавляем микро-отступ (0.01), чтобы AABB не "срезал" крайние воксели (фитиль) ===
+        gpuObj.BoxMin   = new Vector4(vo.LocalBoundsMin - new Vector3(0.01f), 0);
+        gpuObj.BoxMax   = new Vector4(vo.LocalBoundsMax + new Vector3(0.01f), 0);
+        // =================================================================================================
+        
         gpuObj.SvoOffset = vo.SvoGpuOffset;
         gpuObj.GridSize  = (uint)vo.SvoGridSize;
         gpuObj.VoxelSize = vo.SvoVoxelWorldSize;
@@ -749,6 +744,7 @@ public class GpuRaycastingRenderer : IDisposable
         shader.SetMatrix4("uProjection", activeProj);
         shader.SetMatrix4("uInvProjection", Matrix4.Invert(activeProj));
         shader.SetMatrix4("uInvView", Matrix4.Invert(view));
+        shader.SetInt("uShowDebugHeatmap", GameSettings.ShowDebugHeatmap ? 1 : 0);
 
         // ... (остальные параметры uRenderDistance, uTime и т.д. не трогаем, они не менялись) ...
         float viewRange = _worldManager.GetViewRangeInMeters();
@@ -958,6 +954,7 @@ public class GpuRaycastingRenderer : IDisposable
         _quadVao = 0;
         _shaderSystem?.Dispose();
         _gridComputeShader?.Dispose();
+        _clearGridShader?.Dispose(); // <--- НОВОЕ
         _svoManager?.Dispose();  // ← ДОБАВИТЬ
     }
     private int LoadTexture(string path) { if (!File.Exists(path)) return 0; int handle = GL.GenTexture(); GL.BindTexture(TextureTarget.Texture2D, handle); StbImage.stbi_set_flip_vertically_on_load(1); using (Stream stream = File.OpenRead(path)) { ImageResult image = ImageResult.FromStream(stream, ColorComponents.RedGreenBlueAlpha); GL.TexImage2D(TextureTarget.Texture2D, 0, PixelInternalFormat.Rgba, image.Width, image.Height, 0, PixelFormat.Rgba, PixelType.UnsignedByte, image.Data); } GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, (int)TextureWrapMode.Repeat); GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)TextureWrapMode.Repeat); GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.LinearMipmapLinear); GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMinFilter.Linear); GL.GenerateMipmap(GenerateMipmapTarget.Texture2D); return handle; }

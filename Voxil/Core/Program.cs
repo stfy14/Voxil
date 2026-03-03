@@ -21,7 +21,7 @@ public static class Program
             Title = "Voxil [GPU Raycasting]",
             APIVersion = new Version(4, 5),
             Profile = ContextProfile.Core,
-            Vsync = VSyncMode.Off 
+            Vsync = VSyncMode.Off
         };
 
         try

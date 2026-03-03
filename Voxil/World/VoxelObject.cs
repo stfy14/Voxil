@@ -14,9 +14,10 @@ public class VoxelObject : IDisposable
 
     // SVO статус для GPU-рендера
     public bool  SvoDirty           { get; set; } = true;   // true = нужна пересборка
-    public uint  SvoGpuOffset       { get; set; } = 0;      // смещение в SVO-пуле (в узлах)
-    public int   SvoGridSize        { get; set; } = 0;      // степень двойки, e.g. 128
+    public uint SvoGpuOffset { get; set; } = uint.MaxValue; // 0xFFFFFFFF = "ещё не готово"
+    public int SvoGridSize { get; set; } = 0; // 0 = "ещё не готово"
     public float SvoVoxelWorldSize  { get; set; } = 0f;     // Scale * Constants.VoxelSize
+    
     
     public BodyHandle BodyHandle { get; private set; }
     public Vector3 LocalCenterOfMass { get; private set; }
@@ -38,15 +39,22 @@ public class VoxelObject : IDisposable
     private bool _isDisposed = false;
     private bool _firstUpdate = true;
 
-    public VoxelObject(List<Vector3i> voxelCoordinates, MaterialType material, float scale = 1.0f)
+// Замени существующий конструктор
+    public VoxelObject(List<Vector3i> voxelCoordinates, MaterialType material, float scale = 1.0f, Dictionary<Vector3i, uint> perVoxelMaterials = null)
     {
         VoxelCoordinates = voxelCoordinates ?? throw new ArgumentNullException(nameof(voxelCoordinates));
         Material = material;
-        Scale = scale; // <--- Сохраняем масштаб
+        Scale = scale;
+        VoxelMaterials = perVoxelMaterials ?? new Dictionary<Vector3i, uint>();
+
+        // Вычисляем центр масс при создании, чтобы он был всегда!
+        LocalCenterOfMass = CalculateLocalCenterOfMass();
 
         Rotation = Quaternion.Identity;
         PrevRotation = Quaternion.Identity;
         RecalculateBounds();
+    
+        SvoDirty = true;
     }
     
     public void InitializePhysics(BodyHandle handle, Vector3 localCenterOfMass, Vector3 anchorWorldPos)
@@ -88,9 +96,9 @@ public class VoxelObject : IDisposable
     {
         Vector3 interpPos = Vector3.Lerp(PrevPosition, Position, alpha);
         Quaternion interpRot = Quaternion.Slerp(PrevRotation, Rotation, alpha);
-    
-        // ДОБАВЛЕНО: Matrix4.CreateScale(Scale)
-        // Порядок важен: Сначала Скейл, потом Сдвиг в центр масс, потом Вращение, потом Позиция
+
+        // ПРАВИЛЬНЫЙ ПОРЯДОК: Scale -> Translate to CoM -> Rotate -> Translate to World
+        // В OpenTK умножение идет справа налево, поэтому пишем в обратном порядке.
         return Matrix4.CreateScale(Scale) * 
                Matrix4.CreateTranslation(-LocalCenterOfMass) * 
                Matrix4.CreateFromQuaternion(interpRot) * 
@@ -126,50 +134,60 @@ public class VoxelObject : IDisposable
 
     public void RebuildMeshAndPhysics(PhysicsWorld physicsWorld)
     {
-        if (_isDisposed) return;
-        if (VoxelCoordinates.Count == 0) return; 
-        if (!physicsWorld.Simulation.Bodies.BodyExists(BodyHandle)) return;
+        if (_isDisposed || VoxelCoordinates.Count == 0 || !physicsWorld.Simulation.Bodies.BodyExists(BodyHandle)) return;
 
+        // 1. Запоминаем старую позицию и центр масс
+        var oldPose = physicsWorld.GetPose(BodyHandle);
         var oldCoM = LocalCenterOfMass;
         
+        // 2. Нормализуем координаты к (0,0,0), если нужно
         int minX = VoxelCoordinates.Min(v => v.X);
         int minY = VoxelCoordinates.Min(v => v.Y);
         int minZ = VoxelCoordinates.Min(v => v.Z);
-        
         Vector3i offset = new Vector3i(minX, minY, minZ);
-        
         if (offset != Vector3i.Zero)
         {
             for (int i = 0; i < VoxelCoordinates.Count; i++)
                 VoxelCoordinates[i] -= offset;
+            
+            // Также смещаем материалы в словаре!
+            var newMaterials = new Dictionary<Vector3i, uint>();
+            foreach (var kvp in VoxelMaterials)
+            {
+                newMaterials[kvp.Key - offset] = kvp.Value;
+            }
+            VoxelMaterials.Clear();
+            foreach (var kvp in newMaterials)
+            {
+                VoxelMaterials[kvp.Key] = kvp.Value;
+            }
         }
         
-        try
-        {
-            var newHandle = physicsWorld.UpdateVoxelObjectBody(BodyHandle, VoxelCoordinates, Material, out var newCenterOfMassBepu);
-            var newCoM = newCenterOfMassBepu.ToOpenTK();
-            
-            var bodyRef = physicsWorld.Simulation.Bodies.GetBodyReference(newHandle);
-            
-            var shiftLocal = (newCoM - oldCoM) + (offset.ToOpenTK() * Constants.VoxelSize);
-            var orientation = bodyRef.Pose.Orientation;
-            var tkOrientation = new Quaternion(orientation.X, orientation.Y, orientation.Z, orientation.W);
-            var shiftWorld = Vector3.Transform(shiftLocal, tkOrientation);
-            
-            bodyRef.Pose.Position -= shiftWorld.ToSystemNumerics();
-            bodyRef.Awake = true;
+        // 3. Пересоздаем физическое тело и получаем НОВЫЙ центр масс
+        var newHandle = physicsWorld.UpdateVoxelObjectBody(BodyHandle, VoxelCoordinates, Material, Scale, out var newCenterOfMassBepu);
+        var newCoM = newCenterOfMassBepu.ToOpenTK();
+        
+        if (!physicsWorld.Simulation.Bodies.BodyExists(newHandle)) return;
 
-            BodyHandle = newHandle;
-            LocalCenterOfMass = newCoM;
-            RecalculateBounds();
-            
-            Position = bodyRef.Pose.Position.ToOpenTK();
-            PrevPosition = Position;
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"[VoxelObject] Error updating: {ex.Message}");
-        }
+        // 4. Компенсируем сдвиг центра масс
+        var bodyRef = physicsWorld.Simulation.Bodies.GetBodyReference(newHandle);
+        var tkOrientation = bodyRef.Pose.Orientation.ToOpenTK();
+
+        // Смещение из-за сдвига CoM + смещение из-за нормализации сетки
+        var totalLocalShift = (newCoM - oldCoM) + (offset.ToOpenTK() * Constants.VoxelSize * Scale);
+        
+        // Поворачиваем локальный сдвиг в мировое пространство и применяем к позиции тела
+        var worldShift = Vector3.Transform(totalLocalShift, tkOrientation);
+        bodyRef.Pose.Position += worldShift.ToSystemNumerics();
+        
+        // 5. Обновляем состояние
+        BodyHandle = newHandle;
+        LocalCenterOfMass = newCoM;
+        RecalculateBounds();
+        SvoDirty = true;
+        
+        Position = bodyRef.Pose.Position.ToOpenTK();
+        PrevPosition = Position;
     }
 
     public bool RemoveVoxel(Vector3i localPos)
@@ -220,6 +238,22 @@ public class VoxelObject : IDisposable
             clusters.Add(cluster);
         }
         return clusters;
+    }
+    
+    // Добавь этот новый приватный метод в конец класса VoxelObject
+    private Vector3 CalculateLocalCenterOfMass()
+    {
+        if (VoxelCoordinates.Count == 0) return Vector3.Zero;
+
+        Vector3 sum = Vector3.Zero;
+        foreach (var v in VoxelCoordinates)
+        {
+            // Берем центр каждого вокселя
+            sum += v.ToOpenTK() + new Vector3(0.5f);
+        }
+
+        // Усредняем и умножаем на размер вокселя, но НЕ на масштаб (масштаб применяется в матрице)
+        return (sum / VoxelCoordinates.Count) * Constants.VoxelSize;
     }
 
     public void Dispose()
