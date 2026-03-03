@@ -11,6 +11,7 @@ public class VoxelObject : IDisposable
     public MaterialType Material { get; }
     // Материалы per-voxel. Если позиция отсутствует — используется Material (единый).
     public Dictionary<Vector3i, uint> VoxelMaterials { get; } = new();
+    public Dictionary<Vector3i, float> VoxelHealth { get; } = new();
 
     // SVO статус для GPU-рендера
     public bool  SvoDirty           { get; set; } = true;   // true = нужна пересборка
@@ -90,6 +91,42 @@ public class VoxelObject : IDisposable
         Position = pose.Position.ToOpenTK();
         var orientation = pose.Orientation;
         Rotation = new Quaternion(orientation.X, orientation.Y, orientation.Z, orientation.W);
+    }
+    
+    public bool ApplyDamage(Vector3i localPos, float damage)
+    {
+        if (!VoxelCoordinates.Contains(localPos)) return false;
+
+        VoxelMaterials.TryGetValue(localPos, out uint matRaw);
+        MaterialType mat = matRaw == 0 ? Material : (MaterialType)matRaw;
+        
+        float maxHealth = MaterialRegistry.Get(mat).Hardness;
+
+        if (!VoxelHealth.TryGetValue(localPos, out float currentHealth))
+            currentHealth = maxHealth;
+
+        currentHealth -= damage;
+
+        if (currentHealth <= 0)
+        {
+            VoxelHealth.Remove(localPos);
+            return RemoveVoxel(localPos); // Возвращает true, если объект нужно перестроить
+        }
+        else
+        {
+            VoxelHealth[localPos] = currentHealth;
+            return false;
+        }
+    }
+    
+    public void GetVoxelHealthInfo(Vector3i localPos, out float currentHP, out float maxHP)
+    {
+        VoxelMaterials.TryGetValue(localPos, out uint matRaw);
+        MaterialType mat = matRaw == 0 ? Material : (MaterialType)matRaw;
+        maxHP = MaterialRegistry.Get(mat).Hardness;
+        
+        if (VoxelHealth.TryGetValue(localPos, out float hp)) currentHP = hp;
+        else currentHP = maxHP;
     }
     
     public Matrix4 GetInterpolatedModelMatrix(float alpha)

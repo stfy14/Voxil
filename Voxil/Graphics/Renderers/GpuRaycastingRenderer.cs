@@ -427,7 +427,7 @@ public class GpuRaycastingRenderer : IDisposable
     }
 
     // === ВЕРНУЛ МЕТОД UPDATE ===
-    public void Update(float deltaTime)
+    public void UpdateChunkData(float deltaTime)
     {
         _totalTime += deltaTime;
 
@@ -492,11 +492,6 @@ public class GpuRaycastingRenderer : IDisposable
             GL.TexSubImage3D(TextureTarget.Texture3D, 0, 0, 0, 0, PT_X, PT_Y, PT_Z, PixelFormat.RedInteger, PixelType.UnsignedInt, _cpuPageTable);
             _pageTableDirty = false;
         }
-
-        // =========================================================
-        // 4. ОБНОВЛЯЕМ ДИНАМИЧЕСКИЕ ОБЪЕКТЫ И СЕТКУ (TEARDOWN PHYSICS)
-        // =========================================================
-        UpdateDynamicObjectsAndGrid(); // SVO Manager теперь вызывается внутри этого метода!
     }
 
     public void UnloadChunk(Vector3i pos) 

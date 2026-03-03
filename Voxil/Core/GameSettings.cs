@@ -2,17 +2,13 @@
 using System;
 
 public enum ShadowMode { None, Hard, Soft }
-public enum CollisionDebugMode { None, PhysicsOnly, StaticOnly, All }
 
 public static class GameSettings
 {
     // === ВРЕМЯ И ЦИКЛ ДНЯ/НОЧИ ===
     public static bool EnableDynamicTime = true;
-    // TotalTimeHours хранит общее время с начала игры. Стартуем, например, в 12:00.
     public static double TotalTimeHours = 12.0; 
-    // TimeOfDay (0.0 - 24.0) вычисляется автоматически на основе общего времени
     public static float TimeOfDay => (float)(TotalTimeHours % 24.0); 
-    // Во сколько раз игровое время быстрее реального (120 = 1 час в игре за 30 сек)
     public static float TimeScale = 120.0f;
 
     // === ГРАФИКА ===
@@ -40,5 +36,10 @@ public static class GameSettings
     
     // === ДЕБАГ ===
     public static bool ShowDebugHeatmap = false;
-    public static CollisionDebugMode DebugCollisionMode = CollisionDebugMode.None;
+    
+    // Новые настройки визуального дебага (галочки)
+    public static bool ShowStaticCollisions = false;
+    public static bool ShowDynamicCollisions = false;
+    public static bool ShowExplosionRays = false;
+    public static bool ShowExplosionRadius = false;
 }

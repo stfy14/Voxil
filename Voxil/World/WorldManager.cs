@@ -50,7 +50,8 @@ public class WorldManager : IDisposable
     public event Action<Vector3i> OnChunkUnloaded;
     public event Action<Vector3i> OnVoxelFastDestroyed;
     public event Action<Chunk, Vector3i, MaterialType> OnVoxelEdited;
-
+    private readonly ConcurrentDictionary<Vector3i, float> _staticVoxelHealth = new();
+    
     public const int WorldHeightChunks = 16;
     private float _memoryLogTimer = 0f;
 
@@ -559,77 +560,99 @@ public class WorldManager : IDisposable
     
     public void QueueForRemoval(VoxelObject obj) => _objectsToRemove.Add(obj);
     // В методе DestroyVoxelAt, секция Dynamic Objects
+    
+    public void ProcessDynamicObjectSplits(VoxelObject vo)
+    {
+        if (vo.VoxelCoordinates.Count == 0) return;
 
+        var clusters = vo.GetConnectedClusters();
+        if (clusters.Count == 1)
+        {
+            // Объект остался целым, просто обновляем его сетку и коллизию
+            vo.RebuildMeshAndPhysics(PhysicsWorld);
+        }
+        else
+        {
+            // Объект распался на несколько частей!
+            clusters.Sort((a, b) => b.Count.CompareTo(a.Count));
+            
+            // Самый большой кусок остается оригинальным объектом
+            var mainCluster = clusters[0];
+            var mainSet = new HashSet<Vector3i>(mainCluster);
+            vo.VoxelCoordinates.RemoveAll(v => !mainSet.Contains(v));
+            
+            var savedPos = vo.Position;
+            var savedCoM = vo.LocalCenterOfMass;
+            var savedRot = vo.Rotation;
+            
+            vo.RebuildMeshAndPhysics(PhysicsWorld);
+
+            // Остальные куски становятся новыми физическими объектами (осколками)
+            for (int i = 1; i < clusters.Count; i++)
+            {
+                SpawnSplitCluster(clusters[i], vo, savedPos, savedCoM, savedRot);
+            }
+        }
+    }
+    
+    public void GetStaticVoxelHealthInfo(Vector3i globalPos, out float currentHP, out float maxHP)
+    {
+        var mat = GetMaterialGlobal(globalPos);
+        maxHP = MaterialRegistry.Get(mat).Hardness;
+        
+        if (_staticVoxelHealth.TryGetValue(globalPos, out float hp)) currentHP = hp;
+        else currentHP = maxHP;
+    }
+    
     public void DestroyVoxelAt(CollidableReference collidable, BepuVector3 worldHitLocation, BepuVector3 worldHitNormal)
-{
-    var pointInside = worldHitLocation - worldHitNormal * (Constants.VoxelSize * 0.5f);
-
-    if (collidable.Mobility == CollidableMobility.Static)
     {
-        Vector3i globalVoxelIndex = new Vector3i(
-            (int)Math.Floor(pointInside.X / Constants.VoxelSize), 
-            (int)Math.Floor(pointInside.Y / Constants.VoxelSize), 
-            (int)Math.Floor(pointInside.Z / Constants.VoxelSize)
-        );
-        if (RemoveVoxelGlobal(globalVoxelIndex))
+        var pointInside = worldHitLocation - worldHitNormal * (Constants.VoxelSize * 0.5f);
+
+        if (collidable.Mobility == CollidableMobility.Static)
         {
-            NotifyVoxelFastDestroyed(globalVoxelIndex);
-            _integritySystem.QueueCheck(globalVoxelIndex);
-        }
-    }
-    else if (collidable.Mobility == CollidableMobility.Dynamic && 
-             _bodyToVoxelObjectMap.TryGetValue(collidable.BodyHandle, out var voxelObj))
-    {
-        float alpha = PhysicsWorld.PhysicsAlpha;
-        Matrix4 modelMatrix = voxelObj.GetInterpolatedModelMatrix(alpha);
-        Matrix4 invModel = Matrix4.Invert(modelMatrix);
-
-        Vector4 localHitRaw = new Vector4(worldHitLocation.ToOpenTK(), 1.0f) * invModel;
-        Vector3 localHitPos = localHitRaw.Xyz;
-
-        Quaternion invRot = Quaternion.Invert(Quaternion.Slerp(voxelObj.PrevRotation, voxelObj.Rotation, alpha));
-        Vector3 localNormal = Vector3.Transform(worldHitNormal.ToOpenTK(), invRot);
-
-        // ИСПРАВЛЕНИЕ: Переименовано, чтобы избежать конфликта имен
-        Vector3 pointInsideLocal = localHitPos - localNormal * (Constants.VoxelSize * 0.5f);
-
-        Vector3i localVoxelIndex = new Vector3i(
-            (int)Math.Floor(pointInsideLocal.X / Constants.VoxelSize),
-            (int)Math.Floor(pointInsideLocal.Y / Constants.VoxelSize),
-            (int)Math.Floor(pointInsideLocal.Z / Constants.VoxelSize)
-        );
-
-        if (voxelObj.RemoveVoxel(localVoxelIndex))
-        {
-            if (voxelObj.VoxelCoordinates.Count == 0) return;
-
-            var clusters = voxelObj.GetConnectedClusters();
-            if (clusters.Count == 1)
+            Vector3i globalVoxelIndex = new Vector3i(
+                (int)Math.Floor(pointInside.X / Constants.VoxelSize), 
+                (int)Math.Floor(pointInside.Y / Constants.VoxelSize), 
+                (int)Math.Floor(pointInside.Z / Constants.VoxelSize)
+            );
+            
+            // Ручной клик ЛКМ ломает статику моментально (без учета ХП)
+            if (RemoveVoxelGlobal(globalVoxelIndex))
             {
-                voxelObj.RebuildMeshAndPhysics(PhysicsWorld);
+                NotifyVoxelFastDestroyed(globalVoxelIndex);
+                _integritySystem.QueueCheck(globalVoxelIndex);
             }
-            else
-            {
-                clusters.Sort((a, b) => b.Count.CompareTo(a.Count));
-                
-                var mainCluster = clusters[0];
-                var mainSet = new HashSet<Vector3i>(mainCluster);
-                voxelObj.VoxelCoordinates.RemoveAll(v => !mainSet.Contains(v));
-                
-                var savedPos = voxelObj.Position;
-                var savedCoM = voxelObj.LocalCenterOfMass;
-                var savedRot = voxelObj.Rotation;
-                
-                voxelObj.RebuildMeshAndPhysics(PhysicsWorld);
+        }
+        else if (collidable.Mobility == CollidableMobility.Dynamic && 
+                 _bodyToVoxelObjectMap.TryGetValue(collidable.BodyHandle, out var voxelObj))
+        {
+            float alpha = PhysicsWorld.PhysicsAlpha;
+            Matrix4 modelMatrix = voxelObj.GetInterpolatedModelMatrix(alpha);
+            Matrix4 invModel = Matrix4.Invert(modelMatrix);
 
-                for (int i = 1; i < clusters.Count; i++)
-                {
-                    SpawnSplitCluster(clusters[i], voxelObj, savedPos, savedCoM, savedRot);
-                }
+            Vector4 localHitRaw = new Vector4(worldHitLocation.ToOpenTK(), 1.0f) * invModel;
+            Vector3 localHitPos = localHitRaw.Xyz;
+
+            Quaternion invRot = Quaternion.Invert(Quaternion.Slerp(voxelObj.PrevRotation, voxelObj.Rotation, alpha));
+            Vector3 localNormal = Vector3.Transform(worldHitNormal.ToOpenTK(), invRot);
+
+            Vector3 pointInsideLocal = localHitPos - localNormal * (Constants.VoxelSize * 0.5f);
+
+            Vector3i localVoxelIndex = new Vector3i(
+                (int)Math.Floor(pointInsideLocal.X / Constants.VoxelSize),
+                (int)Math.Floor(pointInsideLocal.Y / Constants.VoxelSize),
+                (int)Math.Floor(pointInsideLocal.Z / Constants.VoxelSize)
+            );
+
+            // Ручной клик ЛКМ ломает динамику моментально
+            if (voxelObj.RemoveVoxel(localVoxelIndex))
+            {
+                // Вызываем новый алгоритм раскола
+                ProcessDynamicObjectSplits(voxelObj);
             }
         }
     }
-}
+
     
     public MaterialType GetMaterialGlobal(Vector3i globalPos)
     {
@@ -708,6 +731,34 @@ public class WorldManager : IDisposable
         }
         return false;
     }
+    
+    public void ApplyDamageToStatic(Vector3i globalPos, float damage, out bool destroyed)
+    {
+        destroyed = false;
+        var mat = GetMaterialGlobal(globalPos);
+        if (mat == MaterialType.Air) return;
+
+        float maxHealth = MaterialRegistry.Get(mat).Hardness;
+
+        // Потокобезопасное обновление здоровья
+        float newHealth = _staticVoxelHealth.AddOrUpdate(
+            globalPos,
+            maxHealth - damage,
+            (k, currentVal) => currentVal - damage
+        );
+
+        if (newHealth <= 0)
+        {
+            _staticVoxelHealth.TryRemove(globalPos, out _);
+            if (RemoveVoxelGlobal(globalPos, false))
+            {
+                NotifyVoxelFastDestroyed(globalPos);
+                _integritySystem.QueueCheck(globalPos);
+                destroyed = true;
+            }
+        }
+    }
+    
     // Перегрузка для старого кода (одиночный клик ЛКМ)
     public bool RemoveVoxelGlobal(Vector3i globalVoxelIndex) => RemoveVoxelGlobal(globalVoxelIndex, true);
     

@@ -13,20 +13,19 @@ public class PhysicsDebugDrawer
 
     public void Draw(PhysicsWorld physicsWorld, LineRenderer lineRenderer, Camera camera)
     {
-        var sim = physicsWorld.Simulation;
-        var mode = GameSettings.DebugCollisionMode;
-        
-        if (mode == CollisionDebugMode.None) return;
+        // Если выключены обе галочки - ничего не рисуем
+        if (!GameSettings.ShowStaticCollisions && !GameSettings.ShowDynamicCollisions) return;
 
+        var sim = physicsWorld.Simulation;
         var playerHandle = physicsWorld.GetPlayerState().BodyHandle;
         var camPos = camera.Position;
 
         _culler.Update(camera.GetViewMatrix() * camera.GetProjectionMatrix());
 
         // ==========================================
-        // ПРОХОД 1: СТАТИКА (С включенным Depth Test)
+        // ПРОХОД 1: СТАТИКА
         // ==========================================
-        if (mode == CollisionDebugMode.StaticOnly || mode == CollisionDebugMode.All)
+        if (GameSettings.ShowStaticCollisions)
         {
             float detailRangeSq = 15 * 15; 
 
@@ -56,7 +55,7 @@ public class PhysicsDebugDrawer
         // ==========================================
         // ПРОХОД 2: ДИНАМИКА (Без Depth Test - видно сквозь стены)
         // ==========================================
-        if (mode == CollisionDebugMode.PhysicsOnly || mode == CollisionDebugMode.All)
+        if (GameSettings.ShowDynamicCollisions)
         {
             for (int i = 0; i < sim.Bodies.ActiveSet.Count; i++)
             {

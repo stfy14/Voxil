@@ -1,17 +1,14 @@
-﻿// /World/Materials/MaterialProperties.cs
-/// <summary>
-/// Хранит неизменяемые свойства для каждого типа материала.
-/// </summary>
+﻿// --- START OF FILE MaterialProperties.cs ---
 public readonly struct MaterialProperties
 {
     public (float r, float g, float b) Color { get; }
     public float MassPerVoxel { get; }
-    // В будущем: public float Density { get; }
-    // В будущем: public float Hardness { get; }
+    public float Hardness { get; } // <--- НОВОЕ ПОЛЕ: Прочность материала
 
-    public MaterialProperties((float r, float g, float b) color, float massPerVoxel)
+    public MaterialProperties((float r, float g, float b) color, float massPerVoxel, float hardness)
     {
         Color = color;
         MassPerVoxel = massPerVoxel;
+        Hardness = hardness;
     }
 }
