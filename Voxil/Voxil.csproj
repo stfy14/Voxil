@@ -23,52 +23,51 @@
     <None Update="Assets\RobotoMono-Regular.ttf">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
-    <None Update="Shaders\edit_updater.comp">
+    <None Update="Engine\Graphics\GLSL\edit_updater.comp">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </None>
-    <None Update="Shaders\grid_update.comp">
+    <None Update="Engine\Graphics\GLSL\grid_update.comp">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </None>
-    <None Update="Shaders\raycast.vert">
+    <None Update="Engine\Graphics\GLSL\raycast.vert">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </None>
-    <None Update="Shaders\raycast.frag">
+    <None Update="Engine\Graphics\GLSL\raycast.frag">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </None>
-    <None Update="Shaders\images\noise.png">
+    <None Update="Engine\Graphics\GLSL\Images\water_noise.png">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </None>
-    <None Update="Shaders\Images\water_noise.png">
+    <None Update="Engine\Graphics\GLSL\include\water_impl.glsl">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </None>
-    <None Update="Shaders\include\water_impl.glsl">
+    <None Update="Engine\Graphics\GLSL\include\atmosphere.glsl">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </None>
-    <None Update="Shaders\include\atmosphere.glsl">
+    <None Update="Engine\Graphics\GLSL\include\common.glsl">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </None>
-    <None Update="Shaders\include\common.glsl">
+    <None Update="Engine\Graphics\GLSL\include\lighting.glsl">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </None>
-    <None Update="Shaders\include\lighting.glsl">
+    <None Update="Engine\Graphics\GLSL\include\postprocess.glsl">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </None>
-    <None Update="Shaders\include\postprocess.glsl">
+    <None Update="Engine\Graphics\GLSL\include\tracing.glsl">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </None>
-    <None Update="Shaders\include\tracing.glsl">
+    <None Update="Engine\Graphics\GLSL\taa.frag">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </None>
-    <None Update="Shaders\taa.frag">
-      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
-    </None>
-    <None Update="Shaders\clear_grid.comp">
+    <None Update="Engine\Graphics\GLSL\clear_grid.comp">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </None>
   </ItemGroup>
 
   <ItemGroup>
     <Folder Include="Assets\" />
+    <Folder Include="Content\" />
+    <Folder Include="Scripting\" />
   </ItemGroup>
 
 </Project>

@@ -7,7 +7,7 @@ using System.Text;
 
 public class TestManager
 {
-    private readonly WorldManager _worldManager;
+    private readonly IVoxelObjectService _objectService;
     private readonly Camera _camera;
 
     private enum TestState { Idle, WaitingForSpawn, WaitingForSplit }
@@ -18,9 +18,9 @@ public class TestManager
     private float _waitTimer = 0f;
     private int _lastSeconds = -1; // Для красивого вывода в консоль
 
-    public TestManager(WorldManager worldManager, Camera camera)
+    public TestManager(Camera camera)
     {
-        _worldManager = worldManager;
+        _objectService = ServiceLocator.Get<IVoxelObjectService>();
         _camera = camera;
     }
 
@@ -52,7 +52,7 @@ public class TestManager
             // Условия:
             // 1. Дистанция до спавна < 5 метров (25.0f squared) — чтобы учесть смещение центра масс и отталкивание физики
             // 2. Количество вокселей == 3 (мы спавнили палку из 3 блоков)
-            _testObject = _worldManager.GetAllVoxelObjects()
+            _testObject = _objectService.GetAllVoxelObjects()
                 .FirstOrDefault(o => o.VoxelCoordinates.Count == 3 && 
                                      (o.Position - _spawnPosition).LengthSquared < 25.0f);
 
@@ -64,7 +64,7 @@ public class TestManager
 
                 Console.WriteLine("\n[Test] Automatically breaking voxel at (1,0,0)...");
                 // Ломаем центральный блок, чтобы палка развалилась на 2 части
-                _worldManager.TestBreakVoxel(_testObject, new Vector3i(1, 0, 0));
+                _objectService.TestBreakVoxel(_testObject, new Vector3i(1, 0, 0));
                 
                 _state = TestState.WaitingForSplit;
                 _waitTimer = 1.0f; 
@@ -74,7 +74,7 @@ public class TestManager
                 // Дебаг: если не нашли, покажем, что вообще есть рядом
                 Console.WriteLine("[Test ERROR] Target object not found within 5m!");
                 Console.WriteLine("Nearby objects:");
-                var nearby = _worldManager.GetAllVoxelObjects()
+                var nearby = _objectService.GetAllVoxelObjects()
                     .Where(o => (o.Position - _spawnPosition).LengthSquared < 100.0f);
                 
                 foreach(var o in nearby)
@@ -95,7 +95,7 @@ public class TestManager
             }
 
             // Ищем новые осколки (они должны быть рядом)
-            var fragments = _worldManager.GetAllVoxelObjects()
+            var fragments = _objectService.GetAllVoxelObjects()
                 .Where(o => o != _testObject && (o.Position - _testObject.Position).LengthSquared < 25.0f);
 
             int fragIndex = 1;
@@ -129,7 +129,7 @@ public class TestManager
         _spawnPosition = _camera.Position + _camera.Front * 5.0f;
         
         Console.WriteLine($"\n[Test] Spawning 3x1x1 block at {_spawnPosition}...");
-        _worldManager.SpawnComplexObject(_spawnPosition.ToSystemNumerics(), voxels, MaterialType.Stone, materials);
+        _objectService.SpawnComplexObject(_spawnPosition.ToSystemNumerics(), voxels, MaterialType.Stone, materials);
         
         _state = TestState.WaitingForSpawn;
         _waitTimer = 1.0f; 

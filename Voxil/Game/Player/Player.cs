@@ -22,13 +22,13 @@ public class Player
         
         // Заполняем слоты
         // Если _hotbar был null, здесь вылетала ошибка
-        _hotbar[0] = new EmptyHandItem(wm);
-        _hotbar[1] = new DynamiteItem(wm);
+        _hotbar[0] = new EmptyHandItem();
+        _hotbar[1] = new DynamiteItem();
 
         // Остальные слоты заполняем пустой рукой, чтобы не было null
         for(int i=2; i<9; i++) 
         {
-            _hotbar[i] = new EmptyHandItem(wm);
+            _hotbar[i] = new EmptyHandItem();
         }
     }
 
