@@ -127,16 +127,21 @@ public class Game : GameWindow
 
     private void InitUI()
     {
-        _uiManager           = new WindowManager(this);
-        _settingsWindow      = new SettingsWindow(_worldManager, _renderer);
-        _timeSettingsWindow  = new TimeSettingsWindow();
-        _visualDebugWindow   = new VisualDebugWindow();
-        _debugStatsWindow    = new DebugStatsWindow();
+        _uiManager = new WindowManager(this);
+
+        _settingsWindow       = new SettingsWindow(_worldManager, _renderer);
+        _timeSettingsWindow   = new TimeSettingsWindow();
+        _visualDebugWindow    = new VisualDebugWindow();
+        _debugStatsWindow     = new DebugStatsWindow();
         _voxelInspectorWindow = new VoxelInspectorWindow(_worldManager, _camera);
 
-        _toolbarWindow = new MainToolbarWindow(
-            this, _settingsWindow, _timeSettingsWindow,
-            _visualDebugWindow, _debugStatsWindow, _voxelInspectorWindow);
+        // Тулбар больше не знает об окнах — окна сами регистрируются
+        _toolbarWindow = new MainToolbarWindow(this);
+        _toolbarWindow.RegisterMenuItem("Game Settings",      _settingsWindow);
+        _toolbarWindow.RegisterMenuItem("Time & Environment", _timeSettingsWindow);
+        _toolbarWindow.RegisterMenuItem("Visual Debug",       _visualDebugWindow);
+        _toolbarWindow.RegisterMenuItem("Performance Stats",  _debugStatsWindow);
+        _toolbarWindow.RegisterMenuItem("Voxel Inspector",    _voxelInspectorWindow);
 
         var invWindow = new InventoryWindow(_player);
 
