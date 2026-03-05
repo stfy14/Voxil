@@ -1,5 +1,4 @@
 ﻿// --- START OF FILE Game.cs ---
-using BepuPhysics;
 using OpenTK.Graphics.OpenGL4;
 using OpenTK.Mathematics;
 using OpenTK.Windowing.Common;
@@ -7,29 +6,28 @@ using OpenTK.Windowing.Desktop;
 using OpenTK.Windowing.GraphicsLibraryFramework;
 using System;
 using System.Text;
-using System.Collections.Generic;
 
 public class Game : GameWindow
 {
+    // --- Ядро ---
     private Camera _camera;
     private InputManager _input;
     private PhysicsWorld _physicsWorld;
     private WorldManager _worldManager;
+    private EntityManager _entityManager;
     private PlayerController _playerController;
+
+    // --- Рендер ---
     private GpuRaycastingRenderer _renderer;
-    
     private LineRenderer _lineRenderer;
     private PhysicsDebugDrawer _physicsDebugger;
     private Crosshair _crosshair;
+
+    // --- Игра ---
+    private Player _player;
     private TestManager _testManager;
 
-    private int _frameCount = 0; 
-    private float _debugUpdateTimer = 0f;
-    private bool _isInitialized = false;
-
-    private Player _player;
-    
-    // --- UI СИСТЕМА ---
+    // --- UI ---
     private WindowManager _uiManager;
     private SettingsWindow _settingsWindow;
     private TimeSettingsWindow _timeSettingsWindow;
@@ -37,18 +35,16 @@ public class Game : GameWindow
     private DebugStatsWindow _debugStatsWindow;
     private VoxelInspectorWindow _voxelInspectorWindow;
     private MainToolbarWindow _toolbarWindow;
-    private bool _isUIMode = false; // Режим открытого меню/курсора
-    // ------------------
-    
+    private bool _isUIMode = false;
+
+    // --- Служебное ---
+    private bool _isInitialized = false;
+    private int _frameCount = 0;
+    private float _debugUpdateTimer = 0f;
     private int _reallocationDelayFrames = 0;
-    
-    public static List<DynamiteEntity> Entities = new List<DynamiteEntity>();
-    public static void RegisterEntity(DynamiteEntity e) => Entities.Add(e);
 
     public Game(GameWindowSettings gameWindowSettings, NativeWindowSettings nativeWindowSettings)
-        : base(gameWindowSettings, nativeWindowSettings)
-    {
-    }
+        : base(gameWindowSettings, nativeWindowSettings) { }
 
     protected override void OnLoad()
     {
@@ -58,260 +54,293 @@ public class Game : GameWindow
         GL.Enable(EnableCap.DepthTest);
         GL.Disable(EnableCap.CullFace);
 
+        InitCore();
+        InitServices();
+        InitRenderer();
+        InitGame();
+        InitUI();
+
+        _input.ResetMouseDelta();
+        _isInitialized = true;
+        CursorState = CursorState.Grabbed;
+    }
+
+    // =========================================================
+    // ИНИЦИАЛИЗАЦИЯ
+    // =========================================================
+
+    private void InitCore()
+    {
         _physicsWorld = new PhysicsWorld();
         _physicsWorld.SetThreadCount(GameSettings.PhysicsThreads);
 
         var startPosition = new System.Numerics.Vector3(8, 100, 8);
         _camera = new Camera(VectorExtensions.ToOpenTK(startPosition), ClientSize.X / (float)ClientSize.Y);
-        
-        var playerController = new PlayerController(_physicsWorld, _camera, startPosition);
-        _physicsWorld.SetPlayerHandle(playerController.BodyHandle);
 
-        _worldManager = new WorldManager(_physicsWorld, playerController);
-        _player = new Player(playerController, _camera, _worldManager);
-        var invWindow = new InventoryWindow(_player);
+        _playerController = new PlayerController(_physicsWorld, _camera, startPosition);
+        _physicsWorld.SetPlayerHandle(_playerController.BodyHandle);
 
+        _entityManager = new EntityManager();
+        ServiceLocator.Register<EntityManager>(_entityManager);
+
+        _worldManager = new WorldManager(_physicsWorld, _playerController);
+        ServiceLocator.Register<IWorldService>(_worldManager);
+    }
+
+    private void InitServices()
+    {
+        // Сервисы регистрируем ДО создания Player и любых других объектов
+        var voxelEditService   = new VoxelEditService(_worldManager);
+        var voxelObjectService = new VoxelObjectService(_worldManager);
+
+        ServiceLocator.Register<IVoxelEditService>(voxelEditService);
+        ServiceLocator.Register<IVoxelObjectService>(voxelObjectService);
+    }
+
+    private void InitRenderer()
+    {
         _renderer = new GpuRaycastingRenderer(_worldManager);
         _renderer.Load();
         _renderer.OnResize(ClientSize.X, ClientSize.Y);
-        PerformanceMonitor.MemoryInfoProvider = () => _renderer.GetMemoryDebugInfo();
-        
-        _input = new InputManager();
-        _lineRenderer = new LineRenderer();
-        _physicsDebugger = new PhysicsDebugDrawer();
-        _crosshair = new Crosshair(ClientSize.X, ClientSize.Y);
-        _testManager = new TestManager(_worldManager, _camera);
 
-        _worldManager.OnChunkLoaded += (chunk) => _renderer.NotifyChunkLoaded(chunk);
-        _worldManager.OnChunkModified += (chunk) => _renderer.NotifyChunkLoaded(chunk);
-        _worldManager.OnVoxelFastDestroyed += (pos) => { };
-        _worldManager.OnChunkUnloaded += (pos) => _renderer.UnloadChunk(pos);
-        _worldManager.OnVoxelEdited += (chunk, pos, mat) => _renderer.NotifyVoxelEdited(chunk, pos, mat);
+        PerformanceMonitor.MemoryInfoProvider = () => _renderer.GetMemoryDebugInfo();
+
+        _worldManager.OnChunkLoaded       += chunk => _renderer.NotifyChunkLoaded(chunk);
+        _worldManager.OnChunkModified     += chunk => _renderer.NotifyChunkLoaded(chunk);
+        _worldManager.OnChunkUnloaded     += pos   => _renderer.UnloadChunk(pos);
+        _worldManager.OnVoxelEdited       += (chunk, pos, mat) => _renderer.NotifyVoxelEdited(chunk, pos, mat);
+        _worldManager.OnVoxelFastDestroyed += pos  => { };
 
         _renderer.UploadAllVisibleChunks();
 
-        // --- ИНИЦИАЛИЗАЦИЯ UI СИСТЕМЫ ---
-        _uiManager = new WindowManager(this);
-        _settingsWindow = new SettingsWindow(_worldManager, _renderer);
-        _timeSettingsWindow = new TimeSettingsWindow(); // <--- ДОБАВЛЕНО
-        _visualDebugWindow = new VisualDebugWindow();
-        _debugStatsWindow = new DebugStatsWindow();
+        _lineRenderer    = new LineRenderer();
+        _physicsDebugger = new PhysicsDebugDrawer();
+        _crosshair       = new Crosshair(ClientSize.X, ClientSize.Y);
+    }
+
+    private void InitGame()
+    {
+        _input       = new InputManager();
+        _player      = new Player(_playerController, _camera, _worldManager);
+        _testManager = new TestManager(_camera);
+    }
+
+    private void InitUI()
+    {
+        _uiManager           = new WindowManager(this);
+        _settingsWindow      = new SettingsWindow(_worldManager, _renderer);
+        _timeSettingsWindow  = new TimeSettingsWindow();
+        _visualDebugWindow   = new VisualDebugWindow();
+        _debugStatsWindow    = new DebugStatsWindow();
         _voxelInspectorWindow = new VoxelInspectorWindow(_worldManager, _camera);
-        
-        // Передаем новое окно в тулбар
-        _toolbarWindow = new MainToolbarWindow(this, _settingsWindow, _timeSettingsWindow, _visualDebugWindow, _debugStatsWindow, _voxelInspectorWindow);
+
+        _toolbarWindow = new MainToolbarWindow(
+            this, _settingsWindow, _timeSettingsWindow,
+            _visualDebugWindow, _debugStatsWindow, _voxelInspectorWindow);
+
+        var invWindow = new InventoryWindow(_player);
 
         _uiManager.AddWindow(_settingsWindow);
-        _uiManager.AddWindow(_timeSettingsWindow); // <--- ДОБАВЛЕНО
+        _uiManager.AddWindow(_timeSettingsWindow);
         _uiManager.AddWindow(_visualDebugWindow);
         _uiManager.AddWindow(_debugStatsWindow);
         _uiManager.AddWindow(_voxelInspectorWindow);
         _uiManager.AddWindow(_toolbarWindow);
         _uiManager.AddWindow(invWindow);
-        // --------------------------------------
-        
-        _input.ResetMouseDelta();
-        _isInitialized = true;
-        
-        CursorState = CursorState.Grabbed;
     }
 
-    protected override void OnMouseMove(MouseMoveEventArgs e)
-    {
-        if (_input != null) _input.AddRawMouseDelta(e.Delta);
-    }
-    
+    // =========================================================
+    // UPDATE
+    // =========================================================
+
     protected override void OnUpdateFrame(FrameEventArgs e)
     {
         base.OnUpdateFrame(e);
         if (!_isInitialized) return;
 
-        _input.Update(KeyboardState, MouseState);
-
         float deltaTime = (float)e.Time;
-        
-        if (GameSettings.EnableDynamicTime)
-        {
-            GameSettings.TotalTimeHours += (deltaTime * GameSettings.TimeScale) / 3600.0;
-        }
-        
-        _uiManager.Update(this, deltaTime);
-        
-        if (_renderer.IsReallocationPending())
-        {
-            _reallocationDelayFrames++;
-            if (_reallocationDelayFrames >= 3)
-            {
-                _renderer.PerformReallocation();
-                _worldManager.ReloadWorld();
-                _renderer.ReloadShader();
-                _reallocationDelayFrames = 0;
-                GC.Collect();
-            }
-            else return;
-        }
 
+        _input.Update(KeyboardState, MouseState);
+        UpdateTime(deltaTime);
+        _uiManager.Update(this, deltaTime);
+
+        if (HandleReallocation(deltaTime)) return;
+
+        UpdateCursorMode();
+        UpdateGameLogic(deltaTime);
+        UpdateWorld(deltaTime);
+        UpdateDebugStats(deltaTime);
+    }
+
+    private void UpdateTime(float deltaTime)
+    {
+        if (GameSettings.EnableDynamicTime)
+            GameSettings.TotalTimeHours += (deltaTime * GameSettings.TimeScale) / 3600.0;
+    }
+
+    private bool HandleReallocation(float deltaTime)
+    {
+        if (!_renderer.IsReallocationPending()) return false;
+
+        _reallocationDelayFrames++;
+        if (_reallocationDelayFrames >= 3)
+        {
+            _renderer.PerformReallocation();
+            _worldManager.ReloadWorld();
+            _renderer.ReloadShader();
+            _reallocationDelayFrames = 0;
+            GC.Collect();
+        }
+        return true;
+    }
+
+    private void UpdateCursorMode()
+    {
         if (_input.IsKeyPressed(Keys.Escape))
         {
             _isUIMode = !_isUIMode;
             _toolbarWindow.IsVisible = _isUIMode;
         }
+
         if (!_toolbarWindow.IsVisible && _isUIMode) _isUIMode = false;
-        _input.SetCursorGrabbed(!_isUIMode); 
 
-        if (_isUIMode) 
-        { 
-            if (CursorState != CursorState.Normal) CursorState = CursorState.Normal; 
-        }
-        else 
-        { 
-            if (CursorState != CursorState.Grabbed) { CursorState = CursorState.Grabbed; _input.ResetMouseDelta(); } 
-        }
+        _input.SetCursorGrabbed(!_isUIMode);
 
-        _testManager.Update(deltaTime, _input);
-        
-        if (!_isUIMode)
+        if (_isUIMode)
         {
-            if (_input.IsKeyPressed(Keys.F)) _player.Controller.ToggleFly();
-            
-            // Здесь обновляется только логика (физика, таймеры, инвентарь)
-            _player.Update(deltaTime, _input);
-            
-            for (int i = Entities.Count - 1; i >= 0; i--)
-            {
-                Entities[i].Update(deltaTime);
-                if (Entities[i].IsDead) Entities.RemoveAt(i);
-            }
+            if (CursorState != CursorState.Normal) CursorState = CursorState.Normal;
         }
-
-        if (!_renderer.IsReallocationPending())
+        else
         {
-            _worldManager.Update(deltaTime);
-            _physicsWorld.Update(deltaTime);
-            
-            // ВАЖНО: Здесь обновляем только данные чанков (тяжелая операция)
-            _renderer.UpdateChunkData(deltaTime); // <--- БЫВШИЙ Update()
-            
-            DebugDraw.UpdateAndRender(deltaTime, _lineRenderer);
+            if (CursorState != CursorState.Grabbed) { CursorState = CursorState.Grabbed; _input.ResetMouseDelta(); }
         }
-
-        UpdateDebugStats(deltaTime);
     }
-    
+
+    private void UpdateGameLogic(float deltaTime)
+    {
+        _testManager.Update(deltaTime, _input);
+
+        if (_isUIMode) return;
+
+        if (_input.IsKeyPressed(Keys.F)) _player.Controller.ToggleFly();
+        _player.Update(deltaTime, _input);
+        _entityManager.Update(deltaTime);
+    }
+
+    private void UpdateWorld(float deltaTime)
+    {
+        if (_renderer.IsReallocationPending()) return;
+
+        _worldManager.Update(deltaTime);
+        _physicsWorld.Update(deltaTime);
+        _renderer.UpdateChunkData(deltaTime);
+        DebugDraw.UpdateAndRender(deltaTime, _lineRenderer);
+    }
+
     private void UpdateDebugStats(float deltaTime)
     {
-        // Проверка PerformanceMonitor теперь автоматически привязана к окну
         if (!_debugStatsWindow.IsVisible || !PerformanceMonitor.IsEnabled) return;
-        
+
         _debugUpdateTimer += deltaTime;
-        if (_debugUpdateTimer >= 0.5f)
-        {
-            float avgFps = (float)_frameCount / _debugUpdateTimer;
-            var averages = PerformanceMonitor.GetDataAndReset(_debugUpdateTimer);
-            
-            StringBuilder sb = new StringBuilder();
-            sb.AppendLine($"FPS: {avgFps:F0}");
-            sb.AppendLine($"Pos: {_camera.Position.X:F0} {_camera.Position.Y:F0} {_camera.Position.Z:F0}");
-            sb.AppendLine("------------------");
-            if (averages != null) foreach(var kvp in averages) sb.AppendLine($"{kvp.Key}: {kvp.Value}");
-            sb.AppendLine("------------------");
-            sb.AppendLine($"Chunks: {_worldManager.LoadedChunkCount} (Q:{_worldManager.GeneratorPendingCount})");
-            
-            _debugStatsWindow.UpdateText(sb.ToString());
-            _debugUpdateTimer = 0f;
-            _frameCount = 0;
-        }
+        _frameCount++;
+
+        if (_debugUpdateTimer < 0.5f) return;
+
+        float avgFps = _frameCount / _debugUpdateTimer;
+        var averages = PerformanceMonitor.GetDataAndReset(_debugUpdateTimer);
+
+        var sb = new StringBuilder();
+        sb.AppendLine($"FPS: {avgFps:F0}");
+        sb.AppendLine($"Pos: {_camera.Position.X:F0} {_camera.Position.Y:F0} {_camera.Position.Z:F0}");
+        sb.AppendLine("------------------");
+        if (averages != null) foreach (var kvp in averages) sb.AppendLine($"{kvp.Key}: {kvp.Value}");
+        sb.AppendLine("------------------");
+        sb.AppendLine($"Chunks: {_worldManager.LoadedChunkCount} (Q:{_worldManager.GeneratorPendingCount})");
+
+        _debugStatsWindow.UpdateText(sb.ToString());
+        _debugUpdateTimer = 0f;
+        _frameCount = 0;
     }
+
+    // =========================================================
+    // RENDER
+    // =========================================================
 
     protected override void OnRenderFrame(FrameEventArgs e)
     {
         base.OnRenderFrame(e);
         if (!_isInitialized) return;
-        _frameCount++; 
-        
-        // ==========================================
-        // ВИЗУАЛЬНАЯ ИНТЕРПОЛЯЦИЯ (КАЖДЫЙ КАДР)
-        // ==========================================
-        
-        // 1. Рассчитываем ViewModel прямо перед рендером
-        var viewModel = _player.GetViewModel();
-        if (viewModel != null)
-        {
-            // Параметры
-            Vector3 handOffset = new Vector3(0.4f, -0.4f, -0.8f);
-            Vector3 bobbing = Vector3.Zero;
-            
-            if (_input.GetMovementInput().LengthSquared > 0.1f)
-            {
-                float time = GameSettings.TimeOfDay * 20.0f; 
-                bobbing.Y = (float)Math.Sin(time) * 0.015f;
-                bobbing.X = (float)Math.Cos(time * 0.5f) * 0.01f;
-            }
 
-            Quaternion itemTilt = Quaternion.FromEulerAngles(
-                MathHelper.DegreesToRadians(10),  
-                MathHelper.DegreesToRadians(-15), 
-                MathHelper.DegreesToRadians(10)   
-            );
+        UpdateViewModel();
 
-            // Используем наш новый хелпер
-            MathUtils.CalculateViewModelTransform(
-                _camera.GetViewMatrix(),
-                handOffset,
-                itemTilt,
-                bobbing,
-                out Vector3 finalPos,
-                out Quaternion finalRot
-            );
-
-            // ForceSetTransform тут работает идеально: он ставит Prev=Curr, убирая интерполяцию
-            viewModel.ForceSetTransform(finalPos, finalRot);
-            _renderer.SetViewModel(viewModel);
-        }
-        else
-        {
-            _renderer.SetViewModel(null);
-        }
-
-        // 2. Обновляем матрицы ВСЕХ объектов для GPU
-        // Это гарантирует, что и динамит, и падающие блоки будут в позиции для ЭТОГО кадра
         if (!_renderer.IsReallocationPending())
-        {
             _renderer.UpdateDynamicObjectsAndGrid();
-        }
 
-        // ==========================================
-        
         GL.Clear(ClearBufferMask.ColorBufferBit | ClearBufferMask.DepthBufferBit);
 
         _renderer.Render(_camera);
-        
         _physicsDebugger.Draw(_physicsWorld, _lineRenderer, _camera);
-        _lineRenderer.Render(_camera); 
-        
+        _lineRenderer.Render(_camera);
+
         if (!_isUIMode) _crosshair.Render();
-        
+
         _uiManager.Render();
         SwapBuffers();
     }
-    
+
+    private void UpdateViewModel()
+    {
+        var viewModel = _player.GetViewModel();
+        if (viewModel == null) { _renderer.SetViewModel(null); return; }
+
+        Vector3 handOffset = new Vector3(0.4f, -0.4f, -0.8f);
+        Vector3 bobbing = Vector3.Zero;
+
+        if (_input.GetMovementInput().LengthSquared > 0.1f)
+        {
+            float time = GameSettings.TimeOfDay * 20.0f;
+            bobbing.Y = (float)Math.Sin(time) * 0.015f;
+            bobbing.X = (float)Math.Cos(time * 0.5f) * 0.01f;
+        }
+
+        Quaternion itemTilt = Quaternion.FromEulerAngles(
+            MathHelper.DegreesToRadians(10),
+            MathHelper.DegreesToRadians(-15),
+            MathHelper.DegreesToRadians(10));
+
+        MathUtils.CalculateViewModelTransform(
+            _camera.GetViewMatrix(), handOffset, itemTilt, bobbing,
+            out Vector3 finalPos, out Quaternion finalRot);
+
+        viewModel.ForceSetTransform(finalPos, finalRot);
+        _renderer.SetViewModel(viewModel);
+    }
+
+    // =========================================================
+    // СОБЫТИЯ ОКНА
+    // =========================================================
+
+    protected override void OnMouseMove(MouseMoveEventArgs e)
+    {
+        if (_input != null) _input.AddRawMouseDelta(e.Delta);
+    }
+
     protected override void OnResize(ResizeEventArgs e)
     {
         base.OnResize(e);
-
-        // Если компоненты еще не загружены, выходим, чтобы избежать NullReferenceException
         if (!_isInitialized) return;
 
-        // 1. Обновляем FBO и текстуры в рендерере
         _renderer.OnResize(e.Width, e.Height);
-
-        // 2. Обновляем соотношение сторон камеры (чтобы картинка не растягивалась)
         _camera.UpdateAspectRatio((float)e.Width / e.Height);
-
-        // 3. Обновляем размеры для ImGui интерфейса
         _uiManager.Resize(e.Width, e.Height);
-
-        // 4. Обновляем прицел, чтобы он оставался точно по центру
         _crosshair.UpdateSize(e.Width, e.Height);
+    }
+
+    protected override void OnUnload()
+    {
+        base.OnUnload();
+        _entityManager.Clear();
+        EventBus.Clear();
+        ServiceLocator.Clear();
     }
 }

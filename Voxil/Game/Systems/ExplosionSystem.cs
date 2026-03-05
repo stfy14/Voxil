@@ -5,25 +5,27 @@ using System.Collections.Generic;
 
 public static class ExplosionSystem
 {
-    public static void CreateExplosion(WorldManager world, Vector3 center, float radius, float maxDamage)
+    public static void CreateExplosion(IWorldService world, Vector3 center, float radius, float maxDamage)
     {
-        int rays = 16; // 16x16x6 = ~1500 лучей во все стороны
-        float stepSize = 0.25f; // Шаг луча (равен размеру вокселя для точности)
+        var editService   = ServiceLocator.Get<IVoxelEditService>();
+        var objectService = ServiceLocator.Get<IVoxelObjectService>();
 
-        var damagedStatics = new Dictionary<Vector3i, float>();
+        int rays = 16;
+        float stepSize = 0.25f;
+
+        var damagedStatics  = new Dictionary<Vector3i, float>();
         var damagedDynamics = new Dictionary<VoxelObject, Dictionary<Vector3i, float>>();
 
-        // 1. Broad-phase: Ищем динамику поблизости (чтобы не проверять всю карту)
+        // 1. Broad-phase: ищем динамику поблизости
         var dynamicsInRange = new List<VoxelObject>();
-        var dynInvModels = new Dictionary<VoxelObject, Matrix4>();
+        var dynInvModels    = new Dictionary<VoxelObject, Matrix4>();
         float alpha = world.PhysicsWorld.PhysicsAlpha;
 
-        foreach (var obj in world.GetAllVoxelObjects())
+        foreach (var obj in objectService.GetAllVoxelObjects())
         {
             if ((obj.Position - center).LengthSquared < (radius + 5.0f) * (radius + 5.0f))
             {
                 dynamicsInRange.Add(obj);
-                // Запоминаем обратные матрицы для быстрого перевода лучей в локальные координаты
                 dynInvModels[obj] = obj.GetInterpolatedModelMatrix(alpha).Inverted();
             }
         }
@@ -35,54 +37,48 @@ public static class ExplosionSystem
             {
                 for (int z = 0; z < rays; z++)
                 {
-                    // Пускаем лучи только по краям куба (чтобы они расходились веером)
                     if (x != 0 && x != rays - 1 && y != 0 && y != rays - 1 && z != 0 && z != rays - 1)
                         continue;
 
-                    // Нормализуем направление луча (-1.0 до 1.0)
                     float dirX = (x / (float)(rays - 1)) * 2f - 1f;
                     float dirY = (y / (float)(rays - 1)) * 2f - 1f;
                     float dirZ = (z / (float)(rays - 1)) * 2f - 1f;
                     Vector3 dir = new Vector3(dirX, dirY, dirZ).Normalized();
 
                     float currentPower = maxDamage;
-                    Vector3 endPoint = center; // Для дебага
+                    Vector3 endPoint = center;
                     bool stopped = false;
 
-                    // Движемся по лучу
                     for (float d = 0; d <= radius; d += stepSize)
                     {
-                        if (currentPower <= 0) 
-                        {
-                            stopped = true;
-                            break; // Луч полностью поглощен препятствиями
-                        }
+                        if (currentPower <= 0) { stopped = true; break; }
 
                         Vector3 p = center + dir * d;
                         endPoint = p;
 
-                        // --- ПРОВЕРКА СТАТИКИ ---
-                        Vector3i sPos = new Vector3i((int)Math.Floor(p.X), (int)Math.Floor(p.Y), (int)Math.Floor(p.Z));
-                        MaterialType sMat = world.GetMaterialGlobal(sPos);
+                        // --- СТАТИКА ---
+                        Vector3i sPos = new Vector3i(
+                            (int)Math.Floor(p.X),
+                            (int)Math.Floor(p.Y),
+                            (int)Math.Floor(p.Z));
 
+                        MaterialType sMat = editService.GetMaterialGlobal(sPos);
                         if (sMat != MaterialType.Air)
                         {
                             float hardness = MaterialRegistry.Get(sMat).Hardness;
-                            
-                            // Сохраняем МАКСИМАЛЬНЫЙ урон, дошедший до блока (защита от наложения лучей)
                             if (!damagedStatics.ContainsKey(sPos)) damagedStatics[sPos] = 0;
                             damagedStatics[sPos] = Math.Max(damagedStatics[sPos], currentPower);
-
-                            // Блок поглощает часть энергии луча
-                            currentPower -= hardness * 0.15f; 
+                            currentPower -= hardness * 0.15f;
                         }
 
-                        // --- ПРОВЕРКА ДИНАМИКИ ---
+                        // --- ДИНАМИКА ---
                         foreach (var dyn in dynamicsInRange)
                         {
-                            // Переводим точку взрыва в локальную систему координат объекта
-                            Vector3 localP = (new Vector4(p, 1.0f) * dynInvModels[dyn]).Xyz;
-                            Vector3i localVox = new Vector3i((int)Math.Floor(localP.X), (int)Math.Floor(localP.Y), (int)Math.Floor(localP.Z));
+                            Vector3 localP    = (new Vector4(p, 1.0f) * dynInvModels[dyn]).Xyz;
+                            Vector3i localVox = new Vector3i(
+                                (int)Math.Floor(localP.X),
+                                (int)Math.Floor(localP.Y),
+                                (int)Math.Floor(localP.Z));
 
                             if (dyn.VoxelCoordinates.Contains(localVox))
                             {
@@ -98,34 +94,33 @@ public static class ExplosionSystem
 
                                 if (!voxelDict.ContainsKey(localVox)) voxelDict[localVox] = 0;
                                 voxelDict[localVox] = Math.Max(voxelDict[localVox], currentPower);
-
                                 currentPower -= hardness * 0.15f;
                             }
                         }
 
-                        // Падение урона с расстоянием (естественное затухание взрыва)
                         currentPower -= maxDamage * (stepSize / radius);
                     }
 
-                    // ДЕБАГ: Рисуем луч
                     if (GameSettings.ShowExplosionRays)
                     {
-                        Vector3 rayColor = stopped ? new Vector3(1.0f, 0.1f, 0.1f) : new Vector3(0.1f, 1.0f, 0.1f);
-                        DebugDraw.AddLine(center, endPoint, rayColor, 2.0f); // Луч висит 2 секунды
+                        Vector3 rayColor = stopped
+                            ? new Vector3(1.0f, 0.1f, 0.1f)
+                            : new Vector3(0.1f, 1.0f, 0.1f);
+                        DebugDraw.AddLine(center, endPoint, rayColor, 2.0f);
                     }
                 }
             }
         }
 
-        // 3. ПРИМЕНЯЕМ УРОН К СТАТИКЕ
+        // 3. Урон статике
         foreach (var kvp in damagedStatics)
         {
-            world.ApplyDamageToStatic(kvp.Key, kvp.Value, out bool destroyed);
-            if (destroyed) world.MarkChunkDirty(kvp.Key);
+            editService.ApplyDamageToStatic(kvp.Key, kvp.Value, out bool destroyed);
+            if (destroyed) editService.MarkChunkDirty(kvp.Key);
         }
-        world.UpdateDirtyChunks(); // Обновляем меши статики одним махом
+        editService.UpdateDirtyChunks();
 
-        // 4. ПРИМЕНЯЕМ УРОН К ДИНАМИКЕ
+        // 4. Урон динамике
         var dynNeedsRebuild = new HashSet<VoxelObject>();
         foreach (var dynKvp in damagedDynamics)
         {
@@ -133,30 +128,24 @@ public static class ExplosionSystem
             foreach (var voxKvp in dynKvp.Value)
             {
                 bool destroyed = dyn.ApplyDamage(voxKvp.Key, voxKvp.Value);
-                if (destroyed) dynNeedsRebuild.Add(dyn); // Запоминаем, что объект пострадал
+                if (destroyed) dynNeedsRebuild.Add(dyn);
             }
         }
 
-        // Вызываем раскол только 1 раз для каждого пострадавшего объекта (оптимизация)
         foreach (var dyn in dynNeedsRebuild)
-        {
-            world.ProcessDynamicObjectSplits(dyn);
-        }
+            objectService.ProcessDynamicObjectSplits(dyn);
 
-        // 5. РАЗЛЕТ ОСКОЛКОВ И ФИЗИЧЕСКИЙ ИМПУЛЬС
-        foreach (var obj in world.GetAllVoxelObjects())
+        // 5. Физический импульс
+        foreach (var obj in objectService.GetAllVoxelObjects())
         {
             var offsetVec = obj.Position - center;
             float dist = offsetVec.Length;
 
-            if (dist < radius * 3.0f) // Радиус толчка больше радиуса урона (взрывная волна)
+            if (dist < radius * 3.0f)
             {
-                // Защита от деления на ноль и NaN (когда центр взрыва совпадает с центром объекта)
                 if (dist < 0.01f) { offsetVec = new Vector3(0, 1, 0); dist = 0.01f; }
-                
+
                 var impulseDir = offsetVec.Normalized();
-                
-                // Сила отталкивания зависит от дистанции
                 float impact = maxDamage * 1.5f * (1.0f - (dist / (radius * 3.0f)));
                 if (impact < 0) impact = 0;
 
@@ -169,10 +158,7 @@ public static class ExplosionSystem
             }
         }
 
-        // ДЕБАГ: Рисуем сферу радиуса взрыва
         if (GameSettings.ShowExplosionRadius)
-        {
             DebugDraw.AddSphere(center, radius, new Vector3(1.0f, 0.5f, 0.0f), 2.0f);
-        }
     }
 }
