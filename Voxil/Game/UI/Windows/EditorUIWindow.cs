@@ -85,6 +85,25 @@ public class EditorUIWindow : IUIWindow
 
         if (ImGui.BeginMenu("Grid"))
         {
+            // --- НОВЫЕ КОНТРОЛЫ ---
+            bool limits = _editor.IsGridLimitEnabled;
+            if (ImGui.Checkbox("Hard Limit Constraints", ref limits))
+                _editor.IsGridLimitEnabled = limits;
+
+            bool show = _editor.IsGridVisible;
+            if (ImGui.Checkbox("Show Grid Visuals", ref show))
+                _editor.IsGridVisible = show;
+
+            if (show)
+            {
+                float alpha = _editor.GridOpacity;
+                if (ImGui.SliderFloat("Opacity", ref alpha, 0.0f, 1.0f))
+                    _editor.GridOpacity = alpha;
+            }
+    
+            ImGui.Separator();
+            // -----------------------
+
             ImGui.Text("Grid Size (voxels):");
             ImGui.SetNextItemWidth(120);
             ImGui.SliderInt("##gridsize", ref _pendingGridSize, 2, 64);

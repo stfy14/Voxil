@@ -23,6 +23,19 @@ public static class VoxelModelSerializer
             Voxels    = new List<VoxelDto>()
         };
 
+        // 1. Находим минимальные координаты (высчитываем пустой отступ)
+        int minX = int.MaxValue, minY = int.MaxValue, minZ = int.MaxValue;
+        foreach (var coord in model.VoxelCoordinates)
+        {
+            if (coord.X < minX) minX = coord.X;
+            if (coord.Y < minY) minY = coord.Y;
+            if (coord.Z < minZ) minZ = coord.Z;
+        }
+
+        // Если сцена пустая, чтобы не словить ошибку
+        if (minX == int.MaxValue) minX = minY = minZ = 0;
+
+        // 2. Сохраняем в DTO уже НОРМАЛИЗОВАННЫЕ координаты (вычитаем отступ)
         foreach (var coord in model.VoxelCoordinates)
         {
             model.VoxelMaterials.TryGetValue(coord, out uint mRaw);
@@ -30,16 +43,17 @@ public static class VoxelModelSerializer
 
             dto.Voxels.Add(new VoxelDto
             {
-                X        = coord.X,
-                Y        = coord.Y,
-                Z        = coord.Z,
+                // Здесь магия: в файл уйдут координаты, начинающиеся с (0,0,0)
+                X        = coord.X - minX,
+                Y        = coord.Y - minY,
+                Z        = coord.Z - minZ,
                 Material = mat.ToString()
             });
         }
 
         string json = JsonSerializer.Serialize(dto, Options);
         File.WriteAllText(path, json);
-        Console.WriteLine($"[Serializer] Saved {dto.Voxels.Count} voxels → {path}");
+        Console.WriteLine($"[Serializer] Saved {dto.Voxels.Count} voxels → {path}. Offset removed: ({minX}, {minY}, {minZ})");
     }
 
     public static VoxelObject Load(string path)

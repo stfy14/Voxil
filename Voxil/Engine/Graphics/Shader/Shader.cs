@@ -196,6 +196,13 @@ public class Shader : IDisposable
     public void SetFloat(string n, float v) { if (_uniformLocations.TryGetValue(n, out int loc)) GL.Uniform1(loc, v); }
     public void SetVector2(string name, Vector2 data) { if (_uniformLocations.TryGetValue(name, out int loc)) GL.Uniform2(loc, data); }
     public void SetVector3(string n, Vector3 v) { if (_uniformLocations.TryGetValue(n, out int loc)) GL.Uniform3(loc, v); }
+    public void SetVector4(string name, Vector4 v) 
+    { 
+        if (_uniformLocations.TryGetValue(name, out int loc)) 
+        {
+            GL.Uniform4(loc, v); 
+        }
+    }
     public void SetMatrix4(string n, Matrix4 v) { if (_uniformLocations.TryGetValue(n, out int loc)) GL.UniformMatrix4(loc, false, ref v); }
     public void SetTexture(string n, int h, TextureUnit u) { if (_uniformLocations.TryGetValue(n, out int loc)) { GL.ActiveTexture(u); GL.BindTexture(TextureTarget.Texture2D, h); GL.Uniform1(loc, (int)u - 33984); } }
     public void Dispose() { if (!_disposed) { GL.DeleteProgram(Handle); _disposed = true; } }

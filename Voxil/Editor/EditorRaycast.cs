@@ -71,8 +71,8 @@ public static class EditorRaycast
         // Трансформируем луч в локальное пространство модели (как шейдер)
         Matrix4 modelMatrix = model.GetInterpolatedModelMatrix(1.0f);
         Matrix4 invModel    = Matrix4.Invert(modelMatrix);
-        rayOrigin = (invModel * new Vector4(rayOrigin, 1.0f)).Xyz;
-        rayDir    = Vector3.Normalize((invModel * new Vector4(rayDir, 0.0f)).Xyz);
+        rayOrigin = (new Vector4(rayOrigin, 1.0f) * invModel).Xyz;
+        rayDir    = Vector3.Normalize((new Vector4(rayDir, 0.0f) * invModel).Xyz);
 
         // Расширяем AABB немного чтобы луч точно входил
         Vector3 boundsMin = model.LocalBoundsMin - new Vector3(0.01f);
