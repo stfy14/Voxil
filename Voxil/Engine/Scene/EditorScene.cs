@@ -45,7 +45,7 @@ public class EditorScene : IScene
     {
         Console.WriteLine("[EditorScene] Entered.");
         CreateNewModel(_gridSize, _voxelSize); 
-        _camera.FocusOn(GetModelCenter(), _gridSize * _voxelSize);
+        // FocusOn уже вызывается внутри CreateNewModel — повтор не нужен
     }
 
     public void OnExit()
@@ -97,8 +97,16 @@ public class EditorScene : IScene
         };
 
         _model = new VoxelObject(coords, MaterialType.Stone, voxelSize);
+
+        // ✅ ИСПРАВЛЕНИЕ БАГ 1:
+        // Конструктор VoxelObject вычисляет LocalCenterOfMass через CalculateLocalCenterOfMass(),
+        // что смещает модель в GetInterpolatedModelMatrix (-CoM трансляция).
+        // В редакторе модель всегда рендерится в мировом начале координат (ForceSetTransform(Zero)),
+        // поэтому CoM должен быть нулевым — иначе GetModelCenter() указывает не туда,
+        // куда реально смотрит камера, и рейкаст расходится с визуальным положением вокселей.
+        _model.LocalCenterOfMass = Vector3.Zero;
+
         _renderer.SetEditorModel(_model);
-        var center = (_model.LocalBoundsMin + _model.LocalBoundsMax) * 0.5f;
         _camera.FocusOn(GetModelCenter(), gridSize * voxelSize);
         Console.WriteLine($"[EditorScene] New model: {gridSize}^3, voxel={voxelSize}");
     }
@@ -110,7 +118,7 @@ public class EditorScene : IScene
     {
         _model = VoxelModelSerializer.Load(path);
         _model.RecalculateBoundsPublic();
-        _model.LocalCenterOfMass = Vector3.Zero;
+        _model.LocalCenterOfMass = Vector3.Zero; // уже было — оставляем
         _renderer.SetEditorModel(_model);
         _camera.FocusOn(GetModelCenter(), _model.LocalBoundsMax.Length);
         Console.WriteLine($"[EditorScene] Loaded: {path}");
@@ -122,6 +130,14 @@ public class EditorScene : IScene
 
     private void HandleCameraInput(InputManager input)
     {
+        // ✅ ИСПРАВЛЕНИЕ БАГ 2 (и частично БАГ 3):
+        // Раньше камера реагировала на ввод даже когда ImGui захватывал мышь
+        // (открытое меню, FileBrowser, любое ImGui-окно).
+        // Это приводило к тому, что:
+        //   - Скролл в FileBrowser одновременно зумировал сцену
+        //   - ViewMatrix менялась во время UI-взаимодействия, сдвигая рейкаст
+        if (ImGui.GetIO().WantCaptureMouse) return;
+
         var mouseDelta = input.GetRawMouseDelta();
         bool middleDown = input.IsMouseButtonDown(MouseButton.Middle);
         bool shiftDown  = input.IsKeyDown(Keys.LeftShift);
@@ -162,7 +178,7 @@ public class EditorScene : IScene
         {
             if (_activeTool == Tool.Paint)
             {
-                _model.VoxelMaterials[hitVoxel] = (uint)_activeMaterial; // без проверки ContainsKey
+                _model.VoxelMaterials[hitVoxel] = (uint)_activeMaterial;
                 _model.SvoDirty = true;
                 _renderer.SetEditorModel(_model);
             }
@@ -175,7 +191,7 @@ public class EditorScene : IScene
                     _model.VoxelCoordinates.Add(newPos);
                     _model.VoxelMaterials[newPos] = (uint)_activeMaterial;
                     NormalizeModelCoords();
-                    _model.RecalculateBoundsPublic(); // ← уже есть, но проверь порядок
+                    _model.RecalculateBoundsPublic();
                     _model.SvoDirty = true;
                     _renderer.SetEditorModel(_model);
                 }
@@ -202,11 +218,17 @@ public class EditorScene : IScene
 
         if (hovered)
         {
+            // ИСПОЛЬЗУЕМ CONSTANTS, так как шейдер проверяет localHit через invModel
             var min = new Vector3(hoveredVoxel.X, hoveredVoxel.Y, hoveredVoxel.Z) * Constants.VoxelSize;
-            _renderer.SetHoverVoxel(min - new Vector3(0.0001f), min + new Vector3(Constants.VoxelSize + 0.0001f));
+            _renderer.SetHoverVoxel(
+                min - new Vector3(0.0001f), 
+                min + new Vector3(Constants.VoxelSize + 0.0001f)
+            );
         }
         else
+        {
             _renderer.ClearHoverVoxel();
+        }
     }
     
     // =========================================================
@@ -215,9 +237,13 @@ public class EditorScene : IScene
 
     private Vector3 GetModelCenter()
     {
-        // Центр модели в мировых координатах
         if (_model == null) return Vector3.Zero;
-        return (_model.LocalBoundsMin + _model.LocalBoundsMax) * 0.5f;
+    
+        // Центр в локальных координатах
+        Vector3 localCenter = (_model.LocalBoundsMin + _model.LocalBoundsMax) * 0.5f;
+    
+        // Переводим в мировые координаты, применяя Scale модели
+        return localCenter * _model.Scale; 
     }
     
     private void NormalizeModelCoords()
@@ -248,7 +274,7 @@ public class EditorScene : IScene
             _model.VoxelMaterials[kvp.Key] = kvp.Value;
 
         // Компенсируем сдвиг в камере
-        var worldOffset = new Vector3(offset.X, offset.Y, offset.Z) * Constants.VoxelSize;
+        var worldOffset = new Vector3(offset.X, offset.Y, offset.Z) * Constants.VoxelSize * _model.Scale;
         _camera.Target += worldOffset;
     }
 

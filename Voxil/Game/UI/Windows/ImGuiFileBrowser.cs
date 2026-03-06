@@ -54,6 +54,7 @@ public class ImGuiFileBrowser
             _inputFileName = Path.GetFileName(defaultFileName);
 
         RefreshContents();
+        _scrollToTop = true; // сбрасываем скролл при каждом открытии
     }
 
     /// <summary>
@@ -130,6 +131,16 @@ public class ImGuiFileBrowser
     {
         float reserveBottom = 60f;
         ImGui.BeginChild("##contents", new Vector2(0, -reserveBottom));
+
+        // ✅ ИСПРАВЛЕНИЕ БАГ 3 (часть 1):
+        // _scrollToTop устанавливался в NavigateTo(), но НИКОГДА не применялся —
+        // флаг просто игнорировался. Теперь сбрасываем скролл в начало списка
+        // сразу после смены директории (внутри BeginChild, до рендера элементов).
+        if (_scrollToTop)
+        {
+            ImGui.SetScrollHereY(0.0f);
+            _scrollToTop = false;
+        }
 
         string navigateTo = null;
 
@@ -232,7 +243,7 @@ public class ImGuiFileBrowser
         _selectedFile = "";
         _errorMessage = "";
         RefreshContents();
-        _scrollToTop = true; // ← флаг
+        _scrollToTop = true; // флаг — теперь реально используется в DrawContents
     }
 
     private void RefreshContents()

@@ -22,6 +22,7 @@ public class ImGuiController : IDisposable
     private int _shaderProjectionMatrixLocation;
     private int _windowWidth;
     private int _windowHeight;
+    private OpenTK.Mathematics.Vector2 _lastScroll;
     private System.Numerics.Vector2 _scaleFactor = System.Numerics.Vector2.One;
 
     public ImGuiController(int width, int height)
@@ -95,7 +96,12 @@ public class ImGuiController : IDisposable
         io.AddMouseButtonEvent(1, mouse[MouseButton.Right]);
         io.AddMouseButtonEvent(2, mouse[MouseButton.Middle]);
         io.MousePos = new System.Numerics.Vector2(mouse.X, mouse.Y);
-        io.AddMouseWheelEvent(mouse.Scroll.X, mouse.Scroll.Y); 
+        OpenTK.Mathematics.Vector2 currentScroll = mouse.Scroll;
+        OpenTK.Mathematics.Vector2 scrollDelta = currentScroll - _lastScroll;
+
+        io.AddMouseWheelEvent(scrollDelta.X, scrollDelta.Y);
+
+        _lastScroll = currentScroll;
 
         foreach (Keys key in Enum.GetValues(typeof(Keys)))
         {
