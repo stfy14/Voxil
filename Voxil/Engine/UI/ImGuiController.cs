@@ -60,6 +60,7 @@ public class ImGuiController : IDisposable
     }
 
     public void WindowResized(int width, int height) { _windowWidth = width; _windowHeight = height; }
+    public void PressChar(char c) => ImGui.GetIO().AddInputCharacter(c);
     public void DestroyDeviceObjects() { Dispose(); }
 
     public void Update(GameWindow wnd, float dt)

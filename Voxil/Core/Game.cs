@@ -17,6 +17,11 @@ public class Game : GameWindow
     private EntityManager _entityManager;
     private PlayerController _playerController;
 
+    // --- Сцены ---
+    private SceneManager _sceneManager;
+    private GameScene _gameScene;
+    private EditorScene _editorScene;
+
     // --- Рендер ---
     private GpuRaycastingRenderer _renderer;
     private LineRenderer _lineRenderer;
@@ -29,12 +34,14 @@ public class Game : GameWindow
 
     // --- UI ---
     private WindowManager _uiManager;
+    private InventoryWindow _invWindow;
     private SettingsWindow _settingsWindow;
     private TimeSettingsWindow _timeSettingsWindow;
     private VisualDebugWindow _visualDebugWindow;
     private DebugStatsWindow _debugStatsWindow;
     private VoxelInspectorWindow _voxelInspectorWindow;
     private MainToolbarWindow _toolbarWindow;
+    private EditorUIWindow _editorUIWindow;
     private bool _isUIMode = false;
 
     // --- Служебное ---
@@ -58,6 +65,7 @@ public class Game : GameWindow
         InitServices();
         InitRenderer();
         InitGame();
+        InitScenes();
         InitUI();
 
         _input.ResetMouseDelta();
@@ -89,7 +97,6 @@ public class Game : GameWindow
 
     private void InitServices()
     {
-        // Сервисы регистрируем ДО создания Player и любых других объектов
         var voxelEditService   = new VoxelEditService(_worldManager);
         var voxelObjectService = new VoxelObjectService(_worldManager);
 
@@ -105,11 +112,11 @@ public class Game : GameWindow
 
         PerformanceMonitor.MemoryInfoProvider = () => _renderer.GetMemoryDebugInfo();
 
-        _worldManager.OnChunkLoaded       += chunk => _renderer.NotifyChunkLoaded(chunk);
-        _worldManager.OnChunkModified     += chunk => _renderer.NotifyChunkLoaded(chunk);
-        _worldManager.OnChunkUnloaded     += pos   => _renderer.UnloadChunk(pos);
-        _worldManager.OnVoxelEdited       += (chunk, pos, mat) => _renderer.NotifyVoxelEdited(chunk, pos, mat);
-        _worldManager.OnVoxelFastDestroyed += pos  => { };
+        _worldManager.OnChunkLoaded        += chunk             => _renderer.NotifyChunkLoaded(chunk);
+        _worldManager.OnChunkModified      += chunk             => _renderer.NotifyChunkLoaded(chunk);
+        _worldManager.OnChunkUnloaded      += pos               => _renderer.UnloadChunk(pos);
+        _worldManager.OnVoxelEdited        += (chunk, pos, mat) => _renderer.NotifyVoxelEdited(chunk, pos, mat);
+        _worldManager.OnVoxelFastDestroyed += pos               => { };
 
         _renderer.UploadAllVisibleChunks();
 
@@ -125,33 +132,79 @@ public class Game : GameWindow
         _testManager = new TestManager(_camera);
     }
 
+    private void InitScenes()
+    {
+        _sceneManager = new SceneManager();
+        ServiceLocator.Register<SceneManager>(_sceneManager);
+
+        _gameScene = new GameScene(
+            _worldManager, _physicsWorld, _renderer,
+            _player, _entityManager, _camera, _input,
+            _lineRenderer, _physicsDebugger, _crosshair, _testManager);
+        
+        _editorScene = new EditorScene(_renderer, (float)ClientSize.X / ClientSize.Y, ClientSize.X, ClientSize.Y);
+        _editorScene.OnExitRequested += SwitchToGame;
+
+        _sceneManager.Register(_gameScene);
+        _sceneManager.Register(_editorScene);
+
+        _sceneManager.SwitchTo<GameScene>();
+    }
+
     private void InitUI()
     {
         _uiManager = new WindowManager(this);
 
+        _invWindow = new InventoryWindow(_player);
         _settingsWindow       = new SettingsWindow(_worldManager, _renderer);
         _timeSettingsWindow   = new TimeSettingsWindow();
         _visualDebugWindow    = new VisualDebugWindow();
         _debugStatsWindow     = new DebugStatsWindow();
         _voxelInspectorWindow = new VoxelInspectorWindow(_worldManager, _camera);
+        _editorUIWindow       = new EditorUIWindow(_editorScene, SwitchToGame);
 
-        // Тулбар больше не знает об окнах — окна сами регистрируются
         _toolbarWindow = new MainToolbarWindow(this);
         _toolbarWindow.RegisterMenuItem("Game Settings",      _settingsWindow);
         _toolbarWindow.RegisterMenuItem("Time & Environment", _timeSettingsWindow);
         _toolbarWindow.RegisterMenuItem("Visual Debug",       _visualDebugWindow);
         _toolbarWindow.RegisterMenuItem("Performance Stats",  _debugStatsWindow);
         _toolbarWindow.RegisterMenuItem("Voxel Inspector",    _voxelInspectorWindow);
+        _toolbarWindow.RegisterSceneSwitch("Model Editor",    SwitchToEditor);
+        TextInput += e => _uiManager.PressChar((char)e.Unicode);
 
-        var invWindow = new InventoryWindow(_player);
-
+        _uiManager.AddWindow(_invWindow);
         _uiManager.AddWindow(_settingsWindow);
         _uiManager.AddWindow(_timeSettingsWindow);
         _uiManager.AddWindow(_visualDebugWindow);
         _uiManager.AddWindow(_debugStatsWindow);
         _uiManager.AddWindow(_voxelInspectorWindow);
         _uiManager.AddWindow(_toolbarWindow);
-        _uiManager.AddWindow(invWindow);
+        _uiManager.AddWindow(_editorUIWindow);
+    }
+
+    // =========================================================
+    // ПЕРЕКЛЮЧЕНИЕ СЦЕН
+    // =========================================================
+
+    private void SwitchToEditor()
+    {
+        _editorUIWindow.IsVisible = true;
+        _invWindow.IsVisible     = false; 
+        _isUIMode                = false;
+        _toolbarWindow.IsVisible = false;
+        CursorState              = CursorState.Normal;
+        _input.SetCursorGrabbed(false);
+        _sceneManager.SwitchTo<EditorScene>();
+    }
+
+    private void SwitchToGame()
+    {
+        _editorUIWindow.IsVisible = false;
+        _invWindow.IsVisible = true; 
+        CursorState = CursorState.Grabbed;
+        _input.SetCursorGrabbed(true);
+        _input.ResetMouseDelta();
+        _sceneManager.SwitchTo<GameScene>();
     }
 
     // =========================================================
@@ -164,16 +217,27 @@ public class Game : GameWindow
         if (!_isInitialized) return;
 
         float deltaTime = (float)e.Time;
+        bool inEditor   = _sceneManager.Current is EditorScene;
 
         _input.Update(KeyboardState, MouseState);
-        UpdateTime(deltaTime);
         _uiManager.Update(this, deltaTime);
 
-        if (HandleReallocation(deltaTime)) return;
+        if (inEditor)
+        {
+            // В редакторе курсор всегда свободен, UI работает независимо
+            _sceneManager.Update(deltaTime, _input);
+            UpdateDebugStats(deltaTime);
+            return;
+        }
 
+        // --- Игровая сцена ---
+        UpdateTime(deltaTime);
+        if (HandleReallocation()) return;
         UpdateCursorMode();
-        UpdateGameLogic(deltaTime);
-        UpdateWorld(deltaTime);
+
+        if (!_isUIMode)
+            _sceneManager.Update(deltaTime, _input);
+
         UpdateDebugStats(deltaTime);
     }
 
@@ -183,7 +247,7 @@ public class Game : GameWindow
             GameSettings.TotalTimeHours += (deltaTime * GameSettings.TimeScale) / 3600.0;
     }
 
-    private bool HandleReallocation(float deltaTime)
+    private bool HandleReallocation()
     {
         if (!_renderer.IsReallocationPending()) return false;
 
@@ -203,7 +267,7 @@ public class Game : GameWindow
     {
         if (_input.IsKeyPressed(Keys.Escape))
         {
-            _isUIMode = !_isUIMode;
+            _isUIMode                = !_isUIMode;
             _toolbarWindow.IsVisible = _isUIMode;
         }
 
@@ -217,29 +281,12 @@ public class Game : GameWindow
         }
         else
         {
-            if (CursorState != CursorState.Grabbed) { CursorState = CursorState.Grabbed; _input.ResetMouseDelta(); }
+            if (CursorState != CursorState.Grabbed)
+            {
+                CursorState = CursorState.Grabbed;
+                _input.ResetMouseDelta();
+            }
         }
-    }
-
-    private void UpdateGameLogic(float deltaTime)
-    {
-        _testManager.Update(deltaTime, _input);
-
-        if (_isUIMode) return;
-
-        if (_input.IsKeyPressed(Keys.F)) _player.Controller.ToggleFly();
-        _player.Update(deltaTime, _input);
-        _entityManager.Update(deltaTime);
-    }
-
-    private void UpdateWorld(float deltaTime)
-    {
-        if (_renderer.IsReallocationPending()) return;
-
-        _worldManager.Update(deltaTime);
-        _physicsWorld.Update(deltaTime);
-        _renderer.UpdateChunkData(deltaTime);
-        DebugDraw.UpdateAndRender(deltaTime, _lineRenderer);
     }
 
     private void UpdateDebugStats(float deltaTime)
@@ -264,7 +311,7 @@ public class Game : GameWindow
 
         _debugStatsWindow.UpdateText(sb.ToString());
         _debugUpdateTimer = 0f;
-        _frameCount = 0;
+        _frameCount       = 0;
     }
 
     // =========================================================
@@ -276,19 +323,18 @@ public class Game : GameWindow
         base.OnRenderFrame(e);
         if (!_isInitialized) return;
 
-        UpdateViewModel();
-
-        if (!_renderer.IsReallocationPending())
-            _renderer.UpdateDynamicObjectsAndGrid();
+        bool inEditor = _sceneManager.Current is EditorScene;
 
         GL.Clear(ClearBufferMask.ColorBufferBit | ClearBufferMask.DepthBufferBit);
 
-        _renderer.Render(_camera);
-        _physicsDebugger.Draw(_physicsWorld, _lineRenderer, _camera);
-        _lineRenderer.Render(_camera);
+        if (!inEditor)
+        {
+            UpdateViewModel();
+            if (!_renderer.IsReallocationPending())
+                _renderer.UpdateDynamicObjectsAndGrid();
+        }
 
-        if (!_isUIMode) _crosshair.Render();
-
+        _sceneManager.Render();
         _uiManager.Render();
         SwapBuffers();
     }
@@ -299,13 +345,13 @@ public class Game : GameWindow
         if (viewModel == null) { _renderer.SetViewModel(null); return; }
 
         Vector3 handOffset = new Vector3(0.4f, -0.4f, -0.8f);
-        Vector3 bobbing = Vector3.Zero;
+        Vector3 bobbing    = Vector3.Zero;
 
         if (_input.GetMovementInput().LengthSquared > 0.1f)
         {
             float time = GameSettings.TimeOfDay * 20.0f;
-            bobbing.Y = (float)Math.Sin(time) * 0.015f;
-            bobbing.X = (float)Math.Cos(time * 0.5f) * 0.01f;
+            bobbing.Y  = (float)Math.Sin(time) * 0.015f;
+            bobbing.X  = (float)Math.Cos(time * 0.5f) * 0.01f;
         }
 
         Quaternion itemTilt = Quaternion.FromEulerAngles(
@@ -327,7 +373,12 @@ public class Game : GameWindow
 
     protected override void OnMouseMove(MouseMoveEventArgs e)
     {
-        if (_input != null) _input.AddRawMouseDelta(e.Delta);
+        if (_input == null) return;
+    
+        if (_sceneManager.Current is EditorScene)
+            _input.AddRawMouseDeltaUnconditional(e.Delta);
+        else
+            _input.AddRawMouseDelta(e.Delta);
     }
 
     protected override void OnResize(ResizeEventArgs e)
@@ -335,10 +386,8 @@ public class Game : GameWindow
         base.OnResize(e);
         if (!_isInitialized) return;
 
-        _renderer.OnResize(e.Width, e.Height);
-        _camera.UpdateAspectRatio((float)e.Width / e.Height);
+        _sceneManager.OnResize(e.Width, e.Height);
         _uiManager.Resize(e.Width, e.Height);
-        _crosshair.UpdateSize(e.Width, e.Height);
     }
 
     protected override void OnUnload()

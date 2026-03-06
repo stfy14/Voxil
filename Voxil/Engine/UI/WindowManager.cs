@@ -23,6 +23,7 @@ public class WindowManager : IDisposable
     }
 
     public void AddWindow(IUIWindow window) => _windows.Add(window);
+    public void PressChar(char c) => _controller.PressChar(c);
 
     public void Update(GameWindow window, float deltaTime)
     {

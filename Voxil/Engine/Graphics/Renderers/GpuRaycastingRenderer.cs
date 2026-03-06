@@ -17,6 +17,8 @@ public class GpuRaycastingRenderer : IDisposable
     private int _quadVao;
     private readonly IWorldService _worldService;
     private IVoxelObjectService _objectService;
+    private VoxelObject _editorModel;
+    private bool _isEditorMode = false;
 
     private int _pageTableTexture;
     private DynSvoManager _svoManager;
@@ -160,6 +162,31 @@ public class GpuRaycastingRenderer : IDisposable
         UploadAllVisibleChunks();
     }
 
+    public void SetEditorModel(VoxelObject model)
+    {
+        _editorModel      = model;
+        _isEditorMode     = model != null;
+        _currentViewModel = null;
+        GameSettings.IsEditorMode = _isEditorMode;
+        _shaderSystem.Compile(MAX_TOTAL_BANKS, _chunksPerBank); 
+
+        if (model != null)
+        {
+            model.SvoDirty     = true;
+            model.SvoGpuOffset = uint.MaxValue;
+            model.SvoGridSize  = 0;
+        }
+    }
+    
+    public void SetHoverVoxel(Vector3 min, Vector3 max)
+    {
+        var shader = _shaderSystem.RaycastShader;
+        if (shader == null) return;
+        shader.Use();
+        shader.SetVector3("uHoverVoxelMin", min);
+        shader.SetVector3("uHoverVoxelMax", max);
+    }
+    
     private int DetectTotalVram()
     {
         try { GL.GetInteger((GetPName)0x9048, out int kb); if (kb > 0) return kb / 1024; } catch { }
@@ -505,14 +532,22 @@ public class GpuRaycastingRenderer : IDisposable
         }
     }
 
+    public void UpdateDynamicObjectsAndGrid(Vector3 gridCenter)
+        => UpdateDynamicObjectsAndGridInternal(gridCenter);
+    
     public void UpdateDynamicObjectsAndGrid()
+        => UpdateDynamicObjectsAndGridInternal(_worldService.GetPlayerPosition());
+    
+    private void UpdateDynamicObjectsAndGridInternal(Vector3 gridCenter)
     {
         var voxelObjects = _objectService.GetAllVoxelObjects();
 
         int totalCount = voxelObjects.Count;
         if (_currentViewModel != null) totalCount++;
+        if (_editorModel != null) totalCount++;
 
-        _svoManager.Update(voxelObjects, _currentViewModel);
+        var svoViewModel = _editorModel ?? _currentViewModel;
+        _svoManager.Update(voxelObjects, svoViewModel);
 
         if (totalCount > _tempGpuObjectsArray.Length)
         {
@@ -538,6 +573,12 @@ public class GpuRaycastingRenderer : IDisposable
             currentIndex++;
         }
 
+        if (_editorModel != null)
+        {
+            FillGpuObject(ref _tempGpuObjectsArray[currentIndex], _editorModel, 1.0f, false);
+            currentIndex++;
+        }
+
         if (totalCount > 0)
         {
             GL.BindBuffer(BufferTarget.ShaderStorageBuffer, _dynamicObjectsBuffer);
@@ -545,7 +586,7 @@ public class GpuRaycastingRenderer : IDisposable
                 totalCount * Marshal.SizeOf<GpuDynamicObject>(), _tempGpuObjectsArray);
 
             float snap = _gridCellSize;
-            Vector3 playerPos = _worldService.GetPlayerPosition();
+            Vector3 playerPos = gridCenter;
             Vector3 snappedCenter = new Vector3(
                 (float)Math.Floor(playerPos.X / snap) * snap,
                 (float)Math.Floor(playerPos.Y / snap) * snap,
@@ -607,7 +648,7 @@ public class GpuRaycastingRenderer : IDisposable
         gpuObj.Padding   = 0u;
     }
 
-    public void Render(Camera cam)
+    public void Render(CameraData cam)
     {
         if (_reallocationPending || _activeBankCount == 0) return;
 
@@ -616,15 +657,12 @@ public class GpuRaycastingRenderer : IDisposable
         Vector2 halton = _haltonSequence[index];
         Vector2 jitter = (halton - new Vector2(0.5f)) * 0.1f;
 
-        Matrix4 view         = cam.GetViewMatrix();
-        Matrix4 cleanProj    = cam.GetProjectionMatrix();
+        Matrix4 view          = cam.View;
+        Matrix4 cleanProj     = cam.Projection;
         Matrix4 cleanViewProj = view * cleanProj;
-
         bool useTaa = GameSettings.EnableTAA;
         if (_resetTaaHistory) useTaa = false;
-
-        Matrix4 activeProj    = useTaa ? cam.GetJitteredProjectionMatrix(jitter, _renderWidth, _renderHeight) : cleanProj;
-        Matrix4 activeViewProj = view * activeProj;
+        Matrix4 activeProj    = useTaa ? cam.JitteredProjection : cleanProj;
 
         _shaderSystem.Use();
         var shader = _shaderSystem.RaycastShader;
@@ -657,12 +695,24 @@ public class GpuRaycastingRenderer : IDisposable
         shader.SetVector3("uSunDir",  Vector3.Normalize(new Vector3(sunX,  sunY,  sunZ)));
         shader.SetVector3("uMoonDir", Vector3.Normalize(new Vector3(moonX, moonY, moonZ)));
 
-        Vector3 p = cam.Position;
-        int sz = Constants.ChunkSizeWorld;
-        int cx = (int)Math.Floor(p.X / sz), cy = (int)Math.Floor(p.Y / sz), cz = (int)Math.Floor(p.Z / sz);
-        int r = GameSettings.RenderDistance + 2;
-        shader.SetInt("uBoundMinX", cx - r); shader.SetInt("uBoundMinY", 0); shader.SetInt("uBoundMinZ", cz - r);
-        shader.SetInt("uBoundMaxX", cx + r); shader.SetInt("uBoundMaxY", WorldManager.WorldHeightChunks); shader.SetInt("uBoundMaxZ", cz + r);
+        if (_isEditorMode)
+        {
+            shader.SetInt("uBoundMinX", 0); 
+            shader.SetInt("uBoundMinY", 0); 
+            shader.SetInt("uBoundMinZ", 0);
+            shader.SetInt("uBoundMaxX", 0); 
+            shader.SetInt("uBoundMaxY", 0); 
+            shader.SetInt("uBoundMaxZ", 0);
+        }
+        else
+        {
+            Vector3 p = cam.Position;
+            int sz = Constants.ChunkSizeWorld;
+            int cx = (int)Math.Floor(p.X / sz), cy = (int)Math.Floor(p.Y / sz), cz = (int)Math.Floor(p.Z / sz);
+            int r = GameSettings.RenderDistance + 2;
+            shader.SetInt("uBoundMinX", cx - r); shader.SetInt("uBoundMinY", 0); shader.SetInt("uBoundMinZ", cz - r);
+            shader.SetInt("uBoundMaxX", cx + r); shader.SetInt("uBoundMaxY", WorldManager.WorldHeightChunks); shader.SetInt("uBoundMaxZ", cz + r);
+        }
 
         GL.BindImageTexture(0, _pageTableTexture, 0, true, 0, TextureAccess.ReadOnly, SizedInternalFormat.R32ui);
         BindAllBuffers();
@@ -675,11 +725,12 @@ public class GpuRaycastingRenderer : IDisposable
         shader.SetVector3("uGridOrigin", _lastGridOrigin);
         shader.SetFloat("uGridStep", _gridCellSize);
         shader.SetInt("uGridSize", OBJ_GRID_SIZE);
-        shader.SetInt("uObjectCount", _objectService.GetAllVoxelObjects().Count + (_currentViewModel != null ? 1 : 0));
+        int objCount = _objectService.GetAllVoxelObjects().Count + (_currentViewModel != null ? 1 : 0) + (_editorModel != null ? 1 : 0);
+        shader.SetInt("uObjectCount", objCount);
 
         GL.BindVertexArray(_quadVao);
 
-        if (GameSettings.BeamOptimization)
+        if (GameSettings.BeamOptimization && !_isEditorMode)
         {
             GL.BindFramebuffer(FramebufferTarget.Framebuffer, _beamFbo);
             GL.Viewport(0, 0, _beamWidth, _beamHeight);
@@ -689,7 +740,7 @@ public class GpuRaycastingRenderer : IDisposable
             GL.Disable(EnableCap.DepthTest);
             GL.DrawArrays(PrimitiveType.TriangleStrip, 0, 4);
         }
-
+        
         GL.BindFramebuffer(FramebufferTarget.Framebuffer, _mainFbo);
         GL.Viewport(0, 0, _renderWidth, _renderHeight);
         GL.ClearColor(0.5f, 0.7f, 0.9f, 1.0f);
@@ -847,6 +898,9 @@ public class GpuRaycastingRenderer : IDisposable
 
     private int GetPageTableIndex(Vector3i p) => (p.X & MASK_X) + PT_X * ((p.Y & MASK_Y) + PT_Y * (p.Z & MASK_Z));
 
+    public void ClearHoverVoxel()
+        => SetHoverVoxel(new Vector3(-9999f), new Vector3(-9999f));
+    
     public string GetMemoryDebugInfo()
     {
         int totalSlots = _activeBankCount * _chunksPerBank;

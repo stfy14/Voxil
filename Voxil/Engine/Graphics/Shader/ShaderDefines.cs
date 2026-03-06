@@ -36,6 +36,7 @@ public static class ShaderDefines
             $"CHUNKS_PER_BANK {chunksPerBank}"
         };
 
+        if (GameSettings.IsEditorMode)            defines.Add("EDITOR_MODE");
         if (GameSettings.UseProceduralWater)      defines.Add("WATER_MODE_PROCEDURAL");
         if (GameSettings.EnableAO)                defines.Add("ENABLE_AO");
         if (GameSettings.EnableWaterTransparency) defines.Add("ENABLE_WATER_TRANSPARENCY");

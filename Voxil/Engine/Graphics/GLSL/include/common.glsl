@@ -33,6 +33,11 @@ uniform sampler2D uBeamTexture;    // Результат первого прох
 uniform float uLodDistance;
 uniform int uDisableEffectsOnLOD;
 
+#ifdef EDITOR_MODE
+uniform vec3 uHoverVoxelMin;
+uniform vec3 uHoverVoxelMax;
+#endif
+
 layout(binding = 0, r32ui) uniform uimage3D uPageTable;
 const ivec3 PAGE_TABLE_SIZE = ivec3(512, 16, 512);
 

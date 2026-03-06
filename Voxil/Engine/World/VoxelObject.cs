@@ -21,7 +21,7 @@ public class VoxelObject : IDisposable
     
     
     public BodyHandle BodyHandle { get; private set; }
-    public Vector3 LocalCenterOfMass { get; private set; }
+    public Vector3 LocalCenterOfMass { get; set; } // было get; private set;
     public Vector3 AnchorWorldPosition { get; private set; }
     
     public Vector3 Position { get; private set; }
@@ -167,6 +167,11 @@ public class VoxelObject : IDisposable
         float s = Constants.VoxelSize;
         LocalBoundsMin = new Vector3(min.X * s, min.Y * s, min.Z * s);
         LocalBoundsMax = new Vector3((max.X + 1) * s, (max.Y + 1) * s, (max.Z + 1) * s);
+    }
+    
+    public void RecalculateBoundsPublic()
+    {
+        RecalculateBounds();
     }
 
     public void RebuildMeshAndPhysics(PhysicsWorld physicsWorld)
