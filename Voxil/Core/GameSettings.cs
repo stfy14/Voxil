@@ -5,6 +5,9 @@ public enum ShadowMode { None, Hard, Soft }
 
 public static class GameSettings
 {
+    // === ДЛЯ EDITOR ===
+    public static bool IsEditorMode { get; set; } = false;
+    
     // === ВРЕМЯ И ЦИКЛ ДНЯ/НОЧИ ===
     public static bool EnableDynamicTime = true;
     public static double TotalTimeHours = 12.0; 

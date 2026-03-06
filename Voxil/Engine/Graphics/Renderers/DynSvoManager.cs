@@ -195,7 +195,7 @@ public void Update(List<VoxelObject> objects, VoxelObject viewModel)
 
         uint nodeCount = (uint)(slot.CurrentData.Length / 4);
         if (nodeCount == 0) return;
-
+        
         if (_cursor + nodeCount > MAX_POOL_NODES)
             Compact(allObjects);
 

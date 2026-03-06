@@ -122,10 +122,18 @@ void main() {
     if (hitDyn && tDyn < tStatic) {
         hit = true; tFinal = tDyn;
         normal = normalize(normDyn);
-        // Используем per-voxel материал из SVO, если есть
         albedo = (dynMatID != 0u) ? GetColor(dynMatID) : dynObjects[idDyn].color.rgb;
         isDynamic = true;
-    } 
+        
+        #ifdef EDITOR_MODE
+            vec3 localHit = (dynObjects[idDyn].invModel * vec4(uCamPos + rayDir * tDyn, 1.0)).xyz;
+            if (all(greaterThanEqual(localHit, uHoverVoxelMin)) &&
+            all(lessThan(localHit, uHoverVoxelMax)))
+            {
+                albedo = mix(albedo, vec3(1.0), 0.25);
+            }
+        #endif
+    }
     else if (hitStatic) {
         hit = true; tFinal = tStatic; normal = normStatic; matID = matStatic; albedo = GetColor(matID);
     }

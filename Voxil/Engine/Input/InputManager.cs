@@ -41,6 +41,18 @@ public class InputManager
             _accumulatedMouseDelta += delta;
         }
     }
+    
+    public Vector2 GetRawMouseDelta()
+    {
+        Vector2 delta = _accumulatedMouseDelta; // без умножения на sensitivity
+        _accumulatedMouseDelta = Vector2.Zero;
+        return delta;
+    }
+    
+    public void AddRawMouseDeltaUnconditional(Vector2 delta)
+    {
+        _accumulatedMouseDelta += delta;
+    }
 
     public void ResetMouseDelta()
     {
@@ -75,4 +87,7 @@ public class InputManager
     
     public bool IsSprintPressed() => IsKeyDown(Sprint);
     public bool IsMouseButtonPressed(MouseButton button) => _mouseState.IsButtonPressed(button);
+    public bool IsMouseButtonDown(MouseButton button) => _mouseState.IsButtonDown(button);
+    public Vector2 GetMousePosition() => new Vector2(_mouseState.X, _mouseState.Y);
+    public float GetScrollDelta() => _mouseState.ScrollDelta.Y;
 }
