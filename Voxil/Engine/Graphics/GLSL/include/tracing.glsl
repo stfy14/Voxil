@@ -625,8 +625,10 @@ bool TraceShadowRay(vec3 ro, vec3 rd, float maxDist, inout float tHit, inout uin
                         float tNear = max(max(tNearVec.x, tNearVec.y), tNearVec.z);
                         float tFar = min(min(tFarVec.x, tFarVec.y), tFarVec.z);
 
-                        if (tNear <= tFar && tFar > 0.0 && tNear < maxDist) {
-                            tHit = tCurrentRel + tNear;
+                        // ЕСЛИ луч начинает путь прямо внутри гигантского LOD-блока 
+                        // (то есть tNear уходит в минус), мы ИГНОРИРУЕМ пересечение!
+                        if (tNear <= tFar && tFar > 0.0 && tNear > -0.01 && tNear < maxDist) {
+                            tHit = tCurrentRel + max(0.0, tNear);
                             matID = 1u;
                             return true;
                         }

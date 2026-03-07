@@ -28,7 +28,8 @@ public static class GameSettings
     public static bool BeamOptimization = true;
     public static bool EnableLOD = true; 
     public static float LodPercentage = 0.85f;  
-    public static bool DisableEffectsOnLOD = true; 
+    public static bool DisableEffectsOnLOD = true;
+    public static int ShadowDownscale = 2;
 
     // === ПОТОКИ И ПРОИЗВОДИТЕЛЬНОСТЬ ===
     public static int GpuUploadSpeed = 10000;

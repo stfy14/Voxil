@@ -24,15 +24,15 @@ public class SettingsWindow : IUIWindow
     {
         _worldManager = wm;
         _renderer = renderer;
-        _renderDist          = GameSettings.RenderDistance;
-        _currentScale        = GameSettings.RenderScale;
-        _shadowSamples       = GameSettings.SoftShadowSamples;
-        _genThreads          = GameSettings.GenerationThreads;
-        _physThreads         = GameSettings.PhysicsThreads;
-        _budgetPercent       = (int)(GameSettings.WorldUpdateBudgetPercentage * 100);
-        _lodDist             = GameSettings.LodPercentage;
-        _lodEffectsDisabled  = GameSettings.DisableEffectsOnLOD;
-        _taa                 = GameSettings.EnableTAA;
+        _renderDist = GameSettings.RenderDistance;
+        _currentScale = GameSettings.RenderScale;
+        _shadowSamples = GameSettings.SoftShadowSamples;
+        _genThreads = GameSettings.GenerationThreads;
+        _physThreads = GameSettings.PhysicsThreads;
+        _budgetPercent = (int)(GameSettings.WorldUpdateBudgetPercentage * 100);
+        _lodDist = GameSettings.LodPercentage;
+        _lodEffectsDisabled = GameSettings.DisableEffectsOnLOD;
+        _taa = GameSettings.EnableTAA;
     }
 
     public void Toggle() => IsVisible = !IsVisible;
@@ -84,12 +84,22 @@ public class SettingsWindow : IUIWindow
             bool ao = GameSettings.EnableAO;
             if (ImGui.Checkbox("Ambient Occlusion", ref ao)) { GameSettings.EnableAO = ao; _renderer.ReloadShader(); }
 
+            int downscaleIdx = GameSettings.ShadowDownscale switch { 1 => 0, 4 => 2, _ => 1 };
+            string[] shadowResModes = { "100% (Ultra)", "50% (Balanced)", "25% (Performance)" };
+
             int shadowMode = (int)GameSettings.CurrentShadowMode;
             string[] shadowModes = { "None", "Hard", "Soft" };
             if (ImGui.Combo("Shadow Mode", ref shadowMode, shadowModes, shadowModes.Length))
             {
                 GameSettings.CurrentShadowMode = (ShadowMode)shadowMode;
                 _renderer.ReloadShader();
+            }
+
+            if (ImGui.Combo("Shadow Resolution", ref downscaleIdx, shadowResModes, shadowResModes.Length))
+            {
+                GameSettings.ShadowDownscale = downscaleIdx switch { 0 => 1, 2 => 4, _ => 2 };
+                // Пересоздаем FBO теней с новым размером
+                _renderer.ApplyRenderScale();
             }
 
             if (GameSettings.CurrentShadowMode == ShadowMode.Soft)

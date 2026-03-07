@@ -7,6 +7,8 @@ uniform sampler2D uCurrentDepthTexture;
 uniform sampler2D uHistoryTexture;
 uniform mat4 uInvViewProj;
 uniform mat4 uPrevViewProj;
+uniform float uCamDelta;
+uniform int uAccumFrames;
 
 const float TAA_BLEND_STATIC  = 0.18; // сколько текущего кадра в покое (больше = быстрее, но хуже)
 const float TAA_BLEND_MOTION  = 0.40; // сколько текущего кадра при движении
@@ -59,9 +61,8 @@ void main() {
     vec4 clip = vec4(uv * 2.0 - 1.0, depth * 2.0 - 1.0, 1.0);
     vec4 wPos = uInvViewProj * clip;
     wPos /= wPos.w;
-
     vec4 prevClip = uPrevViewProj * wPos;
-    vec2 prevUV   = (prevClip.xy / prevClip.w) * 0.5 + 0.5;
+    vec2 prevUV = (prevClip.xy / prevClip.w) * 0.5 + 0.5;
 
     if (any(lessThan(prevUV, vec2(0.0))) || any(greaterThan(prevUV, vec2(1.0)))) {
         FragColor = vec4(SafeColor(texture(uCurrentColorTexture, uv).rgb), 1.0);
