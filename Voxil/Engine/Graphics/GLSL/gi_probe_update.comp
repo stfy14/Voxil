@@ -12,8 +12,7 @@ layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
 /*__BANKS_INJECTION__*/
 
 // ============================================================
-// GetVoxelData — mirrors tracing.glsl, uses injected GetVoxelFromBank
-// (Cannot #include tracing.glsl — it contains fragment-shader globals)
+// GetVoxelData
 // ============================================================
 #define VOXELS_IN_UINT 4
 uint GetVoxelData(uint chunkSlot, int voxelIdx) {
@@ -41,8 +40,9 @@ layout(std430, binding = 5) buffer GIPackedMasks {
 
 // ============================================================
 // PROBE DATA BUFFERS  (bindings 16 & 17)
+// ВАЖНО: Убрано readonly у ProbePositions, так как мы двигаем зонды!
 // ============================================================
-layout(std430, binding = 16) readonly buffer ProbePositions {
+layout(std430, binding = 16) buffer ProbePositions {
     vec4 probePositions[];
 };
 
@@ -58,20 +58,22 @@ uniform int   uProbesThisFrame;
 uniform int   uRaysPerProbe;
 uniform float uTime;
 uniform vec3  uSunDir;
-uniform vec3  uGridOrigin;
 uniform float uProbeSpacing;
 uniform int   uProbeGridX;
 uniform int   uProbeGridY;
 uniform int   uProbeGridZ;
+
 uniform int   uBoundMinX; uniform int uBoundMinY; uniform int uBoundMinZ;
 uniform int   uBoundMaxX; uniform int uBoundMaxY; uniform int uBoundMaxZ;
 uniform int   uMaxRaySteps;
-uniform float uBlendFactor;
+
+// НОВЫЕ UNIFORMS (для кольцевого буфера):
+uniform int   uGIGridBaseX;
+uniform int   uGIGridBaseY;
+uniform int   uGIGridBaseZ;
 
 // ============================================================
 // CONSTANTS
-// CHUNK_SIZE, VOXEL_RESOLUTION, BIT_SHIFT, BIT_MASK, VOXELS_PER_METER
-// are injected by ShaderDefines.GetGlslDefines() — do NOT redefine here.
 // ============================================================
 #define BLOCK_SIZE      4
 #define BLOCKS_PER_AXIS (VOXEL_RESOLUTION / BLOCK_SIZE)
@@ -100,7 +102,7 @@ vec3 GetVoxelAlbedo(uint matID) {
     if (matID == 4u) return vec3(0.15, 0.25, 0.60); // Water
     if (matID == 5u) return vec3(0.15, 0.60, 0.05); // Grass
     if (matID == 6u) return vec3(0.90, 0.10, 0.10); // TNT
-    if (matID == 7u) return vec3(1.00, 0.90, 0.20); // Glow
+    if (matID == 7u) return vec3(0.97, 0.82, 0.20); // Glow
     return vec3(0.5);
 }
 
@@ -109,6 +111,11 @@ bool IsEmissive(uint matID) { return matID == 7u; }
 uint ReadVoxel(uint chunkSlot, int vx, int vy, int vz) {
     int idx = vx + VOXEL_RESOLUTION * (vy + VOXEL_RESOLUTION * vz);
     return GetVoxelData(chunkSlot, idx);
+}
+
+int true_mod(int a, int b) {
+    int m = a % b;
+    return m < 0 ? m + b : m;
 }
 
 // ============================================================
@@ -245,7 +252,7 @@ vec3 SkyColor(vec3 rd) {
 }
 
 // ============================================================
-// SH L1 ACCUMULATION (12 floats: 4 per R/G/B channel)
+// SH L1 ACCUMULATION
 // ============================================================
 void AccumulateSH(inout float sh[12], vec3 dir, vec3 radiance) {
     float y00 = 0.282095;
@@ -266,11 +273,36 @@ void AccumulateSH(inout float sh[12], vec3 dir, vec3 radiance) {
 // ============================================================
 void main() {
     uint localIdx = gl_GlobalInvocationID.x;
-    int  probeIdx = uProbeStartIndex + int(localIdx);
-    if (probeIdx >= uProbeGridX * uProbeGridY * uProbeGridZ) return;
+    if (localIdx >= uint(uProbesThisFrame)) return;
 
-    vec3  probePos = probePositions[probeIdx].xyz;
-    float seed     = Hash(float(probeIdx), uTime * 0.01 + float(uProbeStartIndex) * 0.137);
+    // Циклический индекс зонда
+    int probeIdx = (uProbeStartIndex + int(localIdx)) % (uProbeGridX * uProbeGridY * uProbeGridZ);
+
+    // Локальные координаты в массиве (от 0 до Size-1)
+    int wx = probeIdx % uProbeGridX;
+    int wy = (probeIdx / uProbeGridX) % uProbeGridY;
+    int wz = probeIdx / (uProbeGridX * uProbeGridY);
+
+    // TOROIDAL MATH: Ищем абсолютные координаты сетки
+    int modBaseX = true_mod(uGIGridBaseX, uProbeGridX);
+    int modBaseY = true_mod(uGIGridBaseY, uProbeGridY);
+    int modBaseZ = true_mod(uGIGridBaseZ, uProbeGridZ);
+
+    int gx = uGIGridBaseX + true_mod(wx - modBaseX, uProbeGridX);
+    int gy = uGIGridBaseY + true_mod(wy - modBaseY, uProbeGridY);
+    int gz = uGIGridBaseZ + true_mod(wz - modBaseZ, uProbeGridZ);
+
+    vec3 targetPos = vec3(gx, gy, gz) * uProbeSpacing;
+    vec3 lastPos = probePositions[probeIdx].xyz;
+
+    // Если зонд переместился в пространстве больше чем на 10см -> сброс истории
+    float temporalBlend = 0.15; // Стандартное плавное обновление (85% истории)
+    if (distance(lastPos, targetPos) > 0.1) {
+        temporalBlend = 1.0; // Мгновенная перезапись
+        probePositions[probeIdx].xyz = targetPos;
+    }
+
+    float seed = Hash(float(probeIdx), uTime * 0.01 + float(uProbeStartIndex) * 0.137);
 
     float sh[12];
     for (int k = 0; k < 12; k++) sh[k] = 0.0;
@@ -283,23 +315,24 @@ void main() {
         uint  matID = 0u;
         vec3  radiance;
 
-        if (TraceProbeRay(probePos, rd, maxRayDist, tHit, matID)) {
+        if (TraceProbeRay(targetPos, rd, maxRayDist, tHit, matID)) {
             vec3 albedo = GetVoxelAlbedo(matID);
+
             radiance = IsEmissive(matID)
-            ? albedo * 3.0
+            ? albedo * 15.0 // СИЯНИЕ для статических светящихся вокселей!
             : albedo * (0.1 + clamp(uSunDir.y * 5.0, 0.0, 1.0) * 0.4);
         } else {
             radiance = SkyColor(rd);
         }
-
         AccumulateSH(sh, rd, radiance);
     }
 
     float weight = 4.0 * 3.14159265 / float(uRaysPerProbe);
     for (int k = 0; k < 12; k++) sh[k] *= weight;
 
-    // Temporal blend: 15% new, 85% old
     int base = probeIdx * 12;
-    for (int k = 0; k < 12; k++)
-    probeIrradiance[base + k] = mix(probeIrradiance[base + k], sh[k], uBlendFactor);
+    for (int k = 0; k < 12; k++) {
+        // Миксуем со старым значением или полностью заменяем
+        probeIrradiance[base + k] = mix(probeIrradiance[base + k], sh[k], temporalBlend);
+    }
 }
