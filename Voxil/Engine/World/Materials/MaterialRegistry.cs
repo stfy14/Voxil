@@ -1,4 +1,4 @@
-﻿// --- START OF FILE MaterialRegistry.cs ---
+﻿// --- Engine/World/Materials/MaterialRegistry.cs ---
 using System.Collections.Generic;
 
 public static class MaterialRegistry
@@ -10,13 +10,15 @@ public static class MaterialRegistry
         _definitions = new Dictionary<MaterialType, MaterialProperties>
         {
             // Цвет, Масса, Здоровье(Hardness)
-            [MaterialType.Air]   = new MaterialProperties((0, 0, 0), 0f, 0f),
-            [MaterialType.Dirt]  = new MaterialProperties((0.55f, 0.27f, 0.07f), 1.3f, 30f),  // Слабый
-            [MaterialType.Stone] = new MaterialProperties((0.5f, 0.5f, 0.5f), 2.5f, 100f), // Крепкий
+            [MaterialType.Air]   = new MaterialProperties((0, 0, 0),       0f,   0f),
+            [MaterialType.Dirt]  = new MaterialProperties((0.55f, 0.27f, 0.07f), 1.3f, 30f),
+            [MaterialType.Stone] = new MaterialProperties((0.5f, 0.5f, 0.5f),   2.5f, 100f),
             [MaterialType.Wood]  = new MaterialProperties((0.4f, 0.26f, 0.13f), 0.7f, 50f),
-            [MaterialType.Water] = new MaterialProperties((0.2f, 0.4f, 0.8f), 1.0f, 500f), // Гасит взрыв
-            [MaterialType.Grass] = new MaterialProperties((0.15f, 0.60f, 0.05f), 1.2f, 30f),
-            [MaterialType.TNT]   = new MaterialProperties((0.8f, 0.1f, 0.1f), 1.5f, 10f),  // Очень хрупкий
+            [MaterialType.Water] = new MaterialProperties((0.2f, 0.4f, 0.8f),   1.0f, 500f),
+            [MaterialType.Grass] = new MaterialProperties((0.15f, 0.60f, 0.05f),1.2f, 30f),
+            [MaterialType.TNT]   = new MaterialProperties((0.8f, 0.1f, 0.1f),   1.5f, 10f),
+            // Glow: яркий тёплый жёлто-белый, лёгкий, хрупкий, светится
+            [MaterialType.Glow]  = new MaterialProperties((0.97f, 0.82f, 0.20f),0.3f, 5f),
         };
     }
 
@@ -30,6 +32,38 @@ public static class MaterialRegistry
         return _definitions.TryGetValue(type, out var props) ? props.Color : (1.0f, 0.0f, 1.0f);
     }
 
+    /// <summary>
+    /// Возвращает true для материалов, которые излучают свет (используется renderer'ом для point lights).
+    /// </summary>
+    public static bool IsEmissive(MaterialType type)
+    {
+        return type == MaterialType.Glow;
+    }
+
+    /// <summary>
+    /// Интенсивность point light для данного материала (0 = не светится).
+    /// </summary>
+    public static float GetEmissiveIntensity(MaterialType type)
+    {
+        return type switch
+        {
+            MaterialType.Glow => 12.0f,
+            _                 => 0f,
+        };
+    }
+
+    /// <summary>
+    /// Радиус влияния point light для данного материала.
+    /// </summary>
+    public static float GetEmissiveRadius(MaterialType type)
+    {
+        return type switch
+        {
+            MaterialType.Glow => 16.0f,
+            _                 => 0f,
+        };
+    }
+
     public static bool IsSolidForPhysics(MaterialType type)
     {
         switch (type)
@@ -40,10 +74,11 @@ public static class MaterialRegistry
             case MaterialType.Water:
             case MaterialType.Grass:
             case MaterialType.TNT:
-                return true; 
+            case MaterialType.Glow:
+                return true;
             case MaterialType.Air:
             default:
-                return false; 
+                return false;
         }
     }
 }

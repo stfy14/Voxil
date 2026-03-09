@@ -71,6 +71,12 @@
     <None Update="Engine\Graphics\GLSL\clear_grid.comp">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </None>
+    <None Update="Engine\Graphics\GLSL\gi_probe_update.comp">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </None>
+    <None Update="Engine\Graphics\GLSL\include\gi.glsl">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </None>
   </ItemGroup>
 
   <ItemGroup>

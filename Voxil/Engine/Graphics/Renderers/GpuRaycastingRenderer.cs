@@ -124,6 +124,32 @@ public class GpuRaycastingRenderer : IDisposable
     private ConcurrentQueue<GpuVoxelEdit> _editQueue = new ConcurrentQueue<GpuVoxelEdit>();
     private GpuVoxelEdit[] _editUploadArray = new GpuVoxelEdit[1024];
 
+    // --- GI + Point Lights ---
+    private GIProbeSystem _giSystem;
+    private int _pointLightSsbo;
+    private const int POINT_LIGHT_BINDING = 18;
+    private int _lastPointLightCount = 0;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct GpuPointLight
+    {
+        public Vector4 PosRadius;       // xyz=pos, w=radius
+        public Vector4 ColorIntensity;  // xyz=color, w=intensity
+    }
+    private readonly GpuPointLight[] _pointLightCache = new GpuPointLight[32];
+
+    // Public accessor for TestManager / Game.cs wiring
+    public GIProbeSystem GISystem => _giSystem;
+
+    // Forwarded from ShaderSystem so callers (e.g. Game.cs) don't need a reference to it
+    public event Action OnShaderReloaded
+    {
+        add    => _shaderSystem.OnShaderReloaded += value;
+        remove => _shaderSystem.OnShaderReloaded -= value;
+    }
+
+    // =========================================================
+
     [StructLayout(LayoutKind.Sequential)]
     struct GpuVoxelEdit
     {
@@ -265,8 +291,35 @@ public class GpuRaycastingRenderer : IDisposable
         GL.TexParameter(TextureTarget.Texture3D, TextureParameterName.TextureMagFilter, (int)TextureMinFilter.Nearest);
 
         CreateAuxBuffers();
+
+        // --- Point Light SSBO (binding 18) ---
+        if (_pointLightSsbo == 0)
+        {
+            _pointLightSsbo = GL.GenBuffer();
+            GL.BindBuffer(BufferTarget.ShaderStorageBuffer, _pointLightSsbo);
+            GL.BufferData(BufferTarget.ShaderStorageBuffer,
+                32 * Marshal.SizeOf<GpuPointLight>(), IntPtr.Zero, BufferUsageHint.DynamicDraw);
+            GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, POINT_LIGHT_BINDING, _pointLightSsbo);
+        }
+
         _shaderSystem.Compile(MAX_TOTAL_BANKS, _chunksPerBank);
         ResetAllocationLogic();
+
+        // --- GI init / reinit (triggered by shader recompile too) ---
+        _shaderSystem.OnShaderReloaded -= ReinitGI;
+        _shaderSystem.OnShaderReloaded += ReinitGI;
+        ReinitGI();
+    }
+
+    private void ReinitGI()
+    {
+        _giSystem?.Dispose();
+        _giSystem = null;
+        if (GameSettings.EnableGI && _shaderSystem.GIProbeUpdateShader != null)
+        {
+            _giSystem = new GIProbeSystem(_shaderSystem.GIProbeUpdateShader);
+            Console.WriteLine("[Renderer] GI probe system initialized.");
+        }
     }
 
     // =========================================================
@@ -319,21 +372,18 @@ public class GpuRaycastingRenderer : IDisposable
         _mainDepthTexture = GL.GenTexture();
         GL.BindTexture(TextureTarget.Texture2D, _mainDepthTexture);
         GL.TexImage2D(TextureTarget.Texture2D, 0, PixelInternalFormat.DepthComponent32f, _renderWidth, _renderHeight, 0, PixelFormat.DepthComponent, PixelType.Float, IntPtr.Zero);
+        GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Nearest);
+        GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMinFilter.Nearest);
         GL.FramebufferTexture2D(FramebufferTarget.Framebuffer, FramebufferAttachment.DepthAttachment, TextureTarget.Texture2D, _mainDepthTexture, 0);
         GL.DrawBuffers(2, new DrawBuffersEnum[] { DrawBuffersEnum.ColorAttachment0, DrawBuffersEnum.ColorAttachment1 });
 
-        // =====================================================
-        // Shadow FBO (Динамическое разрешение)
-        // =====================================================
-        // Читаем из настроек (защита от деления на 0 или отрицательных чисел)
-        int downscale = Math.Max(1, GameSettings.ShadowDownscale);
-        _shadowWidth = Math.Max(1, _renderWidth / downscale);
-        _shadowHeight = Math.Max(1, _renderHeight / downscale);
+        // Shadow pass (½ or ¼ res based on downscale)
+        _shadowWidth  = Math.Max(1, _renderWidth  / GameSettings.ShadowDownscale);
+        _shadowHeight = Math.Max(1, _renderHeight / GameSettings.ShadowDownscale);
 
         if (_shadowFbo != 0) GL.DeleteFramebuffer(_shadowFbo);
         _shadowFbo = GL.GenFramebuffer();
         GL.BindFramebuffer(FramebufferTarget.Framebuffer, _shadowFbo);
-
         if (_shadowTexture != 0) GL.DeleteTexture(_shadowTexture);
         _shadowTexture = GL.GenTexture();
         GL.BindTexture(TextureTarget.Texture2D, _shadowTexture);
@@ -345,7 +395,7 @@ public class GpuRaycastingRenderer : IDisposable
         GL.FramebufferTexture2D(FramebufferTarget.Framebuffer, FramebufferAttachment.ColorAttachment0, TextureTarget.Texture2D, _shadowTexture, 0);
         GL.DrawBuffers(1, new DrawBuffersEnum[] { DrawBuffersEnum.ColorAttachment0 });
 
-        // Shadow full-res FBO (upsampled)
+        // Shadow upsample (full res)
         if (_shadowFullFbo != 0) GL.DeleteFramebuffer(_shadowFullFbo);
         _shadowFullFbo = GL.GenFramebuffer();
         GL.BindFramebuffer(FramebufferTarget.Framebuffer, _shadowFullFbo);
@@ -489,6 +539,33 @@ public class GpuRaycastingRenderer : IDisposable
 
         GL.BindVertexArray(_quadVao);
 
+        // === UPDATE POINT LIGHTS (перед рендером) ===
+        UpdatePointLights();
+
+        // === GI PROBE UPDATE (перед Beam pass) ===
+        if (_giSystem != null && GameSettings.EnableGI)
+        {
+            GL.BindImageTexture(0, _pageTableTexture, 0, true, 0, TextureAccess.ReadOnly, SizedInternalFormat.R32ui);
+            BindAllBuffers();
+            GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 5, _maskSsbo);
+            _giSystem.Bind();
+
+            int r = GameSettings.RenderDistance + 2;
+            int cx = (int)Math.Floor(cam.Position.X / Constants.ChunkSizeWorld);
+            int cz = (int)Math.Floor(cam.Position.Z / Constants.ChunkSizeWorld);
+            int maxSteps = (int)(viewRange * 8) + 512;
+
+            _giSystem.Update(cam.Position, sunDir, _totalTime,
+                cx - r, 0, cz - r,
+                cx + r, WorldManager.WorldHeightChunks, cz + r,
+                maxSteps);
+
+            // Restore raycast shader state after compute dispatch
+            _shaderSystem.Use();
+            shader = _shaderSystem.RaycastShader;
+            GL.BindVertexArray(_quadVao);
+        }
+
         // =====================================================
         // BEAM PASS (¼ res)
         // =====================================================
@@ -538,7 +615,8 @@ public class GpuRaycastingRenderer : IDisposable
                 shadowShader.SetVector3("uMoonDir", moonDir);
                 shadowShader.SetFloat("uTime", _totalTime);
                 shadowShader.SetFloat("uRenderDistance", viewRange);
-                shadowShader.SetFloat("uLodDistance", GameSettings.EnableLOD ? viewRange * GameSettings.LodPercentage : 100000.0f);
+                shadowShader.SetFloat("uLodDistance", GameSettings.EnableLOD
+                    ? viewRange * GameSettings.LodPercentage : 100000.0f);
                 shadowShader.SetInt("uDisableEffectsOnLOD", GameSettings.DisableEffectsOnLOD ? 1 : 0);
                 shadowShader.SetInt("uMaxRaySteps", (int)(GameSettings.RenderDistance * 8) + 2028);
                 shadowShader.SetInt("uSoftShadowSamples", GameSettings.SoftShadowSamples);
@@ -564,7 +642,6 @@ public class GpuRaycastingRenderer : IDisposable
                 shadowShader.SetTexture("uGColor", _gColorTexture, TextureUnit.Texture10);
                 shadowShader.SetTexture("uGData", _gDataTexture, TextureUnit.Texture11);
 
-                // World data SSBOs (нужны для TraceShadowRay)
                 GL.BindImageTexture(0, _pageTableTexture, 0, true, 0, TextureAccess.ReadOnly, SizedInternalFormat.R32ui);
                 BindAllBuffers();
                 GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 5, _maskSsbo);
@@ -621,6 +698,20 @@ public class GpuRaycastingRenderer : IDisposable
         compositeShader.SetTexture("uGColor", _gColorTexture, TextureUnit.Texture0);
         compositeShader.SetTexture("uGData", _gDataTexture, TextureUnit.Texture1);
         compositeShader.SetTexture("uShadowFull", _shadowFullTexture, TextureUnit.Texture2);
+
+        // GI + Point Lights uniforms
+        if (_giSystem != null && GameSettings.EnableGI)
+        {
+            _giSystem.SetSamplingUniforms(compositeShader);
+            _giSystem.Bind();
+            GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, POINT_LIGHT_BINDING, _pointLightSsbo);
+            compositeShader.SetInt("uPointLightCount", _lastPointLightCount);
+        }
+        else
+        {
+            compositeShader.SetInt("uPointLightCount", 0);
+        }
+
         GL.DrawArrays(PrimitiveType.TriangleStrip, 0, 4);
 
         // =====================================================
@@ -684,6 +775,44 @@ public class GpuRaycastingRenderer : IDisposable
             ? new Vector2((jitter.X / _renderWidth) * 2.0f, (jitter.Y / _renderHeight) * 2.0f)
             : Vector2.Zero;
         _historyWriteIndex = 1 - _historyWriteIndex;
+    }
+
+    // =========================================================
+    // UpdatePointLights
+    // =========================================================
+
+    private void UpdatePointLights()
+    {
+        if (_pointLightSsbo == 0) return;
+
+        var objects = _objectService.GetAllVoxelObjects();
+        int count = 0;
+        float alpha = _worldService.PhysicsWorld.PhysicsAlpha;
+
+        foreach (var vo in objects)
+        {
+            if (count >= 32) break;
+            if (!MaterialRegistry.IsEmissive(vo.Material)) continue;
+            if (vo.VoxelCoordinates.Count == 0) continue; // fully destroyed — no light
+
+            var pos = vo.GetInterpolatedModelMatrix(alpha).ExtractTranslation();
+            var (r, g, b) = MaterialRegistry.GetColor(vo.Material);
+
+            _pointLightCache[count++] = new GpuPointLight
+            {
+                PosRadius      = new Vector4(pos.X, pos.Y, pos.Z, MaterialRegistry.GetEmissiveRadius(vo.Material)),
+                ColorIntensity = new Vector4(r, g, b, MaterialRegistry.GetEmissiveIntensity(vo.Material)),
+            };
+        }
+
+        _lastPointLightCount = count;
+
+        if (count > 0)
+        {
+            GL.BindBuffer(BufferTarget.ShaderStorageBuffer, _pointLightSsbo);
+            GL.BufferSubData(BufferTarget.ShaderStorageBuffer, IntPtr.Zero,
+                count * Marshal.SizeOf<GpuPointLight>(), _pointLightCache);
+        }
     }
 
     // =========================================================
@@ -1071,6 +1200,10 @@ public class GpuRaycastingRenderer : IDisposable
         if (_shadowFullTexture != 0) { GL.DeleteTexture(_shadowFullTexture); _shadowFullTexture = 0; }
         if (_compositeFbo != 0) { GL.DeleteFramebuffer(_compositeFbo); _compositeFbo = 0; }
         if (_mainColorTexture != 0) { GL.DeleteTexture(_mainColorTexture); _mainColorTexture = 0; }
+        // GI cleanup
+        _giSystem?.Dispose();
+        _giSystem = null;
+        if (_pointLightSsbo != 0) { GL.DeleteBuffer(_pointLightSsbo); _pointLightSsbo = 0; }
         CurrentAllocatedBytes = 0;
         System.Threading.Thread.Sleep(50);
     }
@@ -1093,8 +1226,7 @@ public class GpuRaycastingRenderer : IDisposable
 
     public void ReloadShader() => _shaderSystem.Compile(MAX_TOTAL_BANKS, _chunksPerBank);
     public void UploadAllVisibleChunks() { foreach (var c in _worldService.GetChunksSnapshot()) NotifyChunkLoaded(c); }
-    public void ClearHoverVoxel()
-    => SetHoverVoxel(new Vector3(-9999f), new Vector3(-9999f));
+    public void ClearHoverVoxel() => SetHoverVoxel(new Vector3(-9999f), new Vector3(-9999f));
 
     public string GetMemoryDebugInfo()
     {

@@ -1,4 +1,5 @@
-﻿// --- START OF FILE include/common.glsl ---
+﻿// --- Engine/Graphics/GLSL/include/common.glsl ---
+// (Добавлен Glow material ID 7, остальное без изменений)
 
 // === ГЛАВНЫЕ UNIFORMS ===
 uniform vec3 uCamPos;
@@ -27,8 +28,9 @@ uniform int uGridSize;
 uniform sampler2D uNoiseTexture;
 
 // === BEAM OPTIMIZATION ===
-uniform int uIsBeamPass;           // 1 = рисуем карту глубин, 0 = основной проход
-uniform sampler2D uBeamTexture;    // Результат первого прохода
+uniform int uIsBeamPass;
+uniform sampler2D uBeamTexture;
+
 // === LOD ===
 uniform float uLodDistance;
 uniform int uDisableEffectsOnLOD;
@@ -47,11 +49,11 @@ struct DynamicObject {
     vec4  color;
     vec4  boxMin;
     vec4  boxMax;
-    uint  svoOffset;   // ← ДОЛЖНЫ БЫТЬ ЭТИ 4 ПОЛЯ
+    uint  svoOffset;
     uint  gridSize;
     float voxelSize;
     uint  padding;
-};                // ИТОГО: 192 байта
+};
 
 struct ListNode {
     uint objectID;
@@ -70,7 +72,8 @@ vec3 GetColor(uint id) {
     if (id == 3u) return vec3(0.25, 0.12, 0.05); // Wood
     if (id == 4u) return vec3(0.15, 0.25, 0.60); // Water
     if (id == 5u) return vec3(0.15, 0.60, 0.05); // Grass
-    if (id == 6u) return vec3(0.9, 0.1, 0.1);    // TNT Red <--- ИСПРАВЛЕНО НА 6u
+    if (id == 6u) return vec3(0.9,  0.1,  0.1);  // TNT
+    if (id == 7u) return vec3(0.97, 0.82, 0.20); // Glow ← НОВЫЙ
     return vec3(1.0, 0.0, 1.0); // Error pink
 }
 

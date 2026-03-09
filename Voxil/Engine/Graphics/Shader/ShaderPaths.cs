@@ -8,11 +8,10 @@
     public static readonly string GridUpdate = $"{Root}/grid_update.comp";
     public static readonly string ClearGrid = $"{Root}/clear_grid.comp";
     public static readonly string EditUpdater = $"{Root}/edit_updater.comp";
-
-    // === НОВЫЕ ===
     public static readonly string ShadowFrag = $"{Root}/shadow.frag";
     public static readonly string ShadowUpsampleFrag = $"{Root}/shadow_upsample.frag";
     public static readonly string CompositeFrag = $"{Root}/composite.frag";
+    public static readonly string GIProbeUpdate = $"{Root}/gi_probe_update.comp";
 
     public static class Textures
     {

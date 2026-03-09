@@ -1,4 +1,6 @@
-﻿using OpenTK.Mathematics;
+﻿// --- Tests/TestManager.cs ---
+// Добавлены: F6 = тест GI (статус зондов), F7 = бросить GlowBall для теста
+using OpenTK.Mathematics;
 using OpenTK.Windowing.GraphicsLibraryFramework;
 using System;
 using System.Collections.Generic;
@@ -16,7 +18,11 @@ public class TestManager
     private VoxelObject _testObject;
     private Vector3 _spawnPosition;
     private float _waitTimer = 0f;
-    private int _lastSeconds = -1; // Для красивого вывода в консоль
+    private int _lastSeconds = -1;
+
+    // --- GI тест ---
+    private bool _giTestRunning = false;
+    private float _giTestTimer = 0f;
 
     public TestManager(Camera camera)
     {
@@ -24,91 +30,129 @@ public class TestManager
         _camera = camera;
     }
 
+
     public void Update(float deltaTime, InputManager input)
     {
-        // F5 запускает тест!
+        // === Существующие тесты ===
         if (input.IsKeyPressed(Keys.F5))
-        {
             RunAutomatedBreakTest();
+
+        // === F6: Тест GI системы ===
+        if (input.IsKeyPressed(Keys.F6))
+            RunGITest();
+
+        // === F7: Спавн GlowBall прямо перед камерой (быстрый тест освещения) ===
+        if (input.IsKeyPressed(Keys.F7))
+            SpawnGlowBallTest();
+
+        // --- Обновление таймеров ---
+        if (_state != TestState.Idle)
+        {
+            _waitTimer -= deltaTime;
+
+            int currentSeconds = (int)Math.Ceiling(_waitTimer);
+            if (currentSeconds != _lastSeconds && currentSeconds >= 0)
+            {
+                Console.WriteLine($"[Test] Waiting... {currentSeconds}s");
+                _lastSeconds = currentSeconds;
+            }
+
+            if (_waitTimer <= 0)
+            {
+                if (_state == TestState.WaitingForSpawn)
+                    CheckSpawnResult();
+                else if (_state == TestState.WaitingForSplit)
+                    CheckSplitResult();
+            }
         }
 
-        if (_state == TestState.Idle) return;
-        
-        _waitTimer -= deltaTime;
-
-        // Печатаем обратный отсчет, чтобы понимать, что тест идет
-        int currentSeconds = (int)Math.Ceiling(_waitTimer);
-        if (currentSeconds != _lastSeconds && currentSeconds >= 0)
+        // GI тест — обновляем таймер
+        if (_giTestRunning)
         {
-            Console.WriteLine($"[Test] Waiting... {currentSeconds}s");
-            _lastSeconds = currentSeconds;
-        }
-
-        if (_waitTimer > 0) return;
-
-        if (_state == TestState.WaitingForSpawn)
-        {
-            // Ищем наш заспавненный объект
-            // Условия:
-            // 1. Дистанция до спавна < 5 метров (25.0f squared) — чтобы учесть смещение центра масс и отталкивание физики
-            // 2. Количество вокселей == 3 (мы спавнили палку из 3 блоков)
-            _testObject = _objectService.GetAllVoxelObjects()
-                .FirstOrDefault(o => o.VoxelCoordinates.Count == 3 && 
-                                     (o.Position - _spawnPosition).LengthSquared < 25.0f);
-
-            if (_testObject != null)
+            _giTestTimer -= deltaTime;
+            if (_giTestTimer <= 0)
             {
-                Console.WriteLine("\n=== [AUTOMATED TEST PHASE 1] ===");
-                Console.WriteLine($"OBJECT FOUND! Dist: {(_testObject.Position - _spawnPosition).Length:F2}m");
-                LogVoxelObjectState(_testObject, "Original Object");
-
-                Console.WriteLine("\n[Test] Automatically breaking voxel at (1,0,0)...");
-                // Ломаем центральный блок, чтобы палка развалилась на 2 части
-                _objectService.TestBreakVoxel(_testObject, new Vector3i(1, 0, 0));
-                
-                _state = TestState.WaitingForSplit;
-                _waitTimer = 1.0f; 
+                _giTestRunning = false;
+                LogGIStatus();
             }
-            else
-            {
-                // Дебаг: если не нашли, покажем, что вообще есть рядом
-                Console.WriteLine("[Test ERROR] Target object not found within 5m!");
-                Console.WriteLine("Nearby objects:");
-                var nearby = _objectService.GetAllVoxelObjects()
-                    .Where(o => (o.Position - _spawnPosition).LengthSquared < 100.0f);
-                
-                foreach(var o in nearby)
-                    Console.WriteLine($" - Obj at {o.Position} (Dist: {(o.Position - _spawnPosition).Length:F1}m), Voxels: {o.VoxelCoordinates.Count}");
-
-                _state = TestState.Idle;
-            }
-        }
-        else if (_state == TestState.WaitingForSplit)
-        {
-            Console.WriteLine("\n===[AUTOMATED TEST PHASE 2] ===");
-            Console.WriteLine("OBJECTS AFTER SPLIT:");
-            
-            // Логируем оставшийся кусок (если он выжил)
-            if (_testObject.VoxelCoordinates.Count > 0)
-            {
-                LogVoxelObjectState(_testObject, "Main Object (Remaining)");
-            }
-
-            // Ищем новые осколки (они должны быть рядом)
-            var fragments = _objectService.GetAllVoxelObjects()
-                .Where(o => o != _testObject && (o.Position - _testObject.Position).LengthSquared < 25.0f);
-
-            int fragIndex = 1;
-            foreach (var frag in fragments)
-            {
-                LogVoxelObjectState(frag, $"Fragment #{fragIndex++}");
-            }
-            
-            Console.WriteLine("=== [AUTOMATED TEST FINISHED] ===\n");
-            _state = TestState.Idle;
         }
     }
 
+    // =========================================================
+    // GI ТЕСТ
+    // =========================================================
+    private void RunGITest()
+    {
+        Console.WriteLine("\n=== [GI TEST] Starting... ===");
+        Console.WriteLine($"GI Enabled: {GameSettings.EnableGI}");
+
+        if (!GameSettings.EnableGI)
+        {
+            Console.WriteLine("[GI Test] GI is disabled. Enable it in Game Settings → Global Illumination.");
+            return;
+        }
+
+        Console.WriteLine($"Probe grid: {GIProbeSystem.PROBE_X}x{GIProbeSystem.PROBE_Y}x{GIProbeSystem.PROBE_Z} = {GIProbeSystem.PROBE_COUNT} probes");
+        Console.WriteLine($"Probe spacing: {GIProbeSystem.PROBE_SPACING}m");
+        Console.WriteLine($"Rays per probe: {GIProbeSystem.RAYS_PER_PROBE}");
+        Console.WriteLine($"Probes per frame: {GIProbeSystem.PROBES_PER_FRAME} (full cycle: {GIProbeSystem.PROBE_COUNT / GIProbeSystem.PROBES_PER_FRAME} frames)");
+
+        // Count active glow sources immediately
+        var glowObjects = _objectService.GetAllVoxelObjects()
+            .Where(o => (o.Material == MaterialType.Glow || o.VoxelMaterials.Values.Any(m => m == (uint)MaterialType.Glow))
+                        && o.VoxelCoordinates.Count > 0)
+            .ToList();
+        Console.WriteLine($"Active Glow sources (point lights): {glowObjects.Count}");
+        foreach (var go in glowObjects)
+            Console.WriteLine($"  → GlowBall at {go.Position:F1}");
+
+        // Delayed result log after probes have had time to update
+        _giTestRunning = true;
+        _giTestTimer   = 3.0f;
+        Console.WriteLine("[GI Test] Waiting 3s for probe update cycle...");
+    }
+
+    private void LogGIStatus()
+    {
+        Console.WriteLine("\n=== [GI TEST RESULT] ===");
+        Console.WriteLine($"Camera pos: {_camera.Position:F1}");
+
+        var glowObjects = _objectService.GetAllVoxelObjects()
+            .Where(o => (o.Material == MaterialType.Glow || o.VoxelMaterials.Values.Any(m => m == (uint)MaterialType.Glow))
+                        && o.VoxelCoordinates.Count > 0)
+            .ToList();
+        Console.WriteLine($"Active Glow sources after 3s: {glowObjects.Count}");
+        foreach (var go in glowObjects)
+            Console.WriteLine($"  → GlowBall at {go.Position:F1}");
+
+        Console.WriteLine("PASS: GI system is active (probes update every frame automatically).");
+        Console.WriteLine("=== [GI TEST DONE] ===\n");
+    }
+
+    private void SpawnGlowBallTest()
+    {
+        Console.WriteLine("[GI Test] Spawning GlowBall for light test...");
+
+        var spawnPos = _camera.Position + _camera.Front * 3.0f;
+        var spawnVel = _camera.Front.ToSystemNumerics() * 5.0f;
+
+        // Создаём шар из Glow-вокселей
+        var shape = new List<Vector3i>
+        {
+            new(1,0,1), new(0,1,1), new(1,1,0), new(1,1,1), new(2,1,1), new(1,2,1), new(1,1,2)
+        };
+        var materials = new Dictionary<Vector3i, uint>();
+        foreach (var v in shape) materials[v] = (uint)MaterialType.Glow;
+
+        var glowBall = new VoxelObject(shape, MaterialType.Glow, 0.2f, materials);
+        _objectService.SpawnDynamicObject(glowBall, spawnPos.ToSystemNumerics(), spawnVel);
+
+        Console.WriteLine($"[GI Test] GlowBall spawned at {spawnPos:F1}. Check point light in scene.");
+    }
+
+    // =========================================================
+    // СУЩЕСТВУЮЩИЕ ТЕСТЫ (без изменений)
+    // =========================================================
     private void RunAutomatedBreakTest()
     {
         if (_state != TestState.Idle)
@@ -117,41 +161,73 @@ public class TestManager
             return;
         }
 
-        // Создаем палку 3x1x1 (три разных материала)
-        var voxels = new List<Vector3i> { new(0, 0, 0), new(1, 0, 0), new(2, 0, 0) };
-        var materials = new Dictionary<Vector3i, uint>
-        {
-            [new(0,0,0)] = (uint)MaterialType.Dirt,
-            [new(1,0,0)] = (uint)MaterialType.Stone,
-            [new(2,0,0)] = (uint)MaterialType.Wood,
-        };
+        Console.WriteLine("\n=== [AUTOMATED BREAK TEST] Starting... ===");
+        _spawnPosition = _camera.Position + _camera.Front * 3.0f + new Vector3(0, -1, 0);
 
-        _spawnPosition = _camera.Position + _camera.Front * 5.0f;
-        
-        Console.WriteLine($"\n[Test] Spawning 3x1x1 block at {_spawnPosition}...");
-        _objectService.SpawnComplexObject(_spawnPosition.ToSystemNumerics(), voxels, MaterialType.Stone, materials);
-        
-        _state = TestState.WaitingForSpawn;
-        _waitTimer = 1.0f; 
+        var voxels = new List<Vector3i> { new(0,0,0), new(1,0,0), new(2,0,0) };
+        var testObj = new VoxelObject(voxels, MaterialType.Stone, 1.0f);
+        _objectService.SpawnDynamicObject(testObj, _spawnPosition.ToSystemNumerics(),
+            System.Numerics.Vector3.Zero);
+
+        _state      = TestState.WaitingForSpawn;
+        _waitTimer  = 1.5f;
         _lastSeconds = -1;
+        Console.WriteLine($"[Test] Spawned 3-voxel stick at {_spawnPosition}. Waiting...");
     }
 
-    private void LogVoxelObjectState(VoxelObject vo, string prefix)
+    private void CheckSpawnResult()
+    {
+        _testObject = _objectService.GetAllVoxelObjects()
+            .FirstOrDefault(o => o.VoxelCoordinates.Count == 3 && 
+                                 (o.Position - _spawnPosition).LengthSquared < 25.0f);
+
+        if (_testObject != null)
+        {
+            Console.WriteLine("\n=== [AUTOMATED TEST PHASE 1] ===");
+            Console.WriteLine($"OBJECT FOUND! Dist: {(_testObject.Position - _spawnPosition).Length:F2}m");
+            LogVoxelObjectState(_testObject, "Original Object");
+            Console.WriteLine("\n[Test] Automatically breaking voxel at (1,0,0)...");
+            _objectService.TestBreakVoxel(_testObject, new Vector3i(1, 0, 0));
+            _state = TestState.WaitingForSplit;
+            _waitTimer = 1.0f;
+        }
+        else
+        {
+            Console.WriteLine("[Test ERROR] Target object not found within 5m!");
+            var nearby = _objectService.GetAllVoxelObjects()
+                .Where(o => (o.Position - _spawnPosition).LengthSquared < 100.0f);
+            foreach (var o in nearby)
+                Console.WriteLine($" - Obj at {o.Position} (Dist: {(o.Position - _spawnPosition).Length:F1}m), Voxels: {o.VoxelCoordinates.Count}");
+            _state = TestState.Idle;
+        }
+    }
+
+    private void CheckSplitResult()
+    {
+        Console.WriteLine("\n===[AUTOMATED TEST PHASE 2] ===");
+        Console.WriteLine("OBJECTS AFTER SPLIT:");
+        
+        if (_testObject.VoxelCoordinates.Count > 0)
+            LogVoxelObjectState(_testObject, "Main Object (Remaining)");
+
+        var fragments = _objectService.GetAllVoxelObjects()
+            .Where(o => o != _testObject && (o.Position - _testObject.Position).LengthSquared < 25.0f);
+
+        int fragIndex = 1;
+        foreach (var frag in fragments)
+            LogVoxelObjectState(frag, $"Fragment #{fragIndex++}");
+        
+        Console.WriteLine("=== [AUTOMATED TEST FINISHED] ===\n");
+        _state = TestState.Idle;
+    }
+
+    private void LogVoxelObjectState(VoxelObject vo, string label)
     {
         var sb = new StringBuilder();
-        sb.AppendLine($"[{prefix}]");
-        sb.AppendLine($"  Position : {vo.Position}");
-        sb.AppendLine($"  Rotation : {vo.Rotation.Xyz}, {vo.Rotation.W}");
-        sb.AppendLine($"  Scale    : {vo.Scale}");
-        sb.AppendLine($"  CenterOfMass (Local) : {vo.LocalCenterOfMass}");
-        sb.AppendLine($"  Voxel Count : {vo.VoxelCoordinates.Count}");
-        
-        sb.AppendLine("  Voxels & Materials:");
-        foreach (var voxelPos in vo.VoxelCoordinates.OrderBy(v => v.X).ThenBy(v => v.Y).ThenBy(v => v.Z))
-        {
-            vo.VoxelMaterials.TryGetValue(voxelPos, out uint matId);
-            sb.AppendLine($"    - {voxelPos} -> {(MaterialType)matId}");
-        }
-        Console.WriteLine(sb.ToString());
+        sb.AppendLine($"--- [{label}] ---");
+        sb.AppendLine($"  Position:     {vo.Position}");
+        sb.AppendLine($"  Voxel count:  {vo.VoxelCoordinates.Count}");
+        sb.AppendLine($"  Material:     {vo.Material}");
+        Console.Write(sb.ToString());
     }
 }

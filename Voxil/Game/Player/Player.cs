@@ -1,4 +1,5 @@
-﻿// --- START OF FILE Player.cs ---
+﻿// --- Game/Player/Player.cs ---
+// Изменение: _hotbar[2] = new GlowBallItem() вместо EmptyHandItem
 using OpenTK.Windowing.GraphicsLibraryFramework;
 using System.Collections.Generic;
 
@@ -8,7 +9,6 @@ public class Player
     public Camera Camera { get; private set; }
     public float Health { get; set; } = 100f;
     
-    // ВАЖНО: Массив должен быть проинициализирован здесь!
     private Item[] _hotbar = new Item[9];
     private int _selectedSlot = 0;
 
@@ -20,13 +20,12 @@ public class Player
         Controller = controller;
         Camera = camera;
         
-        // Заполняем слоты
-        // Если _hotbar был null, здесь вылетала ошибка
         _hotbar[0] = new EmptyHandItem();
         _hotbar[1] = new DynamiteItem();
+        _hotbar[2] = new GlowBallItem();   // ← НОВЫЙ: светящийся шар
 
-        // Остальные слоты заполняем пустой рукой, чтобы не было null
-        for(int i=2; i<9; i++) 
+        // Остальные слоты — пустая рука
+        for (int i = 3; i < 9; i++)
         {
             _hotbar[i] = new EmptyHandItem();
         }
@@ -36,7 +35,6 @@ public class Player
     {
         Controller.Update(input, dt);
 
-        // Переключение слотов (клавиши 1, 2, 3...)
         if (input.IsKeyPressed(Keys.D1)) _selectedSlot = 0;
         if (input.IsKeyPressed(Keys.D2)) _selectedSlot = 1;
         if (input.IsKeyPressed(Keys.D3)) _selectedSlot = 2;
@@ -46,23 +44,15 @@ public class Player
         if (input.IsKeyPressed(Keys.D7)) _selectedSlot = 6;
         if (input.IsKeyPressed(Keys.D8)) _selectedSlot = 7;
         if (input.IsKeyPressed(Keys.D9)) _selectedSlot = 8;
-        
-        
-        // Логика предмета в руках
+
         if (CurrentItem != null)
         {
             CurrentItem.Update(this, dt);
 
             if (input.IsMouseButtonPressed(MouseButton.Left))
-            {
                 CurrentItem.OnUse(this);
-            }
         }
     }
 
-    // Возвращает модельку текущего предмета для рендера
-    public VoxelObject GetViewModel()
-    {
-        return CurrentItem?.ViewModel;
-    }
+    public VoxelObject GetViewModel() => CurrentItem?.ViewModel;
 }

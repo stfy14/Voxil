@@ -40,7 +40,7 @@ public class SettingsWindow : IUIWindow
     public void Draw()
     {
         if (!IsVisible) return;
-        ImGui.SetNextWindowSize(new System.Numerics.Vector2(450, 450), ImGuiCond.FirstUseEver);
+        ImGui.SetNextWindowSize(new System.Numerics.Vector2(450, 500), ImGuiCond.FirstUseEver);
 
         if (ImGui.Begin("Game Settings", ref _isVisible))
         {
@@ -98,7 +98,6 @@ public class SettingsWindow : IUIWindow
             if (ImGui.Combo("Shadow Resolution", ref downscaleIdx, shadowResModes, shadowResModes.Length))
             {
                 GameSettings.ShadowDownscale = downscaleIdx switch { 0 => 1, 2 => 4, _ => 2 };
-                // Пересоздаем FBO теней с новым размером
                 _renderer.ApplyRenderScale();
             }
 
@@ -120,6 +119,29 @@ public class SettingsWindow : IUIWindow
             bool beam = GameSettings.BeamOptimization;
             if (ImGui.Checkbox("Beam Optimization", ref beam)) { GameSettings.BeamOptimization = beam; _renderer.ReloadShader(); }
 
+            // ================================================================
+            // GLOBAL ILLUMINATION
+            // ================================================================
+            ImGui.Spacing(); ImGui.Separator();
+            ImGui.TextColored(new System.Numerics.Vector4(0.97f, 0.82f, 0.2f, 1f), "Global Illumination");
+            ImGui.Separator();
+
+            bool gi = GameSettings.EnableGI;
+            if (ImGui.Checkbox("Enable GI Probes", ref gi))
+            {
+                GameSettings.EnableGI = gi;
+                _renderer.ReloadShader();
+            }
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("Enables probe-based indirect lighting.\nRequires shader reload (automatic).");
+
+            if (GameSettings.EnableGI)
+            {
+                ImGui.TextDisabled($"256 probes  ·  {GIProbeSystem.RAYS_PER_PROBE} rays/probe  ·  {GIProbeSystem.PROBES_PER_FRAME}/frame");
+                ImGui.TextDisabled("GlowBall item (slot 3) emits dynamic point light.");
+            }
+
+            // ================================================================
             ImGui.Spacing(); ImGui.Separator(); ImGui.Text("Level of Detail (LOD)");
             ImGui.Separator();
 

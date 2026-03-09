@@ -24,6 +24,10 @@ public static class GameSettings
     public static bool UseProceduralWater = false; 
     public static bool EnableWaterTransparency = false; 
     
+    // === GLOBAL ILLUMINATION ===
+    public static bool EnableGI = true;
+    public static bool ShowGIProbes = false; // визуализация зондов (Visual Debug)
+
     // === ОПТИМИЗАЦИЯ ===
     public static bool BeamOptimization = true;
     public static bool EnableLOD = true; 
@@ -40,8 +44,6 @@ public static class GameSettings
     
     // === ДЕБАГ ===
     public static bool ShowDebugHeatmap = false;
-    
-    // Новые настройки визуального дебага (галочки)
     public static bool ShowStaticCollisions = false;
     public static bool ShowDynamicCollisions = false;
     public static bool ShowExplosionRays = false;
