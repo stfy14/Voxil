@@ -704,22 +704,13 @@ public class GpuRaycastingRenderer : IDisposable
         {
             _giSystem.SetSamplingUniforms(compositeShader);
             _giSystem.Bind(); // Это привяжет Image для записи, но нам для чтения нужны сэмплеры!
-    
-            // ДОБАВЬ ВОТ ЭТИ ДВЕ СТРОКИ ДЛЯ COMPOSITE ШЕЙДЕРА:
-            GL.ActiveTexture(TextureUnit.Texture3);
-            GL.BindTexture(TextureTarget.Texture2D, _giSystem.IrradianceAtlasTex);
-            compositeShader.SetInt("uGIIrradianceAtlas", 3);
-
-            GL.ActiveTexture(TextureUnit.Texture4);
-            GL.BindTexture(TextureTarget.Texture2D, _giSystem.DepthAtlasTex);
-            compositeShader.SetInt("uGIDepthAtlas", 4);
 
             GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, POINT_LIGHT_BINDING, _pointLightSsbo);
             compositeShader.SetInt("uPointLightCount", _lastPointLightCount);
         }
         else
         {
-            compositeShader.SetInt("uPointLightCount", 0);
+            compositeShader.SetInt("uPointLightCount", 0); 
         }
 
         GL.DrawArrays(PrimitiveType.TriangleStrip, 0, 4);
