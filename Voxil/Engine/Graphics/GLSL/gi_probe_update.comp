@@ -241,8 +241,9 @@ void AccumulateSH(inout float sh[12], vec3 dir, vec3 radiance) {
 // Bounce Light (читает L0 из предыдущего кадра — binding 16/17)
 // ─────────────────────────────────────────────────────────────
 vec3 FetchBounceLight(vec3 worldPos, vec3 normal) {
+    // ИСПРАВЛЕНИЕ: origin совпадает с compute: targetPos = vec3(gx,gy,gz)*sp + sp*0.5
     vec3 gridBaseWorld = vec3(float(uGIGridBaseX), float(uGIGridBaseY), float(uGIGridBaseZ))
-    * uProbeSpacing + vec3(0.5);
+    * uProbeSpacing + vec3(uProbeSpacing * 0.5);
     vec3 localPos = (worldPos - gridBaseWorld) / uProbeSpacing;
     ivec3 p = ivec3(round(localPos));
     p = clamp(p, ivec3(0), ivec3(uProbeGridX - 1, uProbeGridY - 1, uProbeGridZ - 1));
@@ -253,8 +254,19 @@ vec3 FetchBounceLight(vec3 worldPos, vec3 normal) {
     int modZ = true_mod(gridPos.z, uProbeGridZ);
     int probeIdx = modX + uProbeGridX * (modY + uProbeGridY * modZ);
 
-    // Мёртвый зонд — не берём от него bounce (будет 0, это нормально для shadows)
+    // Мёртвый зонд — не берём от него bounce
     if (probes[probeIdx].pos.w < 0.5) return vec3(0.0);
+
+    // ИСПРАВЛЕНИЕ УТЕЧКИ СВЕТА: проверяем нет ли стены между точкой и зондом.
+    // Без этой проверки зонды за стеной "просвечивают" через геометрию.
+    vec3 probePos = probes[probeIdx].pos.xyz;
+    vec3 toProbe = probePos - worldPos;
+    float toDist = length(toProbe);
+    if (toDist > 0.01) {
+        float tBlocked; uint bMat; vec3 bNorm;
+        if (TraceProbeRay(worldPos, normalize(toProbe), toDist * 0.95, tBlocked, bMat, bNorm))
+        return vec3(0.0); // стена между нами и зондом — нет bounce
+    }
 
     int base = probeIdx * 12;
     float y00 = 0.282095;

@@ -258,32 +258,75 @@ public class GIProbeSystem : IDisposable
     // ─────────────────────────────────────────────────────────
     public void DrawProbeDebug(LineRenderer lineRenderer, Vector3 cameraPos)
     {
-        DrawLevelDebug(lineRenderer, cameraPos, ProbePositionSsbo,    PROBE_SPACING_L0, 12.0f,  new Vector3(0.9f, 0.8f, 0.2f));
-        DrawLevelDebug(lineRenderer, cameraPos, ProbePositionSsboL1,  PROBE_SPACING_L1, 64.0f,  new Vector3(0.2f, 0.8f, 0.9f));
-        DrawLevelDebug(lineRenderer, cameraPos, ProbePositionSsboL2,  PROBE_SPACING_L2, 256.0f, new Vector3(0.8f, 0.2f, 0.9f));
+        int lod = GameSettings.GIDebugLOD;
+
+        if (lod == 0 || lod == -1)
+            DrawLevelDebug(lineRenderer, cameraPos, ProbePositionSsbo,
+                ProbeIrradianceSsbo, PROBE_SPACING_L0, 24.0f);
+
+        if (lod == 1 || lod == -1)
+            DrawLevelDebug(lineRenderer, cameraPos, ProbePositionSsboL1,
+                ProbeIrradianceSsboL1, PROBE_SPACING_L1, 80.0f);
+
+        if (lod == 2 || lod == -1)
+            DrawLevelDebug(lineRenderer, cameraPos, ProbePositionSsboL2,
+                ProbeIrradianceSsboL2, PROBE_SPACING_L2, 320.0f);
     }
 
-    private static void DrawLevelDebug(LineRenderer lr, Vector3 camPos, int ssbo,
-                                       float spacing, float drawRadius, Vector3 aliveColor)
+    private static void DrawLevelDebug(LineRenderer lr, Vector3 camPos,
+                                       int posSSBO, int irrSSBO,
+                                       float spacing, float drawRadius)
     {
-        if (ssbo == 0) return;
-        float[] data = new float[PROBE_COUNT * 8];
-        GL.BindBuffer(BufferTarget.ShaderStorageBuffer, ssbo);
-        GL.GetBufferSubData(BufferTarget.ShaderStorageBuffer, IntPtr.Zero, data.Length * sizeof(float), data);
+        if (posSSBO == 0) return;
 
-        float r2 = drawRadius * drawRadius;
-        float box = spacing * 0.08f;
+        // Читаем позиции (ProbeData = 2×vec4 = 8 float на зонд)
+        float[] posData = new float[PROBE_COUNT * 8];
+        GL.BindBuffer(BufferTarget.ShaderStorageBuffer, posSSBO);
+        GL.GetBufferSubData(BufferTarget.ShaderStorageBuffer, IntPtr.Zero,
+                            posData.Length * sizeof(float), posData);
+
+        // Читаем irradiance (12 float на зонд — SH коэффициенты)
+        float[] irrData = new float[PROBE_COUNT * 12];
+        GL.BindBuffer(BufferTarget.ShaderStorageBuffer, irrSSBO);
+        GL.GetBufferSubData(BufferTarget.ShaderStorageBuffer, IntPtr.Zero,
+                            irrData.Length * sizeof(float), irrData);
+
+        float r2  = drawRadius * drawRadius;
+        float box = spacing * 0.12f;
 
         for (int i = 0; i < PROBE_COUNT; i++)
         {
-            float px = data[i * 8];
-            if (px <= -9000.0f) continue;
-            float py = data[i * 8 + 1];
-            float pz = data[i * 8 + 2];
-            float state = data[i * 8 + 3];
+            // stride = 8: [0..2]=pos.xyz, [3]=pos.w (alive), [4..7]=colorAndState
+            float px    = posData[i * 8 + 0];
+            if (px <= -9000.0f) continue;          // неинициализированный
+            float py    = posData[i * 8 + 1];
+            float pz    = posData[i * 8 + 2];
+            float alive = posData[i * 8 + 3];
+
+            if (alive < 0.5f) continue;            // мёртвые зонды не рисуем
+
             Vector3 pos = new(px, py, pz);
             if ((pos - camPos).LengthSquared > r2) continue;
-            Vector3 col = state < 0.5f ? new Vector3(0.2f, 0.2f, 0.2f) : aliveColor;
+
+            // Цвет зонда: средний цвет из SH DC-коэффициентов (band 0, коэф 0/4/8)
+            // SH[0]=R_dc, SH[4]=G_dc, SH[8]=B_dc
+            int b = i * 12;
+            float cr = irrData[b + 0] * 0.282095f * 3.14159265f;
+            float cg = irrData[b + 4] * 0.282095f * 3.14159265f;
+            float cb = irrData[b + 8] * 0.282095f * 3.14159265f;
+
+            // Нормируем к видимому диапазону (зонды могут быть тёмными или яркими)
+            float maxC = MathF.Max(MathF.Max(cr, cg), MathF.Max(cb, 0.001f));
+            Vector3 col = new(
+                Math.Clamp(cr / maxC, 0f, 1f),
+                Math.Clamp(cg / maxC, 0f, 1f),
+                Math.Clamp(cb / maxC, 0f, 1f)
+            );
+
+            // Яркость куба = насколько зонд вообще освещён
+            float brightness = Math.Clamp(maxC * 0.5f, 0.2f, 1.0f);
+            col *= brightness;
+
             lr.DrawBox(pos - new Vector3(box), pos + new Vector3(box), col);
         }
     }

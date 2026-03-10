@@ -1,6 +1,5 @@
 // --- Engine/Graphics/GLSL/include/gi.glsl ---
-// Одноуровневый GI: spacing=1м, сетка 32x16x32
-// Совместим с текущим GIProbeSystem.cs (SetSamplingUniforms)
+// Трёхуровневый GI: L0=1м/~16м, L1=4м/~64м, L2=16м/~256м
 
 // ── Point Lights (binding 18) ─────────────────────────────────
 #define MAX_POINT_LIGHTS 32
@@ -32,48 +31,88 @@ vec3 EvaluatePointLights(vec3 hitPos, vec3 normal) {
 }
 
 // ── Probe SSBOs ───────────────────────────────────────────────
-// ProbeData: vec4 pos (xyz=позиция, w=живой 1.0/мёртвый 0.0) + vec4 colorAndState
-// В буфере лежит именно ProbeData (2 vec4 = 8 float на зонд)
+// L0
 layout(std430, binding = 16) readonly buffer GIProbePositions {
-    vec4 giProbeData[]; // чередуются: [0]=pos, [1]=colorAndState, [2]=pos, ...
+    vec4 giProbeData[];
 };
 layout(std430, binding = 17) readonly buffer GIProbeIrradiance {
     float giProbeIrr[];
 };
+// L1
+layout(std430, binding = 19) readonly buffer GIProbePositionsL1 {
+    vec4 giProbeDataL1[];
+};
+layout(std430, binding = 20) readonly buffer GIProbeIrradianceL1 {
+    float giProbeIrrL1[];
+};
+// L2
+layout(std430, binding = 21) readonly buffer GIProbePositionsL2 {
+    vec4 giProbeDataL2[];
+};
+layout(std430, binding = 22) readonly buffer GIProbeIrradianceL2 {
+    float giProbeIrrL2[];
+};
 
-// ── Uniforms (устанавливаются через SetSamplingUniforms) ──────
-uniform int   uGIGridBaseX;
-uniform int   uGIGridBaseY;
-uniform int   uGIGridBaseZ;
+// ── Uniforms ──────────────────────────────────────────────────
+// L0
+uniform int   uGIGridBaseX, uGIGridBaseY, uGIGridBaseZ;
 uniform float uGIProbeSpacing;
-uniform int   uGIProbeX;
-uniform int   uGIProbeY;
-uniform int   uGIProbeZ;
+// L1
+uniform int   uGIGridBaseX_L1, uGIGridBaseY_L1, uGIGridBaseZ_L1;
+uniform float uGIProbeSpacingL1;
+// L2
+uniform int   uGIGridBaseX_L2, uGIGridBaseY_L2, uGIGridBaseZ_L2;
+uniform float uGIProbeSpacingL2;
+// Общие
+uniform int   uGIProbeX, uGIProbeY, uGIProbeZ;
 
 // ─────────────────────────────────────────────────────────────
 int gi_mod(int a, int b) { int m = a % b; return m < 0 ? m + b : m; }
 
-// Читаем w-компоненту pos (живость зонда)
-// ProbeData состоит из двух vec4: pos (index*2+0) и colorAndState (index*2+1)
-float ProbeAlive(int idx) {
-    return giProbeData[idx * 2].w; // pos.w = 1.0 живой, 0.0 мёртвый
+// ─────────────────────────────────────────────────────────────
+// Живость зонда и EvalSH — по уровням
+// ─────────────────────────────────────────────────────────────
+float ProbeAlive(int idx)   { return giProbeData[idx * 2].w; }
+float ProbeAliveL1(int idx) { return giProbeDataL1[idx * 2].w; }
+float ProbeAliveL2(int idx) { return giProbeDataL2[idx * 2].w; }
+
+vec3 EvalSH_impl(int b, vec3 n, float[12] irr_arr) {
+    // Нельзя передать SSBO — используем макрос ниже
+    return vec3(0.0); // заглушка
 }
 
-// SH L1 evaluation
+// Макрос-like функции для каждого уровня
 vec3 EvalSH(int idx, vec3 n) {
     int b = idx * 12;
     const float A0 = 3.14159265, A1 = 2.09439510, PI = 3.14159265;
-    float y0 = 0.282095;
-    float y1 = 0.488603 * n.y;
-    float y2 = 0.488603 * n.z;
-    float y3 = 0.488603 * n.x;
-    float r = giProbeIrr[b+0]*y0*A0 + giProbeIrr[b+1]*y1*A1 + giProbeIrr[b+2]*y2*A1 + giProbeIrr[b+3]*y3*A1;
-    float g = giProbeIrr[b+4]*y0*A0 + giProbeIrr[b+5]*y1*A1 + giProbeIrr[b+6]*y2*A1 + giProbeIrr[b+7]*y3*A1;
-    float b2= giProbeIrr[b+8]*y0*A0 + giProbeIrr[b+9]*y1*A1 + giProbeIrr[b+10]*y2*A1+ giProbeIrr[b+11]*y3*A1;
+    float y0 = 0.282095, y1 = 0.488603*n.y, y2 = 0.488603*n.z, y3 = 0.488603*n.x;
+    float r  = giProbeIrr[b+0]*y0*A0 + giProbeIrr[b+1]*y1*A1 + giProbeIrr[b+2]*y2*A1 + giProbeIrr[b+3]*y3*A1;
+    float g  = giProbeIrr[b+4]*y0*A0 + giProbeIrr[b+5]*y1*A1 + giProbeIrr[b+6]*y2*A1 + giProbeIrr[b+7]*y3*A1;
+    float b2 = giProbeIrr[b+8]*y0*A0 + giProbeIrr[b+9]*y1*A1 + giProbeIrr[b+10]*y2*A1+ giProbeIrr[b+11]*y3*A1;
+    return max(vec3(0.0), vec3(r, g, b2) / PI);
+}
+vec3 EvalSH_L1(int idx, vec3 n) {
+    int b = idx * 12;
+    const float A0 = 3.14159265, A1 = 2.09439510, PI = 3.14159265;
+    float y0 = 0.282095, y1 = 0.488603*n.y, y2 = 0.488603*n.z, y3 = 0.488603*n.x;
+    float r  = giProbeIrrL1[b+0]*y0*A0 + giProbeIrrL1[b+1]*y1*A1 + giProbeIrrL1[b+2]*y2*A1 + giProbeIrrL1[b+3]*y3*A1;
+    float g  = giProbeIrrL1[b+4]*y0*A0 + giProbeIrrL1[b+5]*y1*A1 + giProbeIrrL1[b+6]*y2*A1 + giProbeIrrL1[b+7]*y3*A1;
+    float b2 = giProbeIrrL1[b+8]*y0*A0 + giProbeIrrL1[b+9]*y1*A1 + giProbeIrrL1[b+10]*y2*A1+ giProbeIrrL1[b+11]*y3*A1;
+    return max(vec3(0.0), vec3(r, g, b2) / PI);
+}
+vec3 EvalSH_L2(int idx, vec3 n) {
+    int b = idx * 12;
+    const float A0 = 3.14159265, A1 = 2.09439510, PI = 3.14159265;
+    float y0 = 0.282095, y1 = 0.488603*n.y, y2 = 0.488603*n.z, y3 = 0.488603*n.x;
+    float r  = giProbeIrrL2[b+0]*y0*A0 + giProbeIrrL2[b+1]*y1*A1 + giProbeIrrL2[b+2]*y2*A1 + giProbeIrrL2[b+3]*y3*A1;
+    float g  = giProbeIrrL2[b+4]*y0*A0 + giProbeIrrL2[b+5]*y1*A1 + giProbeIrrL2[b+6]*y2*A1 + giProbeIrrL2[b+7]*y3*A1;
+    float b2 = giProbeIrrL2[b+8]*y0*A0 + giProbeIrrL2[b+9]*y1*A1 + giProbeIrrL2[b+10]*y2*A1+ giProbeIrrL2[b+11]*y3*A1;
     return max(vec3(0.0), vec3(r, g, b2) / PI);
 }
 
-// Ambient fallback — никогда не возвращает полный ноль
+// ─────────────────────────────────────────────────────────────
+// Fallback
+// ─────────────────────────────────────────────────────────────
 vec3 GIFallback(vec3 normal) {
     float skyVis = max(normal.y * 0.5 + 0.5, 0.15);
     float t = clamp(uSunDir.y * 3.0 + 0.2, 0.0, 1.0);
@@ -81,31 +120,22 @@ vec3 GIFallback(vec3 normal) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// ГЛАВНАЯ ФУНКЦИЯ: трилинейный сэмплинг с renormalization
+// Универсальный трилинейный сэмплер для одного уровня.
+// Возвращает vec4: .rgb = irradiance, .a = суммарный вес (0 = нет живых зондов)
+// Уровень задаётся через #define-параметры — используем 3 копии функции,
+// т.к. GLSL не позволяет передавать SSBO-буферы как параметры.
 // ─────────────────────────────────────────────────────────────
-vec3 SampleGIProbes(vec3 worldPos, vec3 normal) {
-    vec3 fallback = GIFallback(normal);
 
-    // Небольшой bias от поверхности (фиксированный, не зависит от spacing)
-    vec3 samplePos = worldPos + normal * 0.3;
-
-    // Позиция зонда (0,0,0):
-    //   compute записывает: targetPos = vec3(gx,gy,gz) * spacing + spacing*0.5
-    // => gridOrigin = vec3(baseX,baseY,baseZ) * spacing + spacing*0.5
-    float sp = uGIProbeSpacing;
-    vec3 gridOrigin = vec3(float(uGIGridBaseX), float(uGIGridBaseY), float(uGIGridBaseZ)) * sp
-    + vec3(sp * 0.5);
-
-    vec3 localPos = (samplePos - gridOrigin) / sp;
-
-    // Клямп внутри границ сетки
-    localPos = clamp(localPos,
-                     vec3(0.0),
+vec4 SampleLevel0(vec3 worldPos, vec3 normal, int bX, int bY, int bZ, float sp) {
+    vec3 samplePos  = worldPos + normal * (sp * 0.5);
+    vec3 gridOrigin = vec3(float(bX), float(bY), float(bZ)) * sp + vec3(sp * 0.5);
+    vec3 localPos   = (samplePos - gridOrigin) / sp;
+    localPos = clamp(localPos, vec3(0.0),
                      vec3(float(uGIProbeX)-1.0, float(uGIProbeY)-1.0, float(uGIProbeZ)-1.0));
 
     ivec3 p0 = ivec3(floor(localPos));
     vec3  f  = fract(localPos);
-    vec3  fs = f * f * (3.0 - 2.0 * f); // smoothstep — убирает резкие границы
+    vec3  fs = f * f * (3.0 - 2.0 * f);
 
     vec3  irr = vec3(0.0);
     float ws  = 0.0;
@@ -115,39 +145,151 @@ vec3 SampleGIProbes(vec3 worldPos, vec3 normal) {
     for (int dx = 0; dx <= 1; dx++)
     {
         ivec3 p = clamp(p0 + ivec3(dx,dy,dz),
-                        ivec3(0),
-                        ivec3(uGIProbeX-1, uGIProbeY-1, uGIProbeZ-1));
+                        ivec3(0), ivec3(uGIProbeX-1, uGIProbeY-1, uGIProbeZ-1));
+        ivec3 g  = ivec3(bX, bY, bZ) + p;
+        int idx  = gi_mod(g.x, uGIProbeX)
+        + uGIProbeX * (gi_mod(g.y, uGIProbeY)
+        + uGIProbeY *  gi_mod(g.z, uGIProbeZ));
 
-        // Кольцевой буфер: реальный индекс в массиве
-        ivec3 g  = ivec3(uGIGridBaseX, uGIGridBaseY, uGIGridBaseZ) + p;
-        int modX = gi_mod(g.x, uGIProbeX);
-        int modY = gi_mod(g.y, uGIProbeY);
-        int modZ = gi_mod(g.z, uGIProbeZ);
-        int idx  = modX + uGIProbeX * (modY + uGIProbeY * modZ);
-
-        // Пропускаем мёртвые зонды (внутри блоков)
         if (ProbeAlive(idx) < 0.5) continue;
 
-        float wx = (dx == 0) ? (1.0 - fs.x) : fs.x;
-        float wy = (dy == 0) ? (1.0 - fs.y) : fs.y;
-        float wz = (dz == 0) ? (1.0 - fs.z) : fs.z;
-        float w  = wx * wy * wz;
+        vec3  probeWorldPos = vec3(float(g.x), float(g.y), float(g.z)) * sp + vec3(sp * 0.5);
+        vec3  probeDir      = probeWorldPos - samplePos;
+        float visWeight     = max(0.05, dot(normal, normalize(probeDir)));
+
+        float wx = (dx == 0) ? (1.0-fs.x) : fs.x;
+        float wy = (dy == 0) ? (1.0-fs.y) : fs.y;
+        float wz = (dz == 0) ? (1.0-fs.z) : fs.z;
+        float w  = wx * wy * wz * visWeight;
 
         irr += EvalSH(idx, normal) * w;
         ws  += w;
     }
+    return vec4(irr, ws);
+}
 
-    // Renormalize: перераспределяем вес мёртвых зондов на живых
-    // Это ключевое исправление — именно оно убирает тёмные прямоугольники
-    if (ws < 0.001) return fallback;
-    irr /= ws;
+vec4 SampleLevel1(vec3 worldPos, vec3 normal, int bX, int bY, int bZ, float sp) {
+    vec3 samplePos  = worldPos + normal * (sp * 0.5);
+    vec3 gridOrigin = vec3(float(bX), float(bY), float(bZ)) * sp + vec3(sp * 0.5);
+    vec3 localPos   = (samplePos - gridOrigin) / sp;
+    localPos = clamp(localPos, vec3(0.0),
+                     vec3(float(uGIProbeX)-1.0, float(uGIProbeY)-1.0, float(uGIProbeZ)-1.0));
 
-    // Плавный fade на краях сетки → переход к fallback без резких границ
-    vec3 gridCenter = (vec3(float(uGIGridBaseX), float(uGIGridBaseY), float(uGIGridBaseZ))
+    ivec3 p0 = ivec3(floor(localPos));
+    vec3  f  = fract(localPos);
+    vec3  fs = f * f * (3.0 - 2.0 * f);
+
+    vec3  irr = vec3(0.0);
+    float ws  = 0.0;
+
+    for (int dz = 0; dz <= 1; dz++)
+    for (int dy = 0; dy <= 1; dy++)
+    for (int dx = 0; dx <= 1; dx++)
+    {
+        ivec3 p = clamp(p0 + ivec3(dx,dy,dz),
+                        ivec3(0), ivec3(uGIProbeX-1, uGIProbeY-1, uGIProbeZ-1));
+        ivec3 g  = ivec3(bX, bY, bZ) + p;
+        int idx  = gi_mod(g.x, uGIProbeX)
+        + uGIProbeX * (gi_mod(g.y, uGIProbeY)
+        + uGIProbeY *  gi_mod(g.z, uGIProbeZ));
+
+        if (ProbeAliveL1(idx) < 0.5) continue;
+
+        vec3  probeWorldPos = vec3(float(g.x), float(g.y), float(g.z)) * sp + vec3(sp * 0.5);
+        vec3  probeDir      = probeWorldPos - samplePos;
+        float visWeight     = max(0.05, dot(normal, normalize(probeDir)));
+
+        float wx = (dx == 0) ? (1.0-fs.x) : fs.x;
+        float wy = (dy == 0) ? (1.0-fs.y) : fs.y;
+        float wz = (dz == 0) ? (1.0-fs.z) : fs.z;
+        float w  = wx * wy * wz * visWeight;
+
+        irr += EvalSH_L1(idx, normal) * w;
+        ws  += w;
+    }
+    return vec4(irr, ws);
+}
+
+vec4 SampleLevel2(vec3 worldPos, vec3 normal, int bX, int bY, int bZ, float sp) {
+    vec3 samplePos  = worldPos + normal * (sp * 0.5);
+    vec3 gridOrigin = vec3(float(bX), float(bY), float(bZ)) * sp + vec3(sp * 0.5);
+    vec3 localPos   = (samplePos - gridOrigin) / sp;
+    localPos = clamp(localPos, vec3(0.0),
+                     vec3(float(uGIProbeX)-1.0, float(uGIProbeY)-1.0, float(uGIProbeZ)-1.0));
+
+    ivec3 p0 = ivec3(floor(localPos));
+    vec3  f  = fract(localPos);
+    vec3  fs = f * f * (3.0 - 2.0 * f);
+
+    vec3  irr = vec3(0.0);
+    float ws  = 0.0;
+
+    for (int dz = 0; dz <= 1; dz++)
+    for (int dy = 0; dy <= 1; dy++)
+    for (int dx = 0; dx <= 1; dx++)
+    {
+        ivec3 p = clamp(p0 + ivec3(dx,dy,dz),
+                        ivec3(0), ivec3(uGIProbeX-1, uGIProbeY-1, uGIProbeZ-1));
+        ivec3 g  = ivec3(bX, bY, bZ) + p;
+        int idx  = gi_mod(g.x, uGIProbeX)
+        + uGIProbeX * (gi_mod(g.y, uGIProbeY)
+        + uGIProbeY *  gi_mod(g.z, uGIProbeZ));
+
+        if (ProbeAliveL2(idx) < 0.5) continue;
+
+        vec3  probeWorldPos = vec3(float(g.x), float(g.y), float(g.z)) * sp + vec3(sp * 0.5);
+        vec3  probeDir      = probeWorldPos - samplePos;
+        float visWeight     = max(0.05, dot(normal, normalize(probeDir)));
+
+        float wx = (dx == 0) ? (1.0-fs.x) : fs.x;
+        float wy = (dy == 0) ? (1.0-fs.y) : fs.y;
+        float wz = (dz == 0) ? (1.0-fs.z) : fs.z;
+        float w  = wx * wy * wz * visWeight;
+
+        irr += EvalSH_L2(idx, normal) * w;
+        ws  += w;
+    }
+    return vec4(irr, ws);
+}
+
+// ─────────────────────────────────────────────────────────────
+// Вспомогательная: fade на краях сетки
+// ─────────────────────────────────────────────────────────────
+float ComputeEdgeFade(vec3 worldPos, int bX, int bY, int bZ, float sp) {
+    vec3 gridCenter = (vec3(float(bX), float(bY), float(bZ))
     + vec3(float(uGIProbeX), float(uGIProbeY), float(uGIProbeZ)) * 0.5) * sp;
-    vec3 halfExt = vec3(float(uGIProbeX), float(uGIProbeY), float(uGIProbeZ)) * sp * 0.5;
-    vec3 distEdge = halfExt - abs(worldPos - gridCenter);
-    float edgeFade = clamp(min(min(distEdge.x, distEdge.y), distEdge.z) / (sp * 2.0), 0.0, 1.0);
+    vec3 halfExt    = vec3(float(uGIProbeX), float(uGIProbeY), float(uGIProbeZ)) * sp * 0.5;
+    vec3 distEdge   = halfExt - abs(worldPos - gridCenter);
+    return clamp(min(min(distEdge.x, distEdge.y), distEdge.z) / (sp * 2.0), 0.0, 1.0);
+}
 
-    return mix(fallback, irr, edgeFade);
+// ─────────────────────────────────────────────────────────────
+// ГЛАВНАЯ ФУНКЦИЯ: мульти-уровневый сэмплинг с блендингом
+// ─────────────────────────────────────────────────────────────
+vec3 SampleGIProbes(vec3 worldPos, vec3 normal) {
+    vec3 fallback = GIFallback(normal);
+
+    vec4  s0    = SampleLevel0(worldPos, normal,
+                               uGIGridBaseX,    uGIGridBaseY,    uGIGridBaseZ,    uGIProbeSpacing);
+    float fade0 = ComputeEdgeFade(worldPos,
+                                  uGIGridBaseX,    uGIGridBaseY,    uGIGridBaseZ,    uGIProbeSpacing);
+    vec3  irr0  = (s0.a > 0.001) ? s0.rgb / s0.a : fallback;
+
+    vec4  s1    = SampleLevel1(worldPos, normal,
+                               uGIGridBaseX_L1, uGIGridBaseY_L1, uGIGridBaseZ_L1, uGIProbeSpacingL1);
+    float fade1 = ComputeEdgeFade(worldPos,
+                                  uGIGridBaseX_L1, uGIGridBaseY_L1, uGIGridBaseZ_L1, uGIProbeSpacingL1);
+    vec3  irr1  = (s1.a > 0.001) ? s1.rgb / s1.a : fallback;
+
+    vec4  s2    = SampleLevel2(worldPos, normal,
+                               uGIGridBaseX_L2, uGIGridBaseY_L2, uGIGridBaseZ_L2, uGIProbeSpacingL2);
+    float fade2 = ComputeEdgeFade(worldPos,
+                                  uGIGridBaseX_L2, uGIGridBaseY_L2, uGIGridBaseZ_L2, uGIProbeSpacingL2);
+    vec3  irr2  = (s2.a > 0.001) ? s2.rgb / s2.a : fallback;
+
+    vec3 result = mix(fallback, irr2, fade2);
+    result      = mix(result,   irr1, fade1);
+    result      = mix(result,   irr0, fade0);
+
+    return result;
 }
