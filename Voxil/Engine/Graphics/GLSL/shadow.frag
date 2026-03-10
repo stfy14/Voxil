@@ -12,14 +12,11 @@ in vec2 uv;
 uniform sampler2D uGColor;
 uniform sampler2D uGData;
 
-// НОВЫЙ ПАРАМЕТР: 1 (Full Res), 2 (Half Res), 4 (Quarter Res)
-uniform int uShadowDownscale; 
+uniform int uShadowDownscale;
 
 void main() {
     ivec2 shadowCoord = ivec2(gl_FragCoord.xy);
-    
-    // Динамически масштабируем координаты в зависимости от настроек графики
-    ivec2 fullCoord = shadowCoord * uShadowDownscale; 
+    ivec2 fullCoord   = shadowCoord * uShadowDownscale;
 
     float tFinal       = texelFetch(uGColor, fullCoord, 0).a;
     vec4  dataVal      = texelFetch(uGData,  fullCoord, 0);
@@ -38,17 +35,17 @@ void main() {
     vec4 target = uInvProjection * vec4(exactUV * 2.0 - 1.0, 1.0, 1.0);
     target.xyz /= target.w;
     vec3 rayDir = normalize((uInvView * vec4(target.xyz, 0.0)).xyz);
-    
+
     if (abs(rayDir.x) < 1e-6) rayDir.x = (rayDir.x < 0.0) ? -1e-6 : 1e-6;
     if (abs(rayDir.y) < 1e-6) rayDir.y = (rayDir.y < 0.0) ? -1e-6 : 1e-6;
     if (abs(rayDir.z) < 1e-6) rayDir.z = (rayDir.z < 0.0) ? -1e-6 : 1e-6;
     rayDir = normalize(rayDir);
-    
+
     vec3 hitPos = uCamPos + rayDir * tFinal;
 
     float sunIntensity  = clamp(uSunDir.y  * 5.0, 0.0, 1.0);
     float moonIntensity = clamp(uMoonDir.y * 5.0, 0.0, 1.0) * 0.25
-                        * clamp(-uSunDir.y * 5.0, 0.0, 1.0);
+    * clamp(-uSunDir.y * 5.0, 0.0, 1.0);
 
     vec3 activeLightDir = uSunDir;
     bool hasLight       = (sunIntensity > 0.05);
@@ -57,11 +54,22 @@ void main() {
         hasLight = true;
     }
 
+    // === SHADOW ===
     float shadow = 1.0;
-    if (hasLight && directFactor > 0.001) {
-        shadow = CalculateShadow(hitPos, normal, activeLightDir);
+
+    // ФИКС: если поверхность смотрит ОТ солнца — она геометрически в тени.
+    // Не трейсим теневой луч (дорого), просто ставим shadow=0.
+    // Это убирает артефакты на задних гранях.
+    if (hasLight) {
+        if (directFactor <= 0.001) {
+            // Поверхность не освещена геометрически — тень 0
+            shadow = 0.0;
+        } else {
+            shadow = CalculateShadow(hitPos, normal, activeLightDir);
+        }
     }
 
+    // === AO ===
     float ao = 1.0;
     #ifdef ENABLE_AO
     ao = CalculateAO(hitPos, normal);

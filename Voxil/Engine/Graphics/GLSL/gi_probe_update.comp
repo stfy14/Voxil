@@ -19,15 +19,16 @@ layout(binding = 0, r32ui) uniform uimage3D uPageTable;
 const ivec3 PAGE_TABLE_SIZE = ivec3(512, 16, 512);
 
 struct ProbeData {
-    vec4 pos;
+    vec4 pos;           // xyz = позиция, w = 1.0 живой / 0.0 мёртвый
     vec4 colorAndState;
 };
-layout(std430, binding = 16) buffer ProbePositions { ProbeData probes[]; };
+layout(std430, binding = 16) buffer ProbePositions  { ProbeData probes[]; };
 layout(std430, binding = 17) buffer ProbeIrradiance { float probeIrradiance[]; };
 
+// === UNIFORMS ===
 uniform int   uProbeStartIndex;
 uniform int   uProbesThisFrame;
-uniform int   uRaysPerProbe;
+uniform int   uRaysPerProbe;     // <-- uniform, не константа! LOD меняет его
 uniform float uTime;
 uniform vec3  uSunDir;
 uniform float uProbeSpacing;
@@ -43,8 +44,13 @@ uniform int   uMaxRaySteps;
 
 #define BLOCK_SIZE 4
 
+// ─────────────────────────────────────────────────────────────
+// Утилиты
+// ─────────────────────────────────────────────────────────────
 float Hash(float a, float b) {
-    vec2 p = vec2(a, b); p = fract(p * vec2(127.1, 311.7)); p += dot(p, p.yx + 19.19);
+    vec2 p = vec2(a, b);
+    p = fract(p * vec2(127.1, 311.7));
+    p += dot(p, p.yx + 19.19);
     return fract((p.x + p.y) * p.x);
 }
 
@@ -55,22 +61,27 @@ vec3 FibonacciDirection(int i, int total, float seed) {
     return normalize(vec3(sin(theta) * cos(phi), cos(theta), sin(theta) * sin(phi)));
 }
 
+int true_mod(int a, int b) { int m = a % b; return m < 0 ? m + b : m; }
+
+// ─────────────────────────────────────────────────────────────
+// Материалы
+// ─────────────────────────────────────────────────────────────
 vec3 GetVoxelAlbedo(uint matID) {
-    if (matID == 1u) return vec3(0.45, 0.15, 0.05);
-    if (matID == 2u) return vec3(0.50, 0.50, 0.55);
-    if (matID == 3u) return vec3(0.25, 0.12, 0.05);
-    if (matID == 4u) return vec3(0.15, 0.25, 0.60);
-    if (matID == 5u) return vec3(0.15, 0.60, 0.05);
-    if (matID == 6u) return vec3(0.90, 0.10, 0.10);
-    if (matID == 7u) return vec3(0.97, 0.82, 0.20);
+    if (matID == 1u) return vec3(0.45, 0.15, 0.05); // Dirt
+    if (matID == 2u) return vec3(0.50, 0.50, 0.55); // Stone
+    if (matID == 3u) return vec3(0.25, 0.12, 0.05); // Wood
+    if (matID == 4u) return vec3(0.15, 0.25, 0.60); // Water
+    if (matID == 5u) return vec3(0.15, 0.60, 0.05); // Grass
+    if (matID == 6u) return vec3(0.90, 0.10, 0.10); // TNT
+    if (matID == 7u) return vec3(0.97, 0.82, 0.20); // Glow
     return vec3(0.5);
 }
 
 bool IsEmissive(uint matID) { return matID == 7u; }
 
-int true_mod(int a, int b) { int m = a % b; return m < 0 ? m + b : m; }
-
-// --- Мгновенная проверка "Внутри камня" ---
+// ─────────────────────────────────────────────────────────────
+// Трассировка
+// ─────────────────────────────────────────────────────────────
 bool IsSolidAt(vec3 worldPos) {
     ivec3 cMapPos = ivec3(floor(worldPos / float(CHUNK_SIZE)));
     ivec3 bMin = ivec3(uBoundMinX, uBoundMinY, uBoundMinZ);
@@ -87,27 +98,31 @@ bool IsSolidAt(vec3 worldPos) {
 
     int idx = vMapPos.x + VOXEL_RESOLUTION * (vMapPos.y + VOXEL_RESOLUTION * vMapPos.z);
     uint m = GetVoxelData(chunkSlot, idx);
-    return (m != 0u && m != 4u);
+    return (m != 0u && m != 4u); // Вода (4) не твёрдая для зондов
 }
 
-bool TraceProbeRay(vec3 ro, vec3 rd, float maxDist, out float tHit, out uint matID, out vec3 hitNormal) {
+bool TraceProbeRay(vec3 ro, vec3 rd, float maxDist,
+out float tHit, out uint matID, out vec3 hitNormal)
+{
     tHit = 0.0; matID = 0u; hitNormal = vec3(0.0);
+
     vec3 safeRd = rd;
     if (abs(safeRd.x) < 1e-6) safeRd.x = (safeRd.x < 0.0) ? -1e-6 : 1e-6;
     if (abs(safeRd.y) < 1e-6) safeRd.y = (safeRd.y < 0.0) ? -1e-6 : 1e-6;
     if (abs(safeRd.z) < 1e-6) safeRd.z = (safeRd.z < 0.0) ? -1e-6 : 1e-6;
 
-    vec3 pStart = ro;
-    ivec3 cMapPos = ivec3(floor(pStart / float(CHUNK_SIZE)));
-    vec3 cDeltaDist = abs(1.0 / safeRd) * float(CHUNK_SIZE);
-    ivec3 cStepDir = ivec3(sign(safeRd));
-    vec3 relPos = pStart - vec3(cMapPos) * float(CHUNK_SIZE);
+    ivec3 cMapPos    = ivec3(floor(ro / float(CHUNK_SIZE)));
+    vec3  cDeltaDist = abs(1.0 / safeRd) * float(CHUNK_SIZE);
+    ivec3 cStepDir   = ivec3(sign(safeRd));
+    vec3  relPos     = ro - vec3(cMapPos) * float(CHUNK_SIZE);
+
     vec3 cSideDist;
     cSideDist.x = (safeRd.x > 0.0) ? (float(CHUNK_SIZE) - relPos.x) : relPos.x;
     cSideDist.y = (safeRd.y > 0.0) ? (float(CHUNK_SIZE) - relPos.y) : relPos.y;
     cSideDist.z = (safeRd.z > 0.0) ? (float(CHUNK_SIZE) - relPos.z) : relPos.z;
-    cSideDist *= abs(1.0 / safeRd);
-    vec3 cMask = vec3(0);
+    cSideDist   *= abs(1.0 / safeRd);
+
+    vec3  cMask      = vec3(0.0);
     float tCurrentRel = 0.0;
     ivec3 bMin = ivec3(uBoundMinX, uBoundMinY, uBoundMinZ);
     ivec3 bMax = ivec3(uBoundMaxX, uBoundMaxY, uBoundMaxZ);
@@ -115,52 +130,81 @@ bool TraceProbeRay(vec3 ro, vec3 rd, float maxDist, out float tHit, out uint mat
     for (int i = 0; i < uMaxRaySteps; i++) {
         if (tCurrentRel > maxDist) return false;
         if (any(lessThan(cMapPos, bMin)) || any(greaterThanEqual(cMapPos, bMax))) break;
+
         uint chunkSlot = imageLoad(uPageTable, cMapPos & (PAGE_TABLE_SIZE - 1)).r;
+
         if (chunkSlot != 0xFFFFFFFFu) {
+            // Полностью заполненный чанк — сразу хит
             if ((chunkSlot & 0x80000000u) != 0u) {
-                tHit = tCurrentRel; matID = chunkSlot & 0x7FFFFFFFu;
-                hitNormal = length(cMask) > 0.5 ? -vec3(cStepDir) * cMask : -normalize(rd);
+                tHit      = tCurrentRel;
+                matID     = chunkSlot & 0x7FFFFFFFu;
+                hitNormal = length(cMask) > 0.5
+                ? -vec3(cStepDir) * cMask
+                : -normalize(rd);
                 return true;
             }
-            vec3 chunkOrigin = vec3(cMapPos) * float(CHUNK_SIZE);
-            vec3 pLocal = (pStart + safeRd * tCurrentRel) - chunkOrigin;
-            pLocal = clamp(pLocal, 0.0, float(CHUNK_SIZE) - 0.0001);
-            vec3 pVoxel = pLocal * VOXELS_PER_METER;
-            ivec3 vMapPos = ivec3(floor(pVoxel));
-            if (length(cMask) > 0.5) {
-                if (cMask.x > 0.5 && safeRd.x < 0.0) vMapPos.x = VOXEL_RESOLUTION - 1;
-                if (cMask.y > 0.5 && safeRd.y < 0.0) vMapPos.y = VOXEL_RESOLUTION - 1;
-                if (cMask.z > 0.5 && safeRd.z < 0.0) vMapPos.z = VOXEL_RESOLUTION - 1;
-            }
-            vec3 vDeltaDist = abs(1.0 / safeRd);
+
+            // Обычный чанк — DDA по вокселям внутри
+            vec3 vStart = ro + safeRd * tCurrentRel;
+            vec3 pLocal = vStart - vec3(cMapPos) * float(CHUNK_SIZE);
+
+            ivec3 vMapPos    = ivec3(floor(pLocal * VOXELS_PER_METER));
+            vMapPos          = clamp(vMapPos, ivec3(0), ivec3(VOXEL_RESOLUTION - 1));
+            ivec3 vStepDir   = ivec3(sign(safeRd));
+            vec3  vDeltaDist = abs(1.0 / safeRd) / float(VOXELS_PER_METER);
+
+            vec3 vRelPos = pLocal * VOXELS_PER_METER - vec3(vMapPos);
             vec3 vSideDist;
-            vSideDist.x = (safeRd.x > 0.0) ? (float(vMapPos.x + 1) - pVoxel.x) : (pVoxel.x - float(vMapPos.x));
-            vSideDist.y = (safeRd.y > 0.0) ? (float(vMapPos.y + 1) - pVoxel.y) : (pVoxel.y - float(vMapPos.y));
-            vSideDist.z = (safeRd.z > 0.0) ? (float(vMapPos.z + 1) - pVoxel.z) : (pVoxel.z - float(vMapPos.z));
-            vSideDist *= vDeltaDist;
-            bool exitChunk = false; vec3 vMask = vec3(0);
-            for (int s = 0; s < 64; s++) {
-                if (((vMapPos.x | vMapPos.y | vMapPos.z) & ~BIT_MASK) != 0) { exitChunk = true; break; }
-                int idx = vMapPos.x + VOXEL_RESOLUTION * (vMapPos.y + VOXEL_RESOLUTION * vMapPos.z);
-                uint m = GetVoxelData(chunkSlot, idx);
-                if (m != 0u && m != 4u) {
-                    float tRelVoxel = (length(vMask) > 0.5) ? dot(vMask, vSideDist - vDeltaDist) : 0.0;
-                    tHit = tCurrentRel + (tRelVoxel / VOXELS_PER_METER); matID = m;
-                    hitNormal = length(vMask) > 0.5 ? -vec3(cStepDir) * vMask : -normalize(rd);
+            vSideDist.x = (safeRd.x > 0.0) ? (1.0 - vRelPos.x) : vRelPos.x;
+            vSideDist.y = (safeRd.y > 0.0) ? (1.0 - vRelPos.y) : vRelPos.y;
+            vSideDist.z = (safeRd.z > 0.0) ? (1.0 - vRelPos.z) : vRelPos.z;
+            vSideDist   *= vDeltaDist;
+
+            vec3  vMask    = vec3(0.0);
+            bool  exitChunk = false;
+
+            for (int v = 0; v < VOXEL_RESOLUTION * 3; v++) {
+                if (any(lessThan(vMapPos, ivec3(0))) || any(greaterThanEqual(vMapPos, ivec3(VOXEL_RESOLUTION)))) {
+                    exitChunk = true;
+                    break;
+                }
+
+                int vIdx = vMapPos.x + VOXEL_RESOLUTION * (vMapPos.y + VOXEL_RESOLUTION * vMapPos.z);
+                uint vMat = GetVoxelData(chunkSlot, vIdx);
+
+                if (vMat != 0u) {
+                    float vT = dot(vMask, vSideDist - vDeltaDist) / float(VOXELS_PER_METER);
+                    tHit      = tCurrentRel + vT;
+                    matID     = vMat;
+                    hitNormal = length(vMask) > 0.5
+                    ? -vec3(vStepDir) * vMask
+                    : -normalize(rd);
                     return true;
                 }
-                vMask = (vSideDist.x < vSideDist.y) ? ((vSideDist.x < vSideDist.z) ? vec3(1,0,0) : vec3(0,0,1)) : ((vSideDist.y < vSideDist.z) ? vec3(0,1,0) : vec3(0,0,1));
-                vSideDist += vMask * vDeltaDist; vMapPos += ivec3(vMask) * cStepDir;
+
+                vMask = (vSideDist.x < vSideDist.y)
+                ? ((vSideDist.x < vSideDist.z) ? vec3(1,0,0) : vec3(0,0,1))
+                : ((vSideDist.y < vSideDist.z) ? vec3(0,1,0) : vec3(0,0,1));
+                vSideDist += vMask * vDeltaDist;
+                vMapPos   += ivec3(vMask) * vStepDir;
             }
-            if (exitChunk) cMask = vec3(0);
+            if (exitChunk) cMask = vec3(0.0);
         }
-        cMask = (cSideDist.x < cSideDist.y) ? ((cSideDist.x < cSideDist.z) ? vec3(1,0,0) : vec3(0,0,1)) : ((cSideDist.y < cSideDist.z) ? vec3(0,1,0) : vec3(0,0,1));
+
+        cMask = (cSideDist.x < cSideDist.y)
+        ? ((cSideDist.x < cSideDist.z) ? vec3(1,0,0) : vec3(0,0,1))
+        : ((cSideDist.y < cSideDist.z) ? vec3(0,1,0) : vec3(0,0,1));
         float chunkStep = dot(cMask, cSideDist);
-        tCurrentRel = chunkStep; cSideDist += cMask * cDeltaDist; cMapPos += ivec3(cMask) * cStepDir;
+        tCurrentRel = chunkStep;
+        cSideDist  += cMask * cDeltaDist;
+        cMapPos    += ivec3(cMask) * cStepDir;
     }
     return false;
 }
 
+// ─────────────────────────────────────────────────────────────
+// Небо
+// ─────────────────────────────────────────────────────────────
 vec3 SkyColor(vec3 rd) {
     float t = clamp(rd.y * 0.5 + 0.5, 0.0, 1.0);
     vec3 sky = mix(vec3(0.7, 0.8, 0.9), vec3(0.2, 0.4, 0.8), t * t);
@@ -169,6 +213,16 @@ vec3 SkyColor(vec3 rd) {
     return sky * clamp(uSunDir.y * 2.0 + 0.3, 0.02, 1.0);
 }
 
+// Минимальный ambient ночью — исключает абсолютную тьму
+vec3 NightAmbient(vec3 rd) {
+    float nightIntensity = clamp(-uSunDir.y * 3.0, 0.0, 1.0);
+    float skyVis = clamp(rd.y * 0.5 + 0.5, 0.15, 1.0);
+    return vec3(0.05, 0.07, 0.12) * nightIntensity * skyVis * 0.3;
+}
+
+// ─────────────────────────────────────────────────────────────
+// SH аккумуляция
+// ─────────────────────────────────────────────────────────────
 void AccumulateSH(inout float sh[12], vec3 dir, vec3 radiance) {
     float y00 = 0.282095;
     float y10 = 0.488603 * dir.y;
@@ -183,19 +237,24 @@ void AccumulateSH(inout float sh[12], vec3 dir, vec3 radiance) {
     sh[10] += radiance.b * y11; sh[11] += radiance.b * y12;
 }
 
-// === ИСТИННЫЙ DDGI (ОТСКОКИ СВЕТА ОТ ПРОШЛОГО КАДРА) ===
+// ─────────────────────────────────────────────────────────────
+// Bounce Light (читает L0 из предыдущего кадра — binding 16/17)
+// ─────────────────────────────────────────────────────────────
 vec3 FetchBounceLight(vec3 worldPos, vec3 normal) {
-    vec3 gridBaseWorld = vec3(float(uGIGridBaseX), float(uGIGridBaseY), float(uGIGridBaseZ)) * uProbeSpacing + vec3(0.5);
+    vec3 gridBaseWorld = vec3(float(uGIGridBaseX), float(uGIGridBaseY), float(uGIGridBaseZ))
+    * uProbeSpacing + vec3(0.5);
     vec3 localPos = (worldPos - gridBaseWorld) / uProbeSpacing;
     ivec3 p = ivec3(round(localPos));
     p = clamp(p, ivec3(0), ivec3(uProbeGridX - 1, uProbeGridY - 1, uProbeGridZ - 1));
 
-    // ИСПРАВЛЕНИЕ: Изменил g на gridPos, чтобы избежать конфликта имен
     ivec3 gridPos = ivec3(uGIGridBaseX, uGIGridBaseY, uGIGridBaseZ) + p;
     int modX = true_mod(gridPos.x, uProbeGridX);
     int modY = true_mod(gridPos.y, uProbeGridY);
     int modZ = true_mod(gridPos.z, uProbeGridZ);
     int probeIdx = modX + uProbeGridX * (modY + uProbeGridY * modZ);
+
+    // Мёртвый зонд — не берём от него bounce (будет 0, это нормально для shadows)
+    if (probes[probeIdx].pos.w < 0.5) return vec3(0.0);
 
     int base = probeIdx * 12;
     float y00 = 0.282095;
@@ -205,85 +264,115 @@ vec3 FetchBounceLight(vec3 worldPos, vec3 normal) {
     const float A0 = 3.14159265;
     const float A1 = 2.09439510;
 
-    float r = probeIrradiance[base + 0] * y00 * A0 + probeIrradiance[base + 1] * y10 * A1 + probeIrradiance[base + 2] * y11 * A1 + probeIrradiance[base + 3] * y12 * A1;
-    // ИСПРАВЛЕНИЕ: Переименовал переменную для зеленого канала c G на cG
-    float cG = probeIrradiance[base + 4] * y00 * A0 + probeIrradiance[base + 5] * y10 * A1 + probeIrradiance[base + 6] * y11 * A1 + probeIrradiance[base + 7] * y12 * A1;
-    float b = probeIrradiance[base + 8] * y00 * A0 + probeIrradiance[base + 9] * y10 * A1 + probeIrradiance[base + 10]* y11 * A1 + probeIrradiance[base + 11]* y12 * A1;
+    float r  = probeIrradiance[base+0]*y00*A0 + probeIrradiance[base+1]*y10*A1
+    + probeIrradiance[base+2]*y11*A1 + probeIrradiance[base+3]*y12*A1;
+    float cG = probeIrradiance[base+4]*y00*A0 + probeIrradiance[base+5]*y10*A1
+    + probeIrradiance[base+6]*y11*A1 + probeIrradiance[base+7]*y12*A1;
+    float b  = probeIrradiance[base+8]*y00*A0 + probeIrradiance[base+9]*y10*A1
+    + probeIrradiance[base+10]*y11*A1 + probeIrradiance[base+11]*y12*A1;
 
     return max(vec3(0.0), vec3(r, cG, b) / 3.14159265);
 }
 
+// ─────────────────────────────────────────────────────────────
+// MAIN
+// ─────────────────────────────────────────────────────────────
 void main() {
     uint localIdx = gl_GlobalInvocationID.x;
     if (localIdx >= uint(uProbesThisFrame)) return;
 
     int probeIdx = (uProbeStartIndex + int(localIdx)) % (uProbeGridX * uProbeGridY * uProbeGridZ);
 
+    // Вычисляем мировую позицию этого зонда
     int wx = probeIdx % uProbeGridX;
     int wy = (probeIdx / uProbeGridX) % uProbeGridY;
     int wz = probeIdx / (uProbeGridX * uProbeGridY);
+
     int modBaseX = true_mod(uGIGridBaseX, uProbeGridX);
     int modBaseY = true_mod(uGIGridBaseY, uProbeGridY);
     int modBaseZ = true_mod(uGIGridBaseZ, uProbeGridZ);
+
     int gx = uGIGridBaseX + true_mod(wx - modBaseX, uProbeGridX);
     int gy = uGIGridBaseY + true_mod(wy - modBaseY, uProbeGridY);
     int gz = uGIGridBaseZ + true_mod(wz - modBaseZ, uProbeGridZ);
 
-    vec3 targetPos = vec3(gx, gy, gz) * uProbeSpacing + vec3(0.5);
+    vec3 targetPos = vec3(gx, gy, gz) * uProbeSpacing + vec3(uProbeSpacing * 0.5);
 
+    // Зонд внутри блока — помечаем мёртвым, зануляем SH
     if (IsSolidAt(targetPos)) {
-        probes[probeIdx].pos = vec4(targetPos, 0.0); // 0.0 = Мертв
+        probes[probeIdx].pos = vec4(targetPos, 0.0);
         int base = probeIdx * 12;
         for (int k = 0; k < 12; k++) probeIrradiance[base + k] = 0.0;
         return;
     }
 
-    vec3 oldPos = probes[probeIdx].pos.xyz;
-    bool isNewPos = distance(oldPos, targetPos) > 0.5;
-
+    vec3 oldPos    = probes[probeIdx].pos.xyz;
+    bool isNewPos  = distance(oldPos, targetPos) > uProbeSpacing * 0.5;
     float blendFactor = isNewPos ? 1.0 : 0.05;
 
-    probes[probeIdx].pos = vec4(targetPos, 1.0); // 1.0 = Жив
+    probes[probeIdx].pos = vec4(targetPos, 1.0); // 1.0 = Живой
 
     float seed = Hash(float(probeIdx), uTime * 0.01 + float(uProbeStartIndex) * 0.137);
+
     float sh[12];
     for (int k = 0; k < 12; k++) sh[k] = 0.0;
 
+    // maxRayDist масштабируется со spacing:
+    // L0 (1м)  → 16м, L1 (4м) → 64м, L2 (16м) → 256м
     float maxRayDist = float(uProbeGridX) * uProbeSpacing * 0.5;
 
     vec3 sumColor = vec3(0.0);
+
     for (int ray = 0; ray < uRaysPerProbe; ray++) {
-        vec3 rd = FibonacciDirection(ray, uRaysPerProbe, seed);
-        float tHit = 0.0;
-        uint matID = 0u;
-        vec3 hitNormal = vec3(0.0);
-        vec3 radiance = vec3(0.0);
+        vec3 rd       = FibonacciDirection(ray, uRaysPerProbe, seed);
+        float tHit    = 0.0;
+        uint  matID   = 0u;
+        vec3  hitNormal = vec3(0.0);
+        vec3  radiance  = vec3(0.0);
 
         if (TraceProbeRay(targetPos, rd, maxRayDist, tHit, matID, hitNormal)) {
             vec3 albedo = GetVoxelAlbedo(matID);
             vec3 hitPos = targetPos + rd * tHit;
 
-            bool inShadow = false;
+            bool inShadow   = false;
             vec3 shadowStart = hitPos + hitNormal * 0.1;
 
             if (IsSolidAt(shadowStart)) {
                 inShadow = true;
             } else if (uSunDir.y > 0.0) {
                 float sHit; uint sMat; vec3 sNorm;
-                if (TraceProbeRay(shadowStart, uSunDir, maxRayDist, sHit, sMat, sNorm)) inShadow = true;
+                if (TraceProbeRay(shadowStart, uSunDir, maxRayDist, sHit, sMat, sNorm))
+                inShadow = true;
             } else {
+                // Ночь: не трейсим тень к солнцу, но добавляем минимальный ambient
                 inShadow = true;
             }
 
             float sunIntensity = clamp(uSunDir.y * 5.0, 0.0, 1.0);
-            float nDotL = max(0.0, dot(hitNormal, uSunDir));
-            vec3 directLight = inShadow ? vec3(0.0) : vec3(1.0, 0.95, 0.8) * sunIntensity * nDotL * 3.0;
+            float nDotL        = max(0.0, dot(hitNormal, uSunDir));
+            vec3  directLight  = inShadow
+            ? vec3(0.0)
+            : vec3(1.0, 0.95, 0.8) * sunIntensity * nDotL * 3.0;
+
+            // Минимальный ночной ambient — поверхности не уходят в 0
+            float nightAmb = clamp(-uSunDir.y * 2.0, 0.0, 1.0);
+            vec3  ambLight = vec3(0.05, 0.07, 0.12) * nightAmb * max(0.1, dot(hitNormal, vec3(0,1,0)) * 0.5 + 0.5);
 
             vec3 bounceLight = FetchBounceLight(shadowStart, hitNormal) * 0.6;
 
-            radiance = IsEmissive(matID) ? albedo * 20.0 : albedo * (directLight + bounceLight);
+            if (IsEmissive(matID)) {
+                radiance = albedo * 20.0;
+            } else {
+                radiance = albedo * (directLight + ambLight + bounceLight);
+            }
         } else {
-            radiance = (rd.y > 0.0) ? SkyColor(rd) : vec3(0.0);
+            // Луч ушёл в небо
+            if (rd.y > 0.0) {
+                radiance = SkyColor(rd);
+            } else {
+                // Луч ушёл вниз и ничего не нашёл — минимальный ground bounce
+                radiance = NightAmbient(rd);
+            }
         }
 
         AccumulateSH(sh, rd, radiance);
@@ -292,9 +381,11 @@ void main() {
 
     probes[probeIdx].colorAndState = vec4(sumColor / float(uRaysPerProbe), 1.0);
 
+    // Накапливаем SH с temporal blend
     float weight = 4.0 * 3.14159265 / float(uRaysPerProbe);
     int base = probeIdx * 12;
     for (int k = 0; k < 12; k++) {
-        probeIrradiance[base + k] = mix(probeIrradiance[base + k], 0.0, 0.1);
+        float newVal = sh[k] * weight;
+        probeIrradiance[base + k] = mix(probeIrradiance[base + k], newVal, blendFactor);
     }
 }

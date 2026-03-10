@@ -60,32 +60,34 @@ void main() {
     }
 
     // --- ПРЯМОЕ ОСВЕЩЕНИЕ ---
+    // shadow уже учитывает геометрическое затенение (directFactor≤0 → shadow=0 в shadow.frag)
     vec3 direct = lightColor * directFactor * shadow;
 
     // --- AMBIENT / INDIRECT ---
     vec3 indirect = vec3(0.0);
 
     #ifdef ENABLE_GI
-    // GI через зонды: триlinear SH L1 sampling
-    vec3 giIrradiance = SampleGIProbes(hitPos, normal) * ao;
+        // AO применяем с ограниченным минимумом чтобы не убить GI в углах.
+    // Минимум AO = 0.15 — даже в глубоких углах будет хоть какой-то свет.
+    float aoForGI = max(ao, 0.15);
+    vec3 giIrradiance = SampleGIProbes(hitPos, normal) * aoForGI;
     indirect = albedo * giIrradiance;
     #else
-    // Fallback: простой ambient
-    float dayAmbient     = 0.35;
-    float nightAmbient   = 0.04;
-    float currentAmbient = mix(nightAmbient, dayAmbient, clamp(uSunDir.y * 3.0 + 0.2, 0.0, 1.0));
-    // ДОБАВЛЕНО УМНОЖЕНИЕ НА albedo:
-    indirect = albedo * vec3(0.6, 0.7, 0.9) * currentAmbient * ao;
+        float dayAmbient     = 0.35;
+    float nightAmbient   = 0.05;
+    float currentAmbient = mix(nightAmbient, dayAmbient,
+                               clamp(uSunDir.y * 3.0 + 0.2, 0.0, 1.0));
+    indirect = albedo * vec3(0.6, 0.7, 0.9) * currentAmbient * max(ao, 0.15);
     #endif
 
-    // --- POINT LIGHTS (GlowBall и другие эмиссивные объекты) ---
+    // --- POINT LIGHTS ---
     #ifdef ENABLE_GI
-    vec3 pointLightContrib = vec3(0.0);
+        vec3 pointLightContrib = vec3(0.0);
     if (uPointLightCount > 0) {
         pointLightContrib = albedo * EvaluatePointLights(hitPos, normal);
     }
     #else
-    vec3 pointLightContrib = vec3(0.0);
+        vec3 pointLightContrib = vec3(0.0);
     #endif
 
     vec3 finalColor = albedo * direct + indirect + pointLightContrib;
