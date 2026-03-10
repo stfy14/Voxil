@@ -48,6 +48,9 @@ public class VisualDebugWindow : IUIWindow
                 if (showProbes)
                 {
                     ImGui.SameLine(); ImGui.TextDisabled("(цвет = GI, серый = мертвый)");
+                    bool xray = GameSettings.ShowGIProbesXRay;
+                    if (ImGui.Checkbox("X-Ray Mode (сквозь стены)", ref xray))
+                        GameSettings.ShowGIProbesXRay = xray;
                     ImGui.Spacing();
 
                     string[] lodNames = { "L0 — Near (1м)", "L1 — Mid (4м)", "L2 — Far (16м)", "Все уровни" };

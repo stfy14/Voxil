@@ -1,4 +1,4 @@
-// --- Engine/Graphics/GLSL/gi_probe_update.comp ---
+// --- START OF FILE gi_probe_update.comp.txt ---
 #version 450 core
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
@@ -6,40 +6,28 @@ layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 #define DEPTH_TILE  16
 #define IRR_PAD     (IRR_TILE   + 2)
 #define DEPTH_PAD   (DEPTH_TILE + 2)
-#define VOXELS_IN_UINT 4
 
 layout(binding = 2, r11f_g11f_b10f) uniform image2D uIrrAtlas;
-layout(binding = 3, rg16f)          uniform image2D uDepthAtlas;
+layout(binding = 3, rg32f)          uniform image2D uDepthAtlas;
+
+// Читаем старый свет для бесконечных отскоков
+uniform sampler2D uBounceIrrAtlas;
 
 struct ProbeData { vec4 pos; vec4 colorAndState; };
 layout(std430, binding = 16) buffer ProbeBuffer { ProbeData probes[]; };
+layout(std430, binding = 22) buffer UpdateList { int uUpdateIndices[]; };
 
-#ifndef CHUNK_SIZE
-#define CHUNK_SIZE        8
-#endif
-#ifndef VOXEL_RESOLUTION
-#define VOXEL_RESOLUTION  8
-#endif
-#ifndef VOXELS_PER_METER
-#define VOXELS_PER_METER  1
-#endif
-#ifndef PAGE_TABLE_SIZE
-#define PAGE_TABLE_SIZE   512
-#endif
+struct PointLightData { vec4 posRadius; vec4 colorIntensity; };
+layout(std430, binding = 18) readonly buffer PointLightBuffer { PointLightData pointLights[]; };
+uniform int uPointLightCount;
 
-layout(binding = 0, r32ui) uniform uimage3D uPageTable;
-layout(std430, binding = 5) buffer MaskBuffer { uint chunkMasks[]; };
-
-/*__BANKS_INJECTION__*/
+#include "include/common.glsl"
+#include "include/tracing.glsl"
 
 uniform int   uGIGridBaseX, uGIGridBaseY, uGIGridBaseZ;
-uniform int   uProbeStartIndex, uProbesThisFrame, uRaysPerProbe;
-uniform float uTime, uProbeSpacing;
-uniform vec3  uSunDir;
+uniform int   uProbesThisFrame, uRaysPerProbe;
+uniform float uProbeSpacing;
 uniform int   uProbeGridX, uProbeGridY, uProbeGridZ;
-uniform int   uBoundMinX, uBoundMinY, uBoundMinZ;
-uniform int   uBoundMaxX, uBoundMaxY, uBoundMaxZ;
-uniform int   uMaxRaySteps;
 
 int true_mod(int a, int b) { int m = a % b; return m < 0 ? m + b : m; }
 float Hash(float a, float b) { vec2 v = vec2(a, b); return fract(sin(dot(v, vec2(127.1, 311.7))) * 43758.5453); }
@@ -99,16 +87,6 @@ vec3 GetVoxelAlbedo(uint matID) {
 
 bool IsEmissive(uint matID) { return matID == 7u; }
 
-uint GetVoxelData(uint chunkSlot, int voxelIdx) {
-    uint bank      = chunkSlot / uint(CHUNKS_PER_BANK);
-    uint localSlot = chunkSlot % uint(CHUNKS_PER_BANK);
-    uint chunkSzU  = (uint(VOXEL_RESOLUTION) * uint(VOXEL_RESOLUTION) * uint(VOXEL_RESOLUTION)) / uint(VOXELS_IN_UINT);
-    uint offset    = localSlot * chunkSzU + (uint(voxelIdx) >> 2u);
-    uint rawVal    = GetVoxelFromBank(bank, offset);
-    uint shift     = (uint(voxelIdx) & 3u) * 8u;
-    return (rawVal >> shift) & 0xFFu;
-}
-
 bool IsSolidAt(vec3 worldPos) {
     ivec3 cMapPos = ivec3(floor(worldPos / float(CHUNK_SIZE)));
     ivec3 bMin = ivec3(uBoundMinX, uBoundMinY, uBoundMinZ);
@@ -128,7 +106,7 @@ bool IsSolidAt(vec3 worldPos) {
     return (m != 0u && m != 4u); 
 }
 
-bool TraceProbeRay(vec3 ro, vec3 rd, float maxDist, out float tHit, out uint matID, out vec3 hitNormal)
+bool TraceGIRay(vec3 ro, vec3 rd, float maxDist, out float tHit, out uint matID, out vec3 hitNormal)
 {
     tHit = 0.0; matID = 0u; hitNormal = vec3(0.0);
 
@@ -153,8 +131,10 @@ bool TraceProbeRay(vec3 ro, vec3 rd, float maxDist, out float tHit, out uint mat
     ivec3 bMin = ivec3(uBoundMinX, uBoundMinY, uBoundMinZ);
     ivec3 bMax = ivec3(uBoundMaxX, uBoundMaxY, uBoundMaxZ);
 
+    bool hitStatic = false;
+
     for (int i = 0; i < uMaxRaySteps; i++) {
-        if (tCurrentRel > maxDist) return false;
+        if (tCurrentRel > maxDist) break;
         if (any(lessThan(cMapPos, bMin)) || any(greaterThanEqual(cMapPos, bMax))) break;
 
         uint chunkSlot = imageLoad(uPageTable, cMapPos & (PAGE_TABLE_SIZE - 1)).r;
@@ -163,7 +143,8 @@ bool TraceProbeRay(vec3 ro, vec3 rd, float maxDist, out float tHit, out uint mat
             if ((chunkSlot & 0x80000000u) != 0u) {
                 tHit      = tCurrentRel; matID     = chunkSlot & 0x7FFFFFFFu;
                 hitNormal = length(cMask) > 0.5 ? -vec3(cStepDir) * cMask : -normalize(rd);
-                return true;
+                hitStatic = true;
+                break;
             }
 
             vec3 vStart = ro + safeRd * tCurrentRel;
@@ -193,17 +174,52 @@ bool TraceProbeRay(vec3 ro, vec3 rd, float maxDist, out float tHit, out uint mat
                     tHit      = tCurrentRel + dot(vMask, vSideDist - vDeltaDist) / float(VOXELS_PER_METER);
                     matID     = vMat;
                     hitNormal = length(vMask) > 0.5 ? -vec3(vStepDir) * vMask : -normalize(rd);
-                    return true;
+                    hitStatic = true;
+                    break;
                 }
                 vMask = (vSideDist.x < vSideDist.y) ? ((vSideDist.x < vSideDist.z) ? vec3(1,0,0) : vec3(0,0,1)) : ((vSideDist.y < vSideDist.z) ? vec3(0,1,0) : vec3(0,0,1));
                 vSideDist += vMask * vDeltaDist; vMapPos   += ivec3(vMask) * vStepDir;
             }
+            if (hitStatic) break;
             if (exitChunk) cMask = vec3(0.0);
         }
         cMask = (cSideDist.x < cSideDist.y) ? ((cSideDist.x < cSideDist.z) ? vec3(1,0,0) : vec3(0,0,1)) : ((cSideDist.y < cSideDist.z) ? vec3(0,1,0) : vec3(0,0,1));
         tCurrentRel = dot(cMask, cSideDist); cSideDist  += cMask * cDeltaDist; cMapPos    += ivec3(cMask) * cStepDir;
     }
-    return false;
+
+    if (!hitStatic) tHit = maxDist;
+
+    float tDyn = maxDist; int idDyn = -1; vec3 nDyn = vec3(0); uint mDyn = 0u; int dummySteps = 0;
+    if (uObjectCount > 0) {
+        if (TraceDynamicRay(ro, rd, min(tHit, maxDist), tDyn, idDyn, nDyn, mDyn, dummySteps)) {
+            if (tDyn < tHit) { 
+                tHit = tDyn;
+                matID = mDyn;
+                hitNormal = nDyn;
+                return true;
+            }
+        }
+    }
+
+    return hitStatic;
+}
+
+// НОВОЕ: Отраженный свет (Bounce GI)
+vec3 GetBounceGI(vec3 pos, vec3 norm) {
+    // ИСПРАВЛЕНИЕ: Используем абсолютные координаты! Больше никакого смещения от игрока.
+    ivec3 absoluteGridPos = ivec3(floor(pos / uProbeSpacing));
+    int wx = true_mod(absoluteGridPos.x, uProbeGridX);
+    int wy = true_mod(absoluteGridPos.y, uProbeGridY);
+    int wz = true_mod(absoluteGridPos.z, uProbeGridZ);
+    
+    int idx = wx + wy * uProbeGridX + wz * uProbeGridX * uProbeGridY;
+    
+    vec2 octUV = OctEncode(norm);
+    ivec2 tileOrigin = ivec2(wx * IRR_PAD + 1, (wy + wz * uProbeGridY) * IRR_PAD + 1);
+    vec2 pixelXY = vec2(tileOrigin) + octUV * float(IRR_TILE);
+    vec2 texUV = pixelXY / vec2(float(uProbeGridX * IRR_PAD), float(uProbeGridY * uProbeGridZ * IRR_PAD));
+    
+    return textureLod(uBounceIrrAtlas, texUV, 0.0).rgb;
 }
 
 vec3 SkyColor(vec3 rd) {
@@ -218,7 +234,7 @@ void main() {
     uint localIdx = gl_GlobalInvocationID.x;
     if (localIdx >= uint(uProbesThisFrame)) return;
 
-    int probeIdx = (uProbeStartIndex + int(localIdx)) % (uProbeGridX * uProbeGridY * uProbeGridZ);
+    int probeIdx = uUpdateIndices[localIdx];
 
     int wx = probeIdx % uProbeGridX;
     int wy = (probeIdx / uProbeGridX) % uProbeGridY;
@@ -236,6 +252,7 @@ void main() {
 
     if (IsSolidAt(targetPos)) {
         probes[probeIdx].pos = vec4(targetPos, 0.0);
+        probes[probeIdx].colorAndState = vec4(0.0);
         ivec2 irrOrigin = IrrTileOrigin(probeIdx);
         ivec2 depthOrigin = DepthTileOrigin(probeIdx);
         for (int py = 0; py < IRR_TILE; py++) for (int px = 0; px < IRR_TILE; px++) imageStore(uIrrAtlas, irrOrigin + ivec2(px, py), vec4(0.0));
@@ -243,17 +260,15 @@ void main() {
         return;
     }
 
-    float oldState = probes[probeIdx].pos.w; 
-    bool justWokeUp = (oldState < 0.5);
     vec3 oldPos = probes[probeIdx].pos.xyz;
-    bool isNewPos = distance(oldPos, targetPos) > uProbeSpacing * 0.5;
+    float oldState = probes[probeIdx].pos.w; 
     
-    float irrBlendFactor   = isNewPos ? 1.0 : 0.05;
-    float depthBlendFactor = (isNewPos || justWokeUp) ? 1.0 : 0.05;
+    bool isNewPos = distance(oldPos, targetPos) > uProbeSpacing * 0.5;
+    bool justWokeUp = (oldState < 0.5) || isNewPos;
 
     probes[probeIdx].pos = vec4(targetPos, 1.0);
 
-    float seed = Hash(float(probeIdx), uTime * 0.01 + float(uProbeStartIndex) * 0.137);
+    float seed = Hash(float(probeIdx), uTime * 0.01 + float(localIdx) * 0.137);
     float maxRayDist = float(uProbeGridX) * uProbeSpacing * 0.5;
 
     const int MAX_RAYS = 64;
@@ -266,25 +281,64 @@ void main() {
         rayDirs[ray] = rd;
         float tHit = 0.0; uint matID = 0u; vec3 hitNorm = vec3(0.0); vec3 radiance = vec3(0.0); float dist = maxRayDist;
 
-        if (TraceProbeRay(targetPos, rd, maxRayDist, tHit, matID, hitNorm)) {
+        if (TraceGIRay(targetPos, rd, maxRayDist, tHit, matID, hitNorm)) {
             dist = tHit;
-            if (IsEmissive(matID)) {
+
+            // ИСПРАВЛЕНИЕ 1: Исключаем Light Leaking (белые пятна)
+            // Если луч вошел в геометрию и ударился во ВНУТРЕННЮЮ (заднюю) сторону другой стены - там темнота!
+            if (dot(rd, hitNorm) > 0.0) {
+                radiance = vec3(0.0);
+            }
+            else if (IsEmissive(matID)) {
                 radiance = GetVoxelAlbedo(matID) * 20.0;
             } else {
                 vec3 hitPos = targetPos + rd * tHit;
-                vec3 shadowStart = hitPos + hitNorm * 0.1;
+                vec3 shadowStart = hitPos + hitNorm * 0.02; // Меньше отступ = точнее свет
+                
                 bool inShadow = IsSolidAt(shadowStart);
                 if (!inShadow && uSunDir.y > 0.0) {
                     float sHit; uint sMat; vec3 sNorm;
-                    if (TraceProbeRay(shadowStart, uSunDir, maxRayDist, sHit, sMat, sNorm)) inShadow = true;
+                    if (TraceGIRay(shadowStart, uSunDir, 500.0, sHit, sMat, sNorm)) {
+                        if (sMat != 7u) inShadow = true;
+                    }
                 }
-                
                 float sunIntensity = clamp(uSunDir.y * 5.0, 0.0, 1.0);
                 float nDotL = max(0.0, dot(hitNorm, uSunDir));
                 vec3 directLight = inShadow ? vec3(0.0) : vec3(1.0, 0.95, 0.8) * sunIntensity * nDotL * 3.0;
+                
+                vec3 pointLightLight = vec3(0.0);
+                for (int pl = 0; pl < uPointLightCount && pl < 32; pl++) {
+                    vec3 lPos = pointLights[pl].posRadius.xyz;
+                    float lRad = pointLights[pl].posRadius.w;
+                    vec3 lCol = pointLights[pl].colorIntensity.rgb;
+                    float lInt = pointLights[pl].colorIntensity.a;
+
+                    vec3 toL = lPos - hitPos;
+                    float plDist = length(toL);
+                    if (plDist > lRad || plDist < 0.05) continue;
+
+                    vec3 L = toL / plDist;
+                    float plNDotL = max(0.0, dot(hitNorm, L));
+                    if (plNDotL <= 0.0) continue;
+
+                    float plShadow = 1.0;
+                    float dummyD; uint dummyM; vec3 dummyN;
+                    if (TraceGIRay(shadowStart, L, plDist - 0.2, dummyD, dummyM, dummyN)) {
+                        if (dummyM != 7u) plShadow = 0.0;
+                    }
+
+                    float win = max(0.0, 1.0 - plDist / lRad);
+                    win = win * win * win * win;
+                    pointLightLight += lCol * plNDotL * (lInt / max(plDist * plDist, 0.01)) * win * plShadow;
+                }
+
+                // ИСПРАВЛЕНИЕ 2: Бесконечные отскоки (Свет заворачивает за угол)
+                vec3 bounce = GetBounceGI(shadowStart, hitNorm);
+
                 float nightAmb = clamp(-uSunDir.y * 2.0, 0.0, 1.0);
                 vec3 ambLight = vec3(0.05, 0.07, 0.12) * nightAmb * max(0.1, dot(hitNorm, vec3(0,1,0)) * 0.5 + 0.5);
-                radiance = GetVoxelAlbedo(matID) * (directLight + ambLight);
+                
+                radiance = GetVoxelAlbedo(matID) * (directLight + pointLightLight + bounce + ambLight);
             }
         } else {
             dist = maxRayDist;
@@ -293,6 +347,8 @@ void main() {
         rayRadiance[ray] = radiance;
         rayDist[ray] = dist;
     }
+
+    vec3 avgColor = vec3(0.0);
 
     {
         ivec2 origin = IrrTileOrigin(probeIdx);
@@ -307,14 +363,22 @@ void main() {
             }
             vec3 newIrr = (wSum > 0.0) ? irrSum / wSum : vec3(0.0);
             
-            vec3 prevIrr = imageLoad(uIrrAtlas, origin + ivec2(px, py)).rgb;
+            float blend = 1.0;
+            vec3 prevIrr = vec3(0.0);
 
-            // ФИКС БАБЛА: Если зонд только проснулся, его история - это тьма, а не старый мусор
-            if (justWokeUp) {
-                prevIrr = vec3(0.0);
+            if (!justWokeUp) {
+                prevIrr = imageLoad(uIrrAtlas, origin + ivec2(px, py)).rgb;
+                float lumPrev = dot(prevIrr, vec3(0.299, 0.587, 0.114));
+                float lumNew  = dot(newIrr, vec3(0.299, 0.587, 0.114));
+                float diff = abs(lumNew - lumPrev);
+                
+                // ИСПРАВЛЕНИЕ 3: Плавный, но быстрый Hysteresis (без мерцаний)
+                // 3% - стабильный базовый шум подавляется. До 20% - если свет резко выключили.
+                blend = mix(0.03, 0.20, clamp(diff * 2.0, 0.0, 1.0));
             }
             
-            newIrr = mix(prevIrr, newIrr, irrBlendFactor);
+            newIrr = mix(prevIrr, newIrr, blend);
+            avgColor += newIrr;
             imageStore(uIrrAtlas, origin + ivec2(px, py), vec4(newIrr, 1.0));
         }
     }
@@ -332,10 +396,19 @@ void main() {
                 meanDist += d * w; meanDist2 += d * d * w; wSum += w;
             }
             vec2 newDepth = (wSum > 0.0) ? vec2(meanDist / wSum, meanDist2 / wSum) : vec2(maxRayDist, maxRayDist * maxRayDist);
-            vec2 prevDepth = imageLoad(uDepthAtlas, origin + ivec2(px, py)).rg;
-            newDepth = mix(prevDepth, newDepth, depthBlendFactor);
+            
+            float blend = justWokeUp ? 1.0 : 0.05;
+            vec2 prevDepth = vec2(maxRayDist, maxRayDist * maxRayDist);
+            
+            if (!justWokeUp) {
+                prevDepth = imageLoad(uDepthAtlas, origin + ivec2(px, py)).rg;
+            }
+            
+            newDepth = mix(prevDepth, newDepth, blend);
             imageStore(uDepthAtlas, origin + ivec2(px, py), vec4(newDepth, 0.0, 1.0));
         }
     }
-    probes[probeIdx].colorAndState = vec4(rayRadiance[0], 1.0);
+    
+    // Сохраняем реальный средний цвет зонда для Дебаг-кубиков!
+    probes[probeIdx].colorAndState = vec4(avgColor / float(IRR_TILE * IRR_TILE), 1.0);
 }

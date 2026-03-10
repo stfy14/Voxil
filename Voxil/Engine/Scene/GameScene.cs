@@ -72,11 +72,6 @@ public class GameScene : IScene
     {
         _renderer.Render(CameraData.From(_camera));
         _physicsDebugger.Draw(_physicsWorld, _lineRenderer, _camera);
-
-        // GI probe grid visualization (toggle in Visual Debug window)
-        if (GameSettings.ShowGIProbes && _renderer.GISystem != null)
-            _renderer.GISystem.DrawProbeDebug(_lineRenderer, _camera.Position);
-
         _lineRenderer.Render(_camera);
         _crosshair.Render();
     }

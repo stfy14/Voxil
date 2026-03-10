@@ -412,6 +412,7 @@ public class GpuRaycastingRenderer : IDisposable
         _compositeFbo = GL.GenFramebuffer();
         GL.BindFramebuffer(FramebufferTarget.Framebuffer, _compositeFbo);
         GL.FramebufferTexture2D(FramebufferTarget.Framebuffer, FramebufferAttachment.ColorAttachment0, TextureTarget.Texture2D, _mainColorTexture, 0);
+        GL.FramebufferTexture2D(FramebufferTarget.Framebuffer, FramebufferAttachment.DepthAttachment, TextureTarget.Texture2D, _mainDepthTexture, 0);
         GL.DrawBuffers(1, new DrawBuffersEnum[] { DrawBuffersEnum.ColorAttachment0 });
 
         for (int i = 0; i < 2; i++)
@@ -463,6 +464,7 @@ public class GpuRaycastingRenderer : IDisposable
         shader.SetMatrix4("uProjection", activeProj);
         shader.SetMatrix4("uInvProjection", Matrix4.Invert(activeProj));
         shader.SetMatrix4("uInvView", Matrix4.Invert(view));
+        shader.SetMatrix4("uCleanProjection", cleanProj);
         shader.SetInt("uShowDebugHeatmap", GameSettings.ShowDebugHeatmap ? 1 : 0);
 
         float viewRange = _worldService.GetViewRangeInMeters();
@@ -530,17 +532,25 @@ public class GpuRaycastingRenderer : IDisposable
             GL.BindImageTexture(0, _pageTableTexture, 0, true, 0, TextureAccess.ReadOnly, SizedInternalFormat.R32ui);
             BindAllBuffers();
             GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 5, _maskSsbo);
-            _giSystem.Bind();
+            GL.BindImageTexture(1, _gridHeadTexture, 0, true, 0, TextureAccess.ReadOnly, SizedInternalFormat.R32i);
+            GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 2, _dynamicObjectsBuffer);
+            GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 3, _linkedListSsbo);
+            _svoManager.Bind();
+
+            // ИСПРАВЛЕНИЕ: Даем GI-системе доступ к Point Lights (чтобы свет заходил за углы!)
+            GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, POINT_LIGHT_BINDING, _pointLightSsbo);
 
             int r = GameSettings.RenderDistance + 2;
             int cx = (int)Math.Floor(cam.Position.X / Constants.ChunkSizeWorld);
             int cz = (int)Math.Floor(cam.Position.Z / Constants.ChunkSizeWorld);
             int maxSteps = (int)(viewRange * 8) + 512;
 
+            // Передаем _lastPointLightCount !
             _giSystem.Update(cam.Position, sunDir, _totalTime,
                 cx - r, 0, cz - r,
                 cx + r, WorldManager.WorldHeightChunks, cz + r,
-                maxSteps);
+                maxSteps,
+                _lastGridOrigin, _gridCellSize, OBJ_GRID_SIZE, objCount, _lastPointLightCount);
 
             _shaderSystem.Use();
             shader = _shaderSystem.RaycastShader;
@@ -673,10 +683,20 @@ public class GpuRaycastingRenderer : IDisposable
 
         if (_giSystem != null && GameSettings.EnableGI)
         {
-            _giSystem.SetSamplingUniforms(compositeShader); 
+            _giSystem.SetSamplingUniforms(compositeShader);
         }
 
         GL.DrawArrays(PrimitiveType.TriangleStrip, 0, 4);
+
+        // НОВОЕ: Отрисовка солидных цветных кубиков GI поверх кадра
+        if (_giSystem != null && GameSettings.EnableGI && GameSettings.ShowGIProbes)
+        {
+            // Переключаемся в FBO вывода (composite или _history, куда мы рисуем)
+            _giSystem.DrawSolidProbes(cam);
+
+            // ---> ИСПРАВЛЕНИЕ: ВОЗВРАЩАЕМ VAO НА МЕСТО <---
+            GL.BindVertexArray(_quadVao);
+        }
 
         if (useTaa && !_resetTaaHistory)
         {
@@ -699,6 +719,8 @@ public class GpuRaycastingRenderer : IDisposable
             _taaShader.SetTexture("uHistoryTexture", _historyTexture[readIndex], TextureUnit.Texture2);
             _taaShader.SetMatrix4("uInvViewProj", Matrix4.Invert(cleanViewProj));
             _taaShader.SetMatrix4("uPrevViewProj", _prevCleanViewProjection);
+
+            GL.BindVertexArray(_quadVao);
 
             GL.DrawArrays(PrimitiveType.TriangleStrip, 0, 4);
             GL.BindFramebuffer(FramebufferTarget.ReadFramebuffer, _historyFbo[writeIndex]);
@@ -743,21 +765,34 @@ public class GpuRaycastingRenderer : IDisposable
         int count = 0;
         float alpha = _worldService.PhysicsWorld.PhysicsAlpha;
 
-        foreach (var vo in objects)
+        // Вспомогательная локальная функция
+        void AddLightFromObject(VoxelObject vo, bool isViewModel)
         {
-            if (count >= 32) break;
-            if (!MaterialRegistry.IsEmissive(vo.Material)) continue;
-            if (vo.VoxelCoordinates.Count == 0) continue; 
+            if (count >= 32) return;
+            if (!MaterialRegistry.IsEmissive(vo.Material)) return;
+            if (vo.VoxelCoordinates.Count == 0) return;
 
-            // ФИКС ЦЕНТРА МАСС: Используем честный физический центр в пространстве, а не локальный угол сетки
-            var pos = Vector3.Lerp(vo.PrevPosition, vo.Position, alpha);
+            // Для ViewModel берем позицию жестко из камеры, для остальных - интерполируем от физики
+            var pos = isViewModel ? vo.Position : Vector3.Lerp(vo.PrevPosition, vo.Position, alpha);
             var (r, g, b) = MaterialRegistry.GetColor(vo.Material);
 
             _pointLightCache[count++] = new GpuPointLight
             {
-                PosRadius      = new Vector4(pos.X, pos.Y, pos.Z, MaterialRegistry.GetEmissiveRadius(vo.Material)),
+                PosRadius = new Vector4(pos.X, pos.Y, pos.Z, MaterialRegistry.GetEmissiveRadius(vo.Material)),
                 ColorIntensity = new Vector4(r, g, b, MaterialRegistry.GetEmissiveIntensity(vo.Material)),
             };
+        }
+
+        // 1. Динамические объекты в мире
+        foreach (var vo in objects)
+        {
+            AddLightFromObject(vo, false);
+        }
+
+        // 2. ИСПРАВЛЕНИЕ: Предмет в руках игрока теперь тоже светит!
+        if (_currentViewModel != null)
+        {
+            AddLightFromObject(_currentViewModel, true);
         }
 
         _lastPointLightCount = count;
@@ -847,6 +882,17 @@ public class GpuRaycastingRenderer : IDisposable
                     NewMaterial = (uint)newMat,
                     Padding = 0
                 });
+            }
+
+            // --- НОВОЕ: Оповещаем GI систему об изменении вокселя ---
+            if (_giSystem != null && GameSettings.EnableGI)
+            {
+                Vector3 worldPos = new Vector3(
+                    chunk.Position.X * Constants.ChunkSizeWorld + localPos.X * Constants.VoxelSize + Constants.VoxelSize * 0.5f,
+                    chunk.Position.Y * Constants.ChunkSizeWorld + localPos.Y * Constants.VoxelSize + Constants.VoxelSize * 0.5f,
+                    chunk.Position.Z * Constants.ChunkSizeWorld + localPos.Z * Constants.VoxelSize + Constants.VoxelSize * 0.5f
+                );
+                _giSystem.MarkProbesDirty(worldPos);
             }
         }
     }

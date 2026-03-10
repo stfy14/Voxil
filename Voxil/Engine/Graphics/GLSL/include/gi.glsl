@@ -1,4 +1,4 @@
-// --- Engine/Graphics/GLSL/include/gi.glsl ---
+// --- START OF FILE gi.glsl.txt ---
 // DDGI: октаэдрические атласы irradiance + depth, Chebyshev visibility test
 
 uniform sampler2D uGIIrrAtlas;
@@ -66,7 +66,10 @@ float ComputeEdgeFade(vec3 worldPos, int bX, int bY, int bZ, float sp) {
 }
 
 vec4 SampleProbeLevel(vec3 worldPos, vec3 normal, sampler2D irrAtlas, sampler2D depthAtlas, int bX, int bY, int bZ, float sp) {
-    vec3 samplePos  = worldPos + normal * (sp * 0.5);
+    // ИСПРАВЛЕНИЕ 3: Ограничиваем Normal Bias (смещение), чтобы L2 зонды не пробивали потолок
+    // Воксели у нас размером 1 метр, значит смещение должно быть не больше 0.5м (чтобы не улететь в соседнюю комнату)
+    vec3 samplePos  = worldPos + normal * min(sp * 0.5, 0.5); 
+    
     vec3 gridOrigin = vec3(float(bX), float(bY), float(bZ)) * sp + sp * 0.5;
     vec3 localPos   = clamp((samplePos - gridOrigin) / sp, vec3(0.0), vec3(float(uGIProbeX)-1.0, float(uGIProbeY)-1.0, float(uGIProbeZ)-1.0));
 
@@ -117,18 +120,23 @@ vec4 SampleProbeLevel(vec3 worldPos, vec3 normal, sampler2D irrAtlas, sampler2D 
 vec3 SampleGIProbes(vec3 worldPos, vec3 normal) {
     vec3 fallback = GIFallback(normal);
 
+    // ИСПРАВЛЕНИЕ 4: Если wsSum < 0.001 (т.е. sX.a < 0.001) — это означает, что ВСЕ 8 соседних зондов 
+    // полностью заблокированы геометрией (мы глубоко под землей или внутри толстой стены).
+    // Вместо использования яркого цвета неба (fallback), мы возвращаем почти полную темноту vec3(0.001).
+
     vec4  s0    = SampleProbeLevel(worldPos, normal, uGIIrrAtlas, uGIDepthAtlas, uGIGridBaseX, uGIGridBaseY, uGIGridBaseZ, uGIProbeSpacing);
     float fade0 = ComputeEdgeFade(worldPos, uGIGridBaseX, uGIGridBaseY, uGIGridBaseZ, uGIProbeSpacing);
-    vec3  irr0  = (s0.a > 0.001) ? s0.rgb / s0.a : fallback;
+    vec3  irr0  = (s0.a > 0.001) ? s0.rgb / s0.a : vec3(0.001);
 
     vec4  s1    = SampleProbeLevel(worldPos, normal, uGIIrrAtlasL1, uGIDepthAtlasL1, uGIGridBaseX_L1, uGIGridBaseY_L1, uGIGridBaseZ_L1, uGIProbeSpacingL1);
     float fade1 = ComputeEdgeFade(worldPos, uGIGridBaseX_L1, uGIGridBaseY_L1, uGIGridBaseZ_L1, uGIProbeSpacingL1);
-    vec3  irr1  = (s1.a > 0.001) ? s1.rgb / s1.a : fallback;
+    vec3  irr1  = (s1.a > 0.001) ? s1.rgb / s1.a : vec3(0.001);
 
     vec4  s2    = SampleProbeLevel(worldPos, normal, uGIIrrAtlasL2, uGIDepthAtlasL2, uGIGridBaseX_L2, uGIGridBaseY_L2, uGIGridBaseZ_L2, uGIProbeSpacingL2);
     float fade2 = ComputeEdgeFade(worldPos, uGIGridBaseX_L2, uGIGridBaseY_L2, uGIGridBaseZ_L2, uGIProbeSpacingL2);
-    vec3  irr2  = (s2.a > 0.001) ? s2.rgb / s2.a : fallback;
+    vec3  irr2  = (s2.a > 0.001) ? s2.rgb / s2.a : vec3(0.001);
 
+    // Каскады смешиваются от крупного к мелкому по краям сетки
     vec3 result = mix(fallback, irr2, fade2);
     result      = mix(result,   irr1, fade1);
     result      = mix(result,   irr0, fade0);

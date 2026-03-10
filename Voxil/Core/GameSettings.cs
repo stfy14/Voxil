@@ -22,11 +22,12 @@ public static class GameSettings
     public static ShadowMode CurrentShadowMode = ShadowMode.Hard;
     public static int SoftShadowSamples = 8; 
     public static bool UseProceduralWater = false; 
-    public static bool EnableWaterTransparency = false; 
-    
+    public static bool EnableWaterTransparency = false;
+
     // === GLOBAL ILLUMINATION ===
     public static bool EnableGI = true;
-    public static bool ShowGIProbes = false; // визуализация зондов (Visual Debug)
+    public static bool ShowGIProbes = false;
+    public static bool ShowGIProbesXRay = false; // <--- НОВОЕ ПОЛЕ
 
     // === ОПТИМИЗАЦИЯ ===
     public static bool BeamOptimization = true;
