@@ -23,7 +23,6 @@ public class GpuRaycastingRenderer : IDisposable
     private int _pageTableTexture;
     private DynSvoManager _svoManager;
 
-    // --- ПАМЯТЬ SSBO ---
     private const int MAX_TOTAL_BANKS = 8;
     private const long BANK_SIZE_BYTES = 268435456;
 
@@ -78,31 +77,28 @@ public class GpuRaycastingRenderer : IDisposable
     public long CurrentAllocatedBytes { get; private set; } = 0;
     private bool _reallocationPending = false;
 
-    // --- MAIN FBO (G-buffer MRT) ---
     private int _mainFbo;
     private int _mainDepthTexture;
     private int _renderWidth;
     private int _renderHeight;
 
-    // G-buffer attachments
-    private int _gColorTexture;     // RGBA16F: albedo.rgb + tFinal
-    private int _gDataTexture;      // RGBA16F: normal.rgb + directFactor
+    private int _gColorTexture;     
+    private int _gDataTexture;      
 
-    // --- SHADOW PASS (½ res) ---
+    // --- SHADOWS ---
     private int _shadowFbo;
-    private int _shadowTexture;     // RG16F: shadow + ao
+    private int _shadowTexture;             // Rg16f (Sun Shadow, AO)
+    private int _shadowPointLightTexture;   // Rgba16f (Point Light RGB)
     private int _shadowWidth;
     private int _shadowHeight;
 
-    // --- UPSAMPLE PASS (full res) ---
     private int _shadowFullFbo;
-    private int _shadowFullTexture; // RG16F: bilateral-upsampled shadow + ao
+    private int _shadowFullTexture;             // Rg16f
+    private int _shadowPointLightFullTexture;   // Rgba16f
 
-    // --- COMPOSITE FBO — пишет в _mainColorTexture ---
     private int _compositeFbo;
-    private int _mainColorTexture;  // RGBA16F: итоговый цвет; TAA читает отсюда
+    private int _mainColorTexture;  
 
-    // --- TAA ---
     private Shader _taaShader;
     private int[] _historyFbo = new int[2];
     private int[] _historyTexture = new int[2];
@@ -124,7 +120,6 @@ public class GpuRaycastingRenderer : IDisposable
     private ConcurrentQueue<GpuVoxelEdit> _editQueue = new ConcurrentQueue<GpuVoxelEdit>();
     private GpuVoxelEdit[] _editUploadArray = new GpuVoxelEdit[1024];
 
-    // --- GI + Point Lights ---
     private GIProbeSystem _giSystem;
     private int _pointLightSsbo;
     private const int POINT_LIGHT_BINDING = 18;
@@ -133,33 +128,25 @@ public class GpuRaycastingRenderer : IDisposable
     [StructLayout(LayoutKind.Sequential)]
     private struct GpuPointLight
     {
-        public Vector4 PosRadius;       // xyz=pos, w=radius
-        public Vector4 ColorIntensity;  // xyz=color, w=intensity
+        public Vector4 PosRadius;       
+        public Vector4 ColorIntensity;  
     }
     private readonly GpuPointLight[] _pointLightCache = new GpuPointLight[32];
 
-    // Public accessor for TestManager / Game.cs wiring
     public GIProbeSystem GISystem => _giSystem;
 
-    // Forwarded from ShaderSystem so callers (e.g. Game.cs) don't need a reference to it
     public event Action OnShaderReloaded
     {
         add    => _shaderSystem.OnShaderReloaded += value;
         remove => _shaderSystem.OnShaderReloaded -= value;
-    }
-
-    // =========================================================
-
-    [StructLayout(LayoutKind.Sequential)]
+    }[StructLayout(LayoutKind.Sequential)]
     struct GpuVoxelEdit
     {
         public uint ChunkSlot;
         public uint VoxelIndex;
         public uint NewMaterial;
         public uint Padding;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
+    }[StructLayout(LayoutKind.Sequential)]
     struct GpuDynamicObject
     {
         public Matrix4 Model;
@@ -238,11 +225,9 @@ public class GpuRaycastingRenderer : IDisposable
     }
 
     public void SetViewModel(VoxelObject viewModel) => _currentViewModel = viewModel;
-
     public void RequestReallocation() { CleanupBuffers(); GC.Collect(); GC.WaitForPendingFinalizers(); GC.Collect(); _reallocationPending = true; }
     public bool IsReallocationPending() => _reallocationPending;
     public void PerformReallocation() { if (!_reallocationPending) return; InitializeBuffers(); _reallocationPending = false; }
-
     public long CalculateMemoryBytesForDistance(int distance)
     {
         int chunks = (distance * 2 + 1) * (distance * 2 + 1) * WorldManager.WorldHeightChunks;
@@ -250,10 +235,6 @@ public class GpuRaycastingRenderer : IDisposable
     }
 
     public void ApplyRenderScale() => OnResize(_windowWidth, _windowHeight);
-
-    // =========================================================
-    // InitializeBuffers
-    // =========================================================
 
     public void InitializeBuffers()
     {
@@ -268,10 +249,6 @@ public class GpuRaycastingRenderer : IDisposable
         if (!TryAddBank()) throw new Exception("Critical: Failed to allocate even the first VRAM bank!");
 
         _chunksPerBank = (int)(BANK_SIZE_BYTES / (PackedChunkSizeInInts * 4));
-
-        Console.WriteLine($"[Init] Bank Size: {BANK_SIZE_BYTES / 1024 / 1024} MB");
-        Console.WriteLine($"[Init] Chunks per Bank: {_chunksPerBank}");
-        Console.WriteLine($"[Init] Max World Capacity: {_chunksPerBank * MAX_TOTAL_BANKS} chunks");
 
         BindAllBuffers();
 
@@ -292,7 +269,6 @@ public class GpuRaycastingRenderer : IDisposable
 
         CreateAuxBuffers();
 
-        // --- Point Light SSBO (binding 18) ---
         if (_pointLightSsbo == 0)
         {
             _pointLightSsbo = GL.GenBuffer();
@@ -305,7 +281,6 @@ public class GpuRaycastingRenderer : IDisposable
         _shaderSystem.Compile(MAX_TOTAL_BANKS, _chunksPerBank);
         ResetAllocationLogic();
 
-        // --- GI init / reinit (triggered by shader recompile too) ---
         _shaderSystem.OnShaderReloaded -= ReinitGI;
         _shaderSystem.OnShaderReloaded += ReinitGI;
         ReinitGI();
@@ -322,10 +297,6 @@ public class GpuRaycastingRenderer : IDisposable
         }
     }
 
-    // =========================================================
-    // OnResize — пересоздаём все FBO/текстуры зависящие от размера
-    // =========================================================
-
     public void OnResize(int w, int h)
     {
         _windowWidth = w; _windowHeight = h;
@@ -334,7 +305,6 @@ public class GpuRaycastingRenderer : IDisposable
         _beamWidth = Math.Max(1, _renderWidth / BeamDivisor);
         _beamHeight = Math.Max(1, _renderHeight / BeamDivisor);
 
-        // Beam
         if (_beamTexture != 0) GL.DeleteTexture(_beamTexture);
         _beamTexture = GL.GenTexture();
         GL.BindTexture(TextureTarget.Texture2D, _beamTexture);
@@ -344,12 +314,10 @@ public class GpuRaycastingRenderer : IDisposable
         GL.BindFramebuffer(FramebufferTarget.Framebuffer, _beamFbo);
         GL.FramebufferTexture2D(FramebufferTarget.Framebuffer, FramebufferAttachment.ColorAttachment0, TextureTarget.Texture2D, _beamTexture, 0);
 
-        // Main FBO — G-buffer MRT
         if (_mainFbo != 0) GL.DeleteFramebuffer(_mainFbo);
         _mainFbo = GL.GenFramebuffer();
         GL.BindFramebuffer(FramebufferTarget.Framebuffer, _mainFbo);
 
-        // gColor: albedo.rgb + tFinal
         if (_gColorTexture != 0) GL.DeleteTexture(_gColorTexture);
         _gColorTexture = GL.GenTexture();
         GL.BindTexture(TextureTarget.Texture2D, _gColorTexture);
@@ -358,7 +326,6 @@ public class GpuRaycastingRenderer : IDisposable
         GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMinFilter.Nearest);
         GL.FramebufferTexture2D(FramebufferTarget.Framebuffer, FramebufferAttachment.ColorAttachment0, TextureTarget.Texture2D, _gColorTexture, 0);
 
-        // gData: normal.rgb + directFactor
         if (_gDataTexture != 0) GL.DeleteTexture(_gDataTexture);
         _gDataTexture = GL.GenTexture();
         GL.BindTexture(TextureTarget.Texture2D, _gDataTexture);
@@ -367,7 +334,6 @@ public class GpuRaycastingRenderer : IDisposable
         GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMinFilter.Nearest);
         GL.FramebufferTexture2D(FramebufferTarget.Framebuffer, FramebufferAttachment.ColorAttachment1, TextureTarget.Texture2D, _gDataTexture, 0);
 
-        // Depth
         if (_mainDepthTexture != 0) GL.DeleteTexture(_mainDepthTexture);
         _mainDepthTexture = GL.GenTexture();
         GL.BindTexture(TextureTarget.Texture2D, _mainDepthTexture);
@@ -377,13 +343,14 @@ public class GpuRaycastingRenderer : IDisposable
         GL.FramebufferTexture2D(FramebufferTarget.Framebuffer, FramebufferAttachment.DepthAttachment, TextureTarget.Texture2D, _mainDepthTexture, 0);
         GL.DrawBuffers(2, new DrawBuffersEnum[] { DrawBuffersEnum.ColorAttachment0, DrawBuffersEnum.ColorAttachment1 });
 
-        // Shadow pass (½ or ¼ res based on downscale)
+        // --- SHADOW DOWNSCALE BUFFERS ---
         _shadowWidth  = Math.Max(1, _renderWidth  / GameSettings.ShadowDownscale);
         _shadowHeight = Math.Max(1, _renderHeight / GameSettings.ShadowDownscale);
 
         if (_shadowFbo != 0) GL.DeleteFramebuffer(_shadowFbo);
         _shadowFbo = GL.GenFramebuffer();
         GL.BindFramebuffer(FramebufferTarget.Framebuffer, _shadowFbo);
+        
         if (_shadowTexture != 0) GL.DeleteTexture(_shadowTexture);
         _shadowTexture = GL.GenTexture();
         GL.BindTexture(TextureTarget.Texture2D, _shadowTexture);
@@ -393,12 +360,24 @@ public class GpuRaycastingRenderer : IDisposable
         GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, (int)TextureWrapMode.ClampToEdge);
         GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)TextureWrapMode.ClampToEdge);
         GL.FramebufferTexture2D(FramebufferTarget.Framebuffer, FramebufferAttachment.ColorAttachment0, TextureTarget.Texture2D, _shadowTexture, 0);
-        GL.DrawBuffers(1, new DrawBuffersEnum[] { DrawBuffersEnum.ColorAttachment0 });
 
-        // Shadow upsample (full res)
+        if (_shadowPointLightTexture != 0) GL.DeleteTexture(_shadowPointLightTexture);
+        _shadowPointLightTexture = GL.GenTexture();
+        GL.BindTexture(TextureTarget.Texture2D, _shadowPointLightTexture);
+        GL.TexImage2D(TextureTarget.Texture2D, 0, PixelInternalFormat.Rgba16f, _shadowWidth, _shadowHeight, 0, PixelFormat.Rgba, PixelType.Float, IntPtr.Zero);
+        GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Linear);
+        GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMinFilter.Linear);
+        GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, (int)TextureWrapMode.ClampToEdge);
+        GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)TextureWrapMode.ClampToEdge);
+        GL.FramebufferTexture2D(FramebufferTarget.Framebuffer, FramebufferAttachment.ColorAttachment1, TextureTarget.Texture2D, _shadowPointLightTexture, 0);
+
+        GL.DrawBuffers(2, new DrawBuffersEnum[] { DrawBuffersEnum.ColorAttachment0, DrawBuffersEnum.ColorAttachment1 });
+
+        // --- SHADOW UPSAMPLE BUFFERS ---
         if (_shadowFullFbo != 0) GL.DeleteFramebuffer(_shadowFullFbo);
         _shadowFullFbo = GL.GenFramebuffer();
         GL.BindFramebuffer(FramebufferTarget.Framebuffer, _shadowFullFbo);
+        
         if (_shadowFullTexture != 0) GL.DeleteTexture(_shadowFullTexture);
         _shadowFullTexture = GL.GenTexture();
         GL.BindTexture(TextureTarget.Texture2D, _shadowFullTexture);
@@ -408,9 +387,20 @@ public class GpuRaycastingRenderer : IDisposable
         GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, (int)TextureWrapMode.ClampToEdge);
         GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)TextureWrapMode.ClampToEdge);
         GL.FramebufferTexture2D(FramebufferTarget.Framebuffer, FramebufferAttachment.ColorAttachment0, TextureTarget.Texture2D, _shadowFullTexture, 0);
-        GL.DrawBuffers(1, new DrawBuffersEnum[] { DrawBuffersEnum.ColorAttachment0 });
 
-        // _mainColorTexture — composite пишет сюда, TAA читает
+        if (_shadowPointLightFullTexture != 0) GL.DeleteTexture(_shadowPointLightFullTexture);
+        _shadowPointLightFullTexture = GL.GenTexture();
+        GL.BindTexture(TextureTarget.Texture2D, _shadowPointLightFullTexture);
+        GL.TexImage2D(TextureTarget.Texture2D, 0, PixelInternalFormat.Rgba16f, _renderWidth, _renderHeight, 0, PixelFormat.Rgba, PixelType.Float, IntPtr.Zero);
+        GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Linear);
+        GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMinFilter.Linear);
+        GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, (int)TextureWrapMode.ClampToEdge);
+        GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)TextureWrapMode.ClampToEdge);
+        GL.FramebufferTexture2D(FramebufferTarget.Framebuffer, FramebufferAttachment.ColorAttachment1, TextureTarget.Texture2D, _shadowPointLightFullTexture, 0);
+
+        GL.DrawBuffers(2, new DrawBuffersEnum[] { DrawBuffersEnum.ColorAttachment0, DrawBuffersEnum.ColorAttachment1 });
+
+        // --- COMPOSITE & TAA ---
         if (_mainColorTexture != 0) GL.DeleteTexture(_mainColorTexture);
         _mainColorTexture = GL.GenTexture();
         GL.BindTexture(TextureTarget.Texture2D, _mainColorTexture);
@@ -418,14 +408,12 @@ public class GpuRaycastingRenderer : IDisposable
         GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Linear);
         GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMinFilter.Linear);
 
-        // Composite FBO
         if (_compositeFbo != 0) GL.DeleteFramebuffer(_compositeFbo);
         _compositeFbo = GL.GenFramebuffer();
         GL.BindFramebuffer(FramebufferTarget.Framebuffer, _compositeFbo);
         GL.FramebufferTexture2D(FramebufferTarget.Framebuffer, FramebufferAttachment.ColorAttachment0, TextureTarget.Texture2D, _mainColorTexture, 0);
         GL.DrawBuffers(1, new DrawBuffersEnum[] { DrawBuffersEnum.ColorAttachment0 });
 
-        // TAA history
         for (int i = 0; i < 2; i++)
         {
             if (_historyFbo[i] != 0) GL.DeleteFramebuffer(_historyFbo[i]);
@@ -449,10 +437,6 @@ public class GpuRaycastingRenderer : IDisposable
         _resetTaaHistory = true;
         _frameIndex = 0;
     }
-
-    // =========================================================
-    // Render
-    // =========================================================
 
     public void Render(CameraData cam)
     {
@@ -539,10 +523,8 @@ public class GpuRaycastingRenderer : IDisposable
 
         GL.BindVertexArray(_quadVao);
 
-        // === UPDATE POINT LIGHTS (перед рендером) ===
         UpdatePointLights();
 
-        // === GI PROBE UPDATE (перед Beam pass) ===
         if (_giSystem != null && GameSettings.EnableGI)
         {
             GL.BindImageTexture(0, _pageTableTexture, 0, true, 0, TextureAccess.ReadOnly, SizedInternalFormat.R32ui);
@@ -560,29 +542,21 @@ public class GpuRaycastingRenderer : IDisposable
                 cx + r, WorldManager.WorldHeightChunks, cz + r,
                 maxSteps);
 
-            // Restore raycast shader state after compute dispatch
             _shaderSystem.Use();
             shader = _shaderSystem.RaycastShader;
             GL.BindVertexArray(_quadVao);
         }
 
-        // =====================================================
-        // BEAM PASS (¼ res)
-        // =====================================================
         if (GameSettings.BeamOptimization && !_isEditorMode)
         {
             GL.BindFramebuffer(FramebufferTarget.Framebuffer, _beamFbo);
             GL.Viewport(0, 0, _beamWidth, _beamHeight);
-            GL.ClearColor(10000.0f, 0, 0, 1);
-            GL.Clear(ClearBufferMask.ColorBufferBit);
+            GL.ClearBuffer(ClearBuffer.Color, 0, new float[] { 10000.0f, 0.0f, 0.0f, 1.0f });
             shader.SetInt("uIsBeamPass", 1);
             GL.Disable(EnableCap.DepthTest);
             GL.DrawArrays(PrimitiveType.TriangleStrip, 0, 4);
         }
 
-        // =====================================================
-        // MAIN RAYCAST PASS (full res) → G-buffer MRT
-        // =====================================================
         GL.BindFramebuffer(FramebufferTarget.Framebuffer, _mainFbo);
         GL.Viewport(0, 0, _renderWidth, _renderHeight);
         GL.ClearColor(0.0f, 0.0f, 0.0f, 0.0f);
@@ -592,9 +566,6 @@ public class GpuRaycastingRenderer : IDisposable
         GL.Enable(EnableCap.DepthTest);
         GL.DrawArrays(PrimitiveType.TriangleStrip, 0, 4);
 
-        // =====================================================
-        // SHADOW + AO PASS (½ res)
-        // =====================================================
         if (!_isEditorMode)
         {
             var shadowShader = _shaderSystem.ShadowShader;
@@ -638,7 +609,6 @@ public class GpuRaycastingRenderer : IDisposable
                     shadowShader.SetInt("uBoundMaxX", cx + r); shadowShader.SetInt("uBoundMaxY", WorldManager.WorldHeightChunks); shadowShader.SetInt("uBoundMaxZ", cz + r);
                 }
 
-                // G-buffer входы
                 shadowShader.SetTexture("uGColor", _gColorTexture, TextureUnit.Texture10);
                 shadowShader.SetTexture("uGData", _gDataTexture, TextureUnit.Texture11);
 
@@ -653,6 +623,10 @@ public class GpuRaycastingRenderer : IDisposable
                 shadowShader.SetVector3("uGridOrigin", _lastGridOrigin);
                 shadowShader.SetFloat("uGridStep", _gridCellSize);
                 shadowShader.SetInt("uGridSize", OBJ_GRID_SIZE);
+                
+                // Передаем буфер света в ShadowShader!
+                GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, POINT_LIGHT_BINDING, _pointLightSsbo);
+                shadowShader.SetInt("uPointLightCount", _lastPointLightCount);
 
                 GL.DrawArrays(PrimitiveType.TriangleStrip, 0, 4);
             }
@@ -661,13 +635,11 @@ public class GpuRaycastingRenderer : IDisposable
         {
             GL.BindFramebuffer(FramebufferTarget.Framebuffer, _shadowFbo);
             GL.Viewport(0, 0, _shadowWidth, _shadowHeight);
-            GL.ClearColor(1.0f, 1.0f, 0.0f, 0.0f);
-            GL.Clear(ClearBufferMask.ColorBufferBit);
+            // Правильно очищаем оба аттачмента в Editor
+            GL.ClearBuffer(ClearBuffer.Color, 0, new float[] { 1.0f, 1.0f, 0.0f, 0.0f });
+            GL.ClearBuffer(ClearBuffer.Color, 1, new float[] { 0.0f, 0.0f, 0.0f, 0.0f });
         }
 
-        // =====================================================
-        // BILATERAL UPSAMPLE (full res)
-        // =====================================================
         GL.BindFramebuffer(FramebufferTarget.Framebuffer, _shadowFullFbo);
         GL.Viewport(0, 0, _renderWidth, _renderHeight);
         GL.Disable(EnableCap.DepthTest);
@@ -676,12 +648,10 @@ public class GpuRaycastingRenderer : IDisposable
         upsampleShader.Use();
         upsampleShader.SetInt("uShadowDownscale", GameSettings.ShadowDownscale);
         upsampleShader.SetTexture("uShadowHalfRes", _shadowTexture, TextureUnit.Texture0);
-        upsampleShader.SetTexture("uGData", _gDataTexture, TextureUnit.Texture1);
+        upsampleShader.SetTexture("uPointLightHalfRes", _shadowPointLightTexture, TextureUnit.Texture1); // Апсемплим свет!
+        upsampleShader.SetTexture("uGData", _gDataTexture, TextureUnit.Texture2);
         GL.DrawArrays(PrimitiveType.TriangleStrip, 0, 4);
 
-        // =====================================================
-        // COMPOSITE PASS (full res) → _mainColorTexture
-        // =====================================================
         GL.BindFramebuffer(FramebufferTarget.Framebuffer, _compositeFbo);
         GL.Viewport(0, 0, _renderWidth, _renderHeight);
         GL.Disable(EnableCap.DepthTest);
@@ -695,28 +665,19 @@ public class GpuRaycastingRenderer : IDisposable
         compositeShader.SetVector3("uMoonDir", moonDir);
         compositeShader.SetFloat("uTime", _totalTime);
         compositeShader.SetFloat("uRenderDistance", viewRange);
+        
         compositeShader.SetTexture("uGColor", _gColorTexture, TextureUnit.Texture0);
         compositeShader.SetTexture("uGData", _gDataTexture, TextureUnit.Texture1);
         compositeShader.SetTexture("uShadowFull", _shadowFullTexture, TextureUnit.Texture2);
+        compositeShader.SetTexture("uPointLightFull", _shadowPointLightFullTexture, TextureUnit.Texture3); // Читаем апсемпленный свет
 
-        // GI + Point Lights uniforms
         if (_giSystem != null && GameSettings.EnableGI)
         {
-            _giSystem.SetSamplingUniforms(compositeShader); // сам биндит всё
-
-            GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, POINT_LIGHT_BINDING, _pointLightSsbo);
-            compositeShader.SetInt("uPointLightCount", _lastPointLightCount);
-        }
-        else
-        {
-            compositeShader.SetInt("uPointLightCount", 0); 
+            _giSystem.SetSamplingUniforms(compositeShader); 
         }
 
         GL.DrawArrays(PrimitiveType.TriangleStrip, 0, 4);
 
-        // =====================================================
-        // TAA PASS
-        // =====================================================
         if (useTaa && !_resetTaaHistory)
         {
             int readIndex = 1 - _historyWriteIndex;
@@ -744,7 +705,6 @@ public class GpuRaycastingRenderer : IDisposable
         }
         else
         {
-            // Без TAA — composite результат копируем в оба history буфера
             GL.BindFramebuffer(FramebufferTarget.ReadFramebuffer, _compositeFbo);
             GL.BindFramebuffer(FramebufferTarget.DrawFramebuffer, _historyFbo[_historyWriteIndex]);
             GL.BlitFramebuffer(0, 0, _renderWidth, _renderHeight, 0, 0, _renderWidth, _renderHeight,
@@ -756,13 +716,11 @@ public class GpuRaycastingRenderer : IDisposable
             if (GameSettings.EnableTAA) _resetTaaHistory = false;
         }
 
-        // Blit цвета на экран (из TAA history или composite)
         GL.BindFramebuffer(FramebufferTarget.DrawFramebuffer, 0);
         GL.Viewport(0, 0, _windowWidth, _windowHeight);
         GL.BlitFramebuffer(0, 0, _renderWidth, _renderHeight, 0, 0, _windowWidth, _windowHeight,
             ClearBufferMask.ColorBufferBit, BlitFramebufferFilter.Nearest);
 
-        // Depth из _mainFbo (для ImGui, LineRenderer)
         GL.BindFramebuffer(FramebufferTarget.ReadFramebuffer, _mainFbo);
         GL.BlitFramebuffer(0, 0, _renderWidth, _renderHeight, 0, 0, _windowWidth, _windowHeight,
             ClearBufferMask.DepthBufferBit, BlitFramebufferFilter.Nearest);
@@ -777,10 +735,6 @@ public class GpuRaycastingRenderer : IDisposable
         _historyWriteIndex = 1 - _historyWriteIndex;
     }
 
-    // =========================================================
-    // UpdatePointLights
-    // =========================================================
-
     private void UpdatePointLights()
     {
         if (_pointLightSsbo == 0) return;
@@ -793,9 +747,10 @@ public class GpuRaycastingRenderer : IDisposable
         {
             if (count >= 32) break;
             if (!MaterialRegistry.IsEmissive(vo.Material)) continue;
-            if (vo.VoxelCoordinates.Count == 0) continue; // fully destroyed — no light
+            if (vo.VoxelCoordinates.Count == 0) continue; 
 
-            var pos = vo.GetInterpolatedModelMatrix(alpha).ExtractTranslation();
+            // ФИКС ЦЕНТРА МАСС: Используем честный физический центр в пространстве, а не локальный угол сетки
+            var pos = Vector3.Lerp(vo.PrevPosition, vo.Position, alpha);
             var (r, g, b) = MaterialRegistry.GetColor(vo.Material);
 
             _pointLightCache[count++] = new GpuPointLight
@@ -814,10 +769,6 @@ public class GpuRaycastingRenderer : IDisposable
                 count * Marshal.SizeOf<GpuPointLight>(), _pointLightCache);
         }
     }
-
-    // =========================================================
-    // Chunk management (оригинал без изменений)
-    // =========================================================
 
     public void NotifyChunkLoaded(Chunk chunk)
     {
@@ -944,10 +895,6 @@ public class GpuRaycastingRenderer : IDisposable
         }
     }
 
-    // =========================================================
-    // Dynamic objects (оригинал без изменений)
-    // =========================================================
-
     public void UpdateDynamicObjectsAndGrid(Vector3 gridCenter)
         => UpdateDynamicObjectsAndGridInternal(gridCenter);
 
@@ -1064,10 +1011,6 @@ public class GpuRaycastingRenderer : IDisposable
         gpuObj.Padding = 0u;
     }
 
-    // =========================================================
-    // VRAM управление (оригинал без изменений)
-    // =========================================================
-
     private void ResetAllocationLogic()
     {
         _freeSlots.Clear();
@@ -1141,10 +1084,6 @@ public class GpuRaycastingRenderer : IDisposable
         }
     }
 
-    // =========================================================
-    // Вспомогательные (оригинал без изменений)
-    // =========================================================
-
     private void CreateAuxBuffers()
     {
         if (_gridHeadTexture == 0) { _gridHeadTexture = GL.GenTexture(); GL.BindTexture(TextureTarget.Texture3D, _gridHeadTexture); GL.TexImage3D(TextureTarget.Texture3D, 0, PixelInternalFormat.R32i, OBJ_GRID_SIZE, OBJ_GRID_SIZE, OBJ_GRID_SIZE, 0, PixelFormat.RedInteger, PixelType.Int, IntPtr.Zero); GL.TexParameter(TextureTarget.Texture3D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Nearest); GL.TexParameter(TextureTarget.Texture3D, TextureParameterName.TextureMagFilter, (int)TextureMinFilter.Nearest); }
@@ -1194,13 +1133,17 @@ public class GpuRaycastingRenderer : IDisposable
         if (_pageTableTexture != 0) { GL.DeleteTexture(_pageTableTexture); _pageTableTexture = 0; }
         if (_gColorTexture != 0) { GL.DeleteTexture(_gColorTexture); _gColorTexture = 0; }
         if (_gDataTexture != 0) { GL.DeleteTexture(_gDataTexture); _gDataTexture = 0; }
+        
         if (_shadowFbo != 0) { GL.DeleteFramebuffer(_shadowFbo); _shadowFbo = 0; }
         if (_shadowTexture != 0) { GL.DeleteTexture(_shadowTexture); _shadowTexture = 0; }
+        if (_shadowPointLightTexture != 0) { GL.DeleteTexture(_shadowPointLightTexture); _shadowPointLightTexture = 0; }
+        
         if (_shadowFullFbo != 0) { GL.DeleteFramebuffer(_shadowFullFbo); _shadowFullFbo = 0; }
         if (_shadowFullTexture != 0) { GL.DeleteTexture(_shadowFullTexture); _shadowFullTexture = 0; }
+        if (_shadowPointLightFullTexture != 0) { GL.DeleteTexture(_shadowPointLightFullTexture); _shadowPointLightFullTexture = 0; }
+        
         if (_compositeFbo != 0) { GL.DeleteFramebuffer(_compositeFbo); _compositeFbo = 0; }
         if (_mainColorTexture != 0) { GL.DeleteTexture(_mainColorTexture); _mainColorTexture = 0; }
-        // GI cleanup
         _giSystem?.Dispose();
         _giSystem = null;
         if (_pointLightSsbo != 0) { GL.DeleteBuffer(_pointLightSsbo); _pointLightSsbo = 0; }

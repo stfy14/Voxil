@@ -1,11 +1,10 @@
-// --- Engine/Graphics/GLSL/composite.frag ---
 #version 450 core
 
 layout(location = 0) out vec4 FragColor;
-
 in vec2 uv;
 
 #include "include/common.glsl"
+#include "include/tracing.glsl"
 #include "include/atmosphere.glsl"
 #include "include/postprocess.glsl"
 
@@ -16,6 +15,7 @@ in vec2 uv;
 uniform sampler2D uGColor;
 uniform sampler2D uGData;
 uniform sampler2D uShadowFull;
+uniform sampler2D uPointLightFull; // Апсемпленный свет!
 
 void main() {
     ivec2 fullCoord = ivec2(gl_FragCoord.xy);
@@ -24,8 +24,12 @@ void main() {
     float directFactor = texelFetch(uGData, fullCoord, 0).a;
     vec3  normal       = texelFetch(uGData, fullCoord, 0).rgb;
     vec2  shadowAoVal  = texelFetch(uShadowFull, fullCoord, 0).rg;
+    vec3  pointLightVal = texelFetch(uPointLightFull, fullCoord, 0).rgb;
 
     vec3  albedo = colorData.rgb;
+    bool isEmissive = (albedo.r < 0.0 || albedo.g < 0.0 || albedo.b < 0.0);
+    albedo = abs(albedo);
+
     float tFinal = colorData.a;
     float shadow = shadowAoVal.r;
     float ao     = shadowAoVal.g;
@@ -59,38 +63,29 @@ void main() {
         lightColor = vec3(0.0);
     }
 
-    // --- ПРЯМОЕ ОСВЕЩЕНИЕ ---
-    // shadow уже учитывает геометрическое затенение (directFactor≤0 → shadow=0 в shadow.frag)
     vec3 direct = lightColor * directFactor * shadow;
-
-    // --- AMBIENT / INDIRECT ---
     vec3 indirect = vec3(0.0);
 
     #ifdef ENABLE_GI
-        // AO применяем с ограниченным минимумом чтобы не убить GI в углах.
-    // Минимум AO = 0.15 — даже в глубоких углах будет хоть какой-то свет.
     float aoForGI = max(ao, 0.15);
     vec3 giIrradiance = SampleGIProbes(hitPos, normal) * aoForGI;
     indirect = albedo * giIrradiance;
     #else
-        float dayAmbient     = 0.35;
+    float dayAmbient     = 0.35;
     float nightAmbient   = 0.05;
-    float currentAmbient = mix(nightAmbient, dayAmbient,
-                               clamp(uSunDir.y * 3.0 + 0.2, 0.0, 1.0));
+    float currentAmbient = mix(nightAmbient, dayAmbient, clamp(uSunDir.y * 3.0 + 0.2, 0.0, 1.0));
     indirect = albedo * vec3(0.6, 0.7, 0.9) * currentAmbient * max(ao, 0.15);
     #endif
 
-    // --- POINT LIGHTS ---
-    #ifdef ENABLE_GI
-        vec3 pointLightContrib = vec3(0.0);
-    if (uPointLightCount > 0) {
-        pointLightContrib = albedo * EvaluatePointLights(hitPos, normal);
-    }
-    #else
-        vec3 pointLightContrib = vec3(0.0);
-    #endif
+    // Мы уже посчитали свет с мягкими тенями в shadow.frag, тут просто применяем!
+    vec3 pointLightContrib = albedo * pointLightVal;
 
     vec3 finalColor = albedo * direct + indirect + pointLightContrib;
+
+    if (isEmissive) {
+        finalColor += albedo * 25.0;
+    }
+
     finalColor = ApplyFog(finalColor, rayDir, uSunDir, tFinal, uRenderDistance);
 
     FragColor = vec4(ApplyPostProcess(finalColor), 1.0);

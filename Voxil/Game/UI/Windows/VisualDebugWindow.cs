@@ -1,5 +1,4 @@
 ﻿// --- Game/UI/Windows/VisualDebugWindow.cs ---
-// Обновлён для отображения 3 LOD уровней зондов
 using ImGuiNET;
 
 public class VisualDebugWindow : IUIWindow
@@ -12,18 +11,16 @@ public class VisualDebugWindow : IUIWindow
     public void Draw()
     {
         if (!IsVisible) return;
-        ImGui.SetNextWindowSize(new System.Numerics.Vector2(360, 0), ImGuiCond.FirstUseEver);
+        ImGui.SetNextWindowSize(new System.Numerics.Vector2(380, 0), ImGuiCond.FirstUseEver); // Чуть шире
 
         if (ImGui.Begin("Visual Debug", ref _isVisible))
         {
-            // --- Heatmap ---
             bool heatmap = GameSettings.ShowDebugHeatmap;
             if (ImGui.Checkbox("Engine Step Heatmap", ref heatmap))
                 GameSettings.ShowDebugHeatmap = heatmap;
 
             ImGui.Spacing(); ImGui.Separator();
 
-            // --- Explosion ---
             ImGui.Text("Explosion Debug:");
             bool expRays = GameSettings.ShowExplosionRays;
             if (ImGui.Checkbox("Show Rays", ref expRays)) GameSettings.ShowExplosionRays = expRays;
@@ -33,7 +30,6 @@ public class VisualDebugWindow : IUIWindow
 
             ImGui.Spacing(); ImGui.Separator();
 
-            // --- Collision Wireframe ---
             ImGui.Text("Collision Wireframe:");
             bool statCol = GameSettings.ShowStaticCollisions;
             if (ImGui.Checkbox("Static Geometry", ref statCol)) GameSettings.ShowStaticCollisions = statCol;
@@ -42,8 +38,6 @@ public class VisualDebugWindow : IUIWindow
 
             ImGui.Spacing(); ImGui.Separator();
 
-            // --- GI Debug Visualization ---
-            ImGui.Spacing(); ImGui.Separator();
             ImGui.TextColored(new System.Numerics.Vector4(0.97f, 0.82f, 0.2f, 1), "GI Probe Debug:");
             if (GameSettings.EnableGI)
             {
@@ -53,29 +47,25 @@ public class VisualDebugWindow : IUIWindow
 
                 if (showProbes)
                 {
-                    ImGui.SameLine();
-                    ImGui.TextDisabled("(только живые, цвет = GI)");
-
+                    ImGui.SameLine(); ImGui.TextDisabled("(цвет = GI, серый = мертвый)");
                     ImGui.Spacing();
 
-                    // Выбор LOD для отображения
                     string[] lodNames = { "L0 — Near (1м)", "L1 — Mid (4м)", "L2 — Far (16м)", "Все уровни" };
                     int lodIdx = GameSettings.GIDebugLOD == -1 ? 3 : GameSettings.GIDebugLOD;
                     ImGui.SetNextItemWidth(200);
                     if (ImGui.Combo("LOD уровень", ref lodIdx, lodNames, lodNames.Length))
                         GameSettings.GIDebugLOD = lodIdx == 3 ? -1 : lodIdx;
-
                     ImGui.Spacing();
 
-                    // Цветовая легенда
+                    // ОБНОВЛЕННЫЕ ДАННЫЕ
                     ImGui.TextColored(new System.Numerics.Vector4(0.9f, 0.8f, 0.2f, 1f),  "■");
-                    ImGui.SameLine(); ImGui.TextDisabled($"L0  spacing={GIProbeSystem.PROBE_SPACING_L0}м  rays={GIProbeSystem.RAYS_PER_PROBE_L0}  {GIProbeSystem.PROBES_PER_FRAME_L0}/frame");
+                    ImGui.SameLine(); ImGui.TextDisabled($"L0: {GIProbeSystem.RAYS_PER_PROBE_L0} rays, {GIProbeSystem.PROBES_PER_FRAME_L0}/frame");
 
                     ImGui.TextColored(new System.Numerics.Vector4(0.2f, 0.8f, 0.9f, 1f), "■");
-                    ImGui.SameLine(); ImGui.TextDisabled($"L1  spacing={GIProbeSystem.PROBE_SPACING_L1}м  rays={GIProbeSystem.RAYS_PER_PROBE_L1}  {GIProbeSystem.PROBES_PER_FRAME_L1}/frame");
+                    ImGui.SameLine(); ImGui.TextDisabled($"L1: {GIProbeSystem.RAYS_PER_PROBE_L1} rays, {GIProbeSystem.PROBES_PER_FRAME_L1}/frame");
 
                     ImGui.TextColored(new System.Numerics.Vector4(0.8f, 0.2f, 0.9f, 1f), "■");
-                    ImGui.SameLine(); ImGui.TextDisabled($"L2  spacing={GIProbeSystem.PROBE_SPACING_L2}м  rays={GIProbeSystem.RAYS_PER_PROBE_L2}  {GIProbeSystem.PROBES_PER_FRAME_L2}/frame");
+                    ImGui.SameLine(); ImGui.TextDisabled($"L2: {GIProbeSystem.RAYS_PER_PROBE_L2} rays, {GIProbeSystem.PROBES_PER_FRAME_L2}/frame");
                 }
 
                 ImGui.Spacing();

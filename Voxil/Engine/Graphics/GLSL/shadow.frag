@@ -1,7 +1,7 @@
-// --- START OF FILE shadow.frag ---
-
 #version 450 core
+
 layout(location = 0) out vec2 outShadowAo;
+layout(location = 1) out vec4 outPointLights; // Второе окно вывода для цветного света
 
 in vec2 uv;
 
@@ -25,10 +25,10 @@ void main() {
 
     if (tFinal > uRenderDistance + 1.0) {
         outShadowAo = vec2(1.0, 1.0);
+        outPointLights = vec4(0.0);
         return;
     }
 
-    // Идеально точный UV для текущего масштаба теней
     vec2 fullTexSize = vec2(textureSize(uGColor, 0));
     vec2 exactUV = (vec2(fullCoord) + 0.5) / fullTexSize;
 
@@ -56,13 +56,8 @@ void main() {
 
     // === SHADOW ===
     float shadow = 1.0;
-
-    // ФИКС: если поверхность смотрит ОТ солнца — она геометрически в тени.
-    // Не трейсим теневой луч (дорого), просто ставим shadow=0.
-    // Это убирает артефакты на задних гранях.
     if (hasLight) {
         if (directFactor <= 0.001) {
-            // Поверхность не освещена геометрически — тень 0
             shadow = 0.0;
         } else {
             shadow = CalculateShadow(hitPos, normal, activeLightDir);
@@ -76,4 +71,11 @@ void main() {
     #endif
 
     outShadowAo = vec2(shadow, ao);
+
+    // === POINT LIGHTS ===
+    vec3 pointLightColor = vec3(0.0);
+    if (uPointLightCount > 0) {
+        pointLightColor = EvaluatePointLights(hitPos, normal);
+    }
+    outPointLights = vec4(pointLightColor, 1.0);
 }

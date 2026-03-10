@@ -1,24 +1,23 @@
-// --- START OF FILE shadow_upsample.frag ---
 #version 450 core
 
 layout(location = 0) out vec2 outShadowAo;
+layout(location = 1) out vec4 outPointLights; // Сохраняем размытый свет сюда
 
 in vec2 uv;
 
-uniform sampler2D uShadowHalfRes; // Теперь это может быть FullRes, HalfRes или QuarterRes
+uniform sampler2D uShadowHalfRes;
+uniform sampler2D uPointLightHalfRes;
 uniform sampler2D uGData;
 
-// НОВЫЙ ПАРАМЕТР: 1 (Full Res), 2 (Half Res), 4 (Quarter Res)
-uniform int uShadowDownscale; 
+uniform int uShadowDownscale;
 
 void main() {
     ivec2 fullCoord = ivec2(gl_FragCoord.xy);
     ivec2 shadowCoord = fullCoord / uShadowDownscale;
-    
-    // Если разрешение 100% (Full Res), нам не нужен умный апсэмплинг! 
-    // Просто отдаем точный пиксель, экономя FPS на блюре.
+
     if (uShadowDownscale <= 1) {
         outShadowAo = texelFetch(uShadowHalfRes, shadowCoord, 0).rg;
+        outPointLights = texelFetch(uPointLightHalfRes, shadowCoord, 0);
         return;
     }
 
@@ -30,18 +29,18 @@ void main() {
 
     if (centerLen < 0.01) {
         outShadowAo = texelFetch(uShadowHalfRes, shadowCoord, 0).rg;
+        outPointLights = texelFetch(uPointLightHalfRes, shadowCoord, 0);
         return;
     }
     centerNormal = normalize(centerNormal);
 
-    vec2  result      = vec2(0.0);
+    vec2  resultShadow = vec2(0.0);
+    vec3  resultPointLight = vec3(0.0);
     float totalWeight = 0.0;
 
     for (int dx = -1; dx <= 1; dx++) {
         for (int dy = -1; dy <= 1; dy++) {
             ivec2 sCoord = clamp(shadowCoord + ivec2(dx, dy), ivec2(0), shadowSize - ivec2(1));
-            
-            // Находим пиксель G-буфера, который соответствует этому уменьшенному пикселю
             ivec2 fCoord = clamp(sCoord * uShadowDownscale, ivec2(0), fullSize - ivec2(1));
 
             vec3  sampleNormal = texelFetch(uGData, fCoord, 0).rgb;
@@ -52,13 +51,17 @@ void main() {
             float normalSim = max(0.0, dot(centerNormal, normalize(sampleNormal)));
             float weight    = pow(normalSim, 16.0);
 
-            result      += texelFetch(uShadowHalfRes, sCoord, 0).rg * weight;
+            resultShadow += texelFetch(uShadowHalfRes, sCoord, 0).rg * weight;
+            resultPointLight += texelFetch(uPointLightHalfRes, sCoord, 0).rgb * weight;
             totalWeight += weight;
         }
     }
 
-    if (totalWeight > 1e-4)
-        outShadowAo = result / totalWeight;
-    else
-        outShadowAo = texelFetch(uShadowHalfRes, shadowCoord, 0).rg; // fallback
+    if (totalWeight > 1e-4) {
+        outShadowAo = resultShadow / totalWeight;
+        outPointLights = vec4(resultPointLight / totalWeight, 1.0);
+    } else {
+        outShadowAo = texelFetch(uShadowHalfRes, shadowCoord, 0).rg;
+        outPointLights = texelFetch(uPointLightHalfRes, shadowCoord, 0);
+    }
 }
