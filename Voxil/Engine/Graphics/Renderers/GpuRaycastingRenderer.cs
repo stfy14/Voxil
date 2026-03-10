@@ -702,8 +702,7 @@ public class GpuRaycastingRenderer : IDisposable
         // GI + Point Lights uniforms
         if (_giSystem != null && GameSettings.EnableGI)
         {
-            _giSystem.SetSamplingUniforms(compositeShader);
-            _giSystem.Bind(); // Это привяжет Image для записи, но нам для чтения нужны сэмплеры!
+            _giSystem.SetSamplingUniforms(compositeShader); // сам биндит всё
 
             GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, POINT_LIGHT_BINDING, _pointLightSsbo);
             compositeShader.SetInt("uPointLightCount", _lastPointLightCount);

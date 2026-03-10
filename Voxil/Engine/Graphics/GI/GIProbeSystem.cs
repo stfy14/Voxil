@@ -1,5 +1,5 @@
 ﻿// --- Engine/Graphics/GI/GIProbeSystem.cs ---
-// 3-уровневая LOD система зондов для бесконечной дальности GI
+// DDGI с октаэдрическими атласами irradiance + depth (Chebyshev visibility)
 using OpenTK.Graphics.OpenGL4;
 using OpenTK.Mathematics;
 using System;
@@ -8,7 +8,6 @@ public class GIProbeSystem : IDisposable
 {
     // =========================================================
     // LOD 0 — ближняя сетка: шаг 1м, покрытие ~16м
-    // Высокое качество, обновляется быстро
     // =========================================================
     public const float PROBE_SPACING_L0 = 1.0f;
     public const int   PROBE_X = 32, PROBE_Y = 16, PROBE_Z = 32;
@@ -16,44 +15,64 @@ public class GIProbeSystem : IDisposable
 
     // =========================================================
     // LOD 1 — средняя сетка: шаг 4м, покрытие ~64м
-    // Среднее качество
     // =========================================================
     public const float PROBE_SPACING_L1 = 4.0f;
-    // Та же сетка 32×16×32, но с другим шагом
 
     // =========================================================
     // LOD 2 — дальняя сетка: шаг 16м, покрытие ~256м
-    // Грубое освещение, но покрывает любую дальность прорисовки
     // =========================================================
     public const float PROBE_SPACING_L2 = 16.0f;
 
-    // Лучи на зонд по уровням (L0 = полное качество, L2 = минимальное)
+    // Лучи на зонд по уровням
     public const int RAYS_PER_PROBE_L0 = 64;
     public const int RAYS_PER_PROBE_L1 = 32;
     public const int RAYS_PER_PROBE_L2 = 16;
 
-    // Зондов за кадр: L0 обновляется быстрее, L2 — реже (они далеко)
-    public const int PROBES_PER_FRAME_L0 = 1024; // полный цикл за 16 кадров
-    public const int PROBES_PER_FRAME_L1 = 512;  // полный цикл за 32 кадра
-    public const int PROBES_PER_FRAME_L2 = 256;  // полный цикл за 64 кадра
+    // Зондов за кадр
+    public const int PROBES_PER_FRAME_L0 = 1024;
+    public const int PROBES_PER_FRAME_L1 = 512;
+    public const int PROBES_PER_FRAME_L2 = 256;
 
-    // Для совместимости (используется в UI)
-    public const float PROBE_SPACING   = PROBE_SPACING_L0;
-    public const int   RAYS_PER_PROBE  = RAYS_PER_PROBE_L0;
+    // Для совместимости с UI
+    public const float PROBE_SPACING    = PROBE_SPACING_L0;
+    public const int   RAYS_PER_PROBE   = RAYS_PER_PROBE_L0;
     public const int   PROBES_PER_FRAME = PROBES_PER_FRAME_L0;
 
-    // ── SSBOs ──────────────────────────────────────────────
-    // L0: binding 16, 17
-    public int ProbePositionSsbo    { get; private set; }
-    public int ProbeIrradianceSsbo  { get; private set; }
-    // L1: binding 19, 20
-    public int ProbePositionSsboL1   { get; private set; }
-    public int ProbeIrradianceSsboL1 { get; private set; }
-    // L2: binding 21, 22
-    public int ProbePositionSsboL2   { get; private set; }
-    public int ProbeIrradianceSsboL2 { get; private set; }
+    // =========================================================
+    // Размеры тайлов октаэдрического атласа
+    // =========================================================
+    public const int IRR_TILE   = 8;   // пикселей на зонд (irradiance)
+    public const int DEPTH_TILE = 16;  // пикселей на зонд (depth)
+    private const int IRR_PAD   = IRR_TILE   + 2; // 10 (1px border с каждой стороны)
+    private const int DEPTH_PAD = DEPTH_TILE + 2; // 18
 
-    // ── Состояние сеток ───────────────────────────────────
+    // Раскладка тайлов в атласе:
+    //   col = wx (0..PROBE_X-1)
+    //   row = wy + wz * PROBE_Y (0..PROBE_Y*PROBE_Z-1)
+    public static int IrrAtlasW   => PROBE_X * IRR_PAD;             // 320
+    public static int IrrAtlasH   => PROBE_Y * PROBE_Z * IRR_PAD;   // 5120
+    public static int DepthAtlasW => PROBE_X * DEPTH_PAD;           // 576
+    public static int DepthAtlasH => PROBE_Y * PROBE_Z * DEPTH_PAD; // 9216
+
+    // =========================================================
+    // Position SSBOs (живость зондов + debug визуализация)
+    // Структура: ProbeData = vec4 pos (w=alive) + vec4 colorAndState
+    // =========================================================
+    public int ProbePositionSsbo   { get; private set; }
+    public int ProbePositionSsboL1 { get; private set; }
+    public int ProbePositionSsboL2 { get; private set; }
+
+    // =========================================================
+    // Октаэдрические атласы (заменяют SH irradiance SSBO)
+    // =========================================================
+    public int IrrTexL0   { get; private set; }
+    public int DepthTexL0 { get; private set; }
+    public int IrrTexL1   { get; private set; }
+    public int DepthTexL1 { get; private set; }
+    public int IrrTexL2   { get; private set; }
+    public int DepthTexL2 { get; private set; }
+
+    // ── Состояние сеток ──────────────────────────────────────
     private int _gridBaseX,    _gridBaseY,    _gridBaseZ;
     private int _gridBaseX_L1, _gridBaseY_L1, _gridBaseZ_L1;
     private int _gridBaseX_L2, _gridBaseY_L2, _gridBaseZ_L2;
@@ -67,22 +86,22 @@ public class GIProbeSystem : IDisposable
 
     public bool IsValid => _updateShader != null;
 
+    // =========================================================
     public GIProbeSystem(Shader probeUpdateShader)
     {
         _updateShader = probeUpdateShader;
         InitBuffers();
+        InitTextures();
+        // Первичный бинд чтобы рендерер мог сразу использовать
+        Bind();
     }
 
+    // ─────────────────────────────────────────────────────────
     private void InitBuffers()
     {
-        ProbePositionSsbo    = CreatePositionBuffer();
-        ProbeIrradianceSsbo  = CreateIrradianceBuffer();
-        ProbePositionSsboL1  = CreatePositionBuffer();
-        ProbeIrradianceSsboL1 = CreateIrradianceBuffer();
-        ProbePositionSsboL2  = CreatePositionBuffer();
-        ProbeIrradianceSsboL2 = CreateIrradianceBuffer();
-
-        Bind();
+        ProbePositionSsbo   = CreatePositionBuffer();
+        ProbePositionSsboL1 = CreatePositionBuffer();
+        ProbePositionSsboL2 = CreatePositionBuffer();
     }
 
     private static int CreatePositionBuffer()
@@ -91,19 +110,46 @@ public class GIProbeSystem : IDisposable
         Array.Fill(empty, -9999.0f);
         int ssbo = GL.GenBuffer();
         GL.BindBuffer(BufferTarget.ShaderStorageBuffer, ssbo);
-        GL.BufferData(BufferTarget.ShaderStorageBuffer, empty.Length * sizeof(float), empty, BufferUsageHint.DynamicDraw);
+        GL.BufferData(BufferTarget.ShaderStorageBuffer,
+            empty.Length * sizeof(float), empty, BufferUsageHint.DynamicDraw);
         return ssbo;
     }
 
-    private static int CreateIrradianceBuffer()
+    // ─────────────────────────────────────────────────────────
+    private void InitTextures()
     {
-        float[] empty = new float[PROBE_COUNT * 12];
-        int ssbo = GL.GenBuffer();
-        GL.BindBuffer(BufferTarget.ShaderStorageBuffer, ssbo);
-        GL.BufferData(BufferTarget.ShaderStorageBuffer, empty.Length * sizeof(float), empty, BufferUsageHint.DynamicDraw);
-        return ssbo;
+        // R11G11B10F — HDR irradiance, 4 байта/пиксель, без альфы
+        IrrTexL0 = CreateAtlasTexture(IrrAtlasW, IrrAtlasH, SizedInternalFormat.R11fG11fB10f);
+        IrrTexL1 = CreateAtlasTexture(IrrAtlasW, IrrAtlasH, SizedInternalFormat.R11fG11fB10f);
+        IrrTexL2 = CreateAtlasTexture(IrrAtlasW, IrrAtlasH, SizedInternalFormat.R11fG11fB10f);
+
+        // RG16F — mean depth + mean depth² для Chebyshev visibility test
+        DepthTexL0 = CreateAtlasTexture(DepthAtlasW, DepthAtlasH, SizedInternalFormat.Rg16f);
+        DepthTexL1 = CreateAtlasTexture(DepthAtlasW, DepthAtlasH, SizedInternalFormat.Rg16f);
+        DepthTexL2 = CreateAtlasTexture(DepthAtlasW, DepthAtlasH, SizedInternalFormat.Rg16f);
     }
 
+    private static int CreateAtlasTexture(int width, int height, SizedInternalFormat fmt)
+    {
+        int tex = GL.GenTexture();
+        GL.BindTexture(TextureTarget.Texture2D, tex);
+        GL.TexImage2D(TextureTarget.Texture2D, 0, (PixelInternalFormat)fmt,
+            width, height, 0, PixelFormat.Rgba, PixelType.Float, IntPtr.Zero);
+        // Linear — для плавной интерполяции между тайлами одного зонда
+        GL.TexParameter(TextureTarget.Texture2D,
+            TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Linear);
+        GL.TexParameter(TextureTarget.Texture2D,
+            TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Linear);
+        // ClampToEdge — border не "вытекает" в соседний зонд
+        GL.TexParameter(TextureTarget.Texture2D,
+            TextureParameterName.TextureWrapS, (int)TextureWrapMode.ClampToEdge);
+        GL.TexParameter(TextureTarget.Texture2D,
+            TextureParameterName.TextureWrapT, (int)TextureWrapMode.ClampToEdge);
+        return tex;
+    }
+
+    // ─────────────────────────────────────────────────────────
+    // Update — вызывается каждый кадр из GpuRaycastingRenderer
     // ─────────────────────────────────────────────────────────
     public void Update(Vector3 cameraPosition, Vector3 sunDir, float time,
                        int boundMinX, int boundMinY, int boundMinZ,
@@ -114,54 +160,42 @@ public class GIProbeSystem : IDisposable
 
         // ── L0 ──────────────────────────────────────────────
         ComputeGridBase(cameraPosition, PROBE_SPACING_L0,
-                        out _gridBaseX, out _gridBaseY, out _gridBaseZ);
-
+            out _gridBaseX, out _gridBaseY, out _gridBaseZ);
         DispatchLevel(
-            posSSBO: ProbePositionSsbo, irrSSBO: ProbeIrradianceSsbo,
-            baseX: _gridBaseX, baseY: _gridBaseY, baseZ: _gridBaseZ,
-            spacing: PROBE_SPACING_L0,
-            raysPerProbe: RAYS_PER_PROBE_L0,
-            probesThisFrame: PROBES_PER_FRAME_L0,
+            ProbePositionSsbo, IrrTexL0, DepthTexL0,
+            _gridBaseX, _gridBaseY, _gridBaseZ,
+            PROBE_SPACING_L0, RAYS_PER_PROBE_L0, PROBES_PER_FRAME_L0,
             ref _updateCursorL0,
             sunDir, time,
             boundMinX, boundMinY, boundMinZ,
             boundMaxX, boundMaxY, boundMaxZ,
-            maxRaySteps / 2
-        );
+            maxRaySteps / 2);
 
         // ── L1 ──────────────────────────────────────────────
         ComputeGridBase(cameraPosition, PROBE_SPACING_L1,
-                        out _gridBaseX_L1, out _gridBaseY_L1, out _gridBaseZ_L1);
-
+            out _gridBaseX_L1, out _gridBaseY_L1, out _gridBaseZ_L1);
         DispatchLevel(
-            posSSBO: ProbePositionSsboL1, irrSSBO: ProbeIrradianceSsboL1,
-            baseX: _gridBaseX_L1, baseY: _gridBaseY_L1, baseZ: _gridBaseZ_L1,
-            spacing: PROBE_SPACING_L1,
-            raysPerProbe: RAYS_PER_PROBE_L1,
-            probesThisFrame: PROBES_PER_FRAME_L1,
+            ProbePositionSsboL1, IrrTexL1, DepthTexL1,
+            _gridBaseX_L1, _gridBaseY_L1, _gridBaseZ_L1,
+            PROBE_SPACING_L1, RAYS_PER_PROBE_L1, PROBES_PER_FRAME_L1,
             ref _updateCursorL1,
             sunDir, time,
             boundMinX, boundMinY, boundMinZ,
             boundMaxX, boundMaxY, boundMaxZ,
-            maxRaySteps / 4
-        );
+            maxRaySteps / 4);
 
         // ── L2 ──────────────────────────────────────────────
         ComputeGridBase(cameraPosition, PROBE_SPACING_L2,
-                        out _gridBaseX_L2, out _gridBaseY_L2, out _gridBaseZ_L2);
-
+            out _gridBaseX_L2, out _gridBaseY_L2, out _gridBaseZ_L2);
         DispatchLevel(
-            posSSBO: ProbePositionSsboL2, irrSSBO: ProbeIrradianceSsboL2,
-            baseX: _gridBaseX_L2, baseY: _gridBaseY_L2, baseZ: _gridBaseZ_L2,
-            spacing: PROBE_SPACING_L2,
-            raysPerProbe: RAYS_PER_PROBE_L2,
-            probesThisFrame: PROBES_PER_FRAME_L2,
+            ProbePositionSsboL2, IrrTexL2, DepthTexL2,
+            _gridBaseX_L2, _gridBaseY_L2, _gridBaseZ_L2,
+            PROBE_SPACING_L2, RAYS_PER_PROBE_L2, PROBES_PER_FRAME_L2,
             ref _updateCursorL2,
             sunDir, time,
             boundMinX, boundMinY, boundMinZ,
             boundMaxX, boundMaxY, boundMaxZ,
-            maxRaySteps / 8
-        );
+            maxRaySteps / 8);
     }
 
     private static void ComputeGridBase(Vector3 camPos, float spacing,
@@ -173,7 +207,7 @@ public class GIProbeSystem : IDisposable
     }
 
     private void DispatchLevel(
-        int posSSBO, int irrSSBO,
+        int posSSBO, int irrTex, int depthTex,
         int baseX, int baseY, int baseZ,
         float spacing, int raysPerProbe, int probesThisFrame,
         ref int cursor,
@@ -182,14 +216,19 @@ public class GIProbeSystem : IDisposable
         int bMaxX, int bMaxY, int bMaxZ,
         int maxRaySteps)
     {
-        // Привязываем буферы этого уровня
+        // Position SSBO на binding 16 — compute читает/пишет alive state
         GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 16, posSSBO);
-        GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 17, irrSSBO);
+
+        // Атласы на image bindings 2 и 3 — compute пишет, читает (temporal blend)
+        GL.BindImageTexture(2, irrTex,   0, false, 0,
+            TextureAccess.ReadWrite, SizedInternalFormat.R11fG11fB10f);
+        GL.BindImageTexture(3, depthTex, 0, false, 0,
+            TextureAccess.ReadWrite, SizedInternalFormat.Rg16f);
 
         _updateShader.Use();
-        _updateShader.SetInt("uGIGridBaseX",    baseX);
-        _updateShader.SetInt("uGIGridBaseY",    baseY);
-        _updateShader.SetInt("uGIGridBaseZ",    baseZ);
+        _updateShader.SetInt("uGIGridBaseX",     baseX);
+        _updateShader.SetInt("uGIGridBaseY",     baseY);
+        _updateShader.SetInt("uGIGridBaseZ",     baseZ);
         _updateShader.SetInt("uProbeStartIndex", cursor);
         _updateShader.SetInt("uProbesThisFrame", probesThisFrame);
         _updateShader.SetInt("uRaysPerProbe",    raysPerProbe);
@@ -208,125 +247,117 @@ public class GIProbeSystem : IDisposable
         _updateShader.SetInt("uMaxRaySteps",     maxRaySteps);
 
         GL.DispatchCompute((probesThisFrame + 63) / 64, 1, 1);
-        GL.MemoryBarrier(MemoryBarrierFlags.ShaderStorageBarrierBit);
+        // Барьер на image access + SSBO чтобы следующий dispatch видел результат
+        GL.MemoryBarrier(MemoryBarrierFlags.ShaderImageAccessBarrierBit
+                       | MemoryBarrierFlags.ShaderStorageBarrierBit
+                       | MemoryBarrierFlags.TextureFetchBarrierBit);
 
         cursor = (cursor + probesThisFrame) % PROBE_COUNT;
     }
 
     // ─────────────────────────────────────────────────────────
+    // Bind — привязывает position SSBOs (нужно перед compute dispatch)
+    // ─────────────────────────────────────────────────────────
     public void Bind()
     {
-        // L0
         GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 16, ProbePositionSsbo);
-        GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 17, ProbeIrradianceSsbo);
-        // L1
         GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 19, ProbePositionSsboL1);
-        GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 20, ProbeIrradianceSsboL1);
-        // L2
         GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 21, ProbePositionSsboL2);
-        GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 22, ProbeIrradianceSsboL2);
     }
 
+    // ─────────────────────────────────────────────────────────
+    // SetSamplingUniforms — вызывается перед composite pass
+    // ─────────────────────────────────────────────────────────
     public void SetSamplingUniforms(Shader shader)
     {
         if (shader == null) return;
 
-        // L0
-        shader.SetInt("uGIGridBaseX",    _gridBaseX);
-        shader.SetInt("uGIGridBaseY",    _gridBaseY);
-        shader.SetInt("uGIGridBaseZ",    _gridBaseZ);
+        // Grid bases для всех уровней
+        shader.SetInt("uGIGridBaseX",      _gridBaseX);
+        shader.SetInt("uGIGridBaseY",      _gridBaseY);
+        shader.SetInt("uGIGridBaseZ",      _gridBaseZ);
         shader.SetFloat("uGIProbeSpacing", PROBE_SPACING_L0);
 
-        // L1
-        shader.SetInt("uGIGridBaseX_L1",    _gridBaseX_L1);
-        shader.SetInt("uGIGridBaseY_L1",    _gridBaseY_L1);
-        shader.SetInt("uGIGridBaseZ_L1",    _gridBaseZ_L1);
-        shader.SetFloat("uGIProbeSpacingL1", PROBE_SPACING_L1);
+        shader.SetInt("uGIGridBaseX_L1",      _gridBaseX_L1);
+        shader.SetInt("uGIGridBaseY_L1",      _gridBaseY_L1);
+        shader.SetInt("uGIGridBaseZ_L1",      _gridBaseZ_L1);
+        shader.SetFloat("uGIProbeSpacingL1",  PROBE_SPACING_L1);
 
-        // L2
-        shader.SetInt("uGIGridBaseX_L2",    _gridBaseX_L2);
-        shader.SetInt("uGIGridBaseY_L2",    _gridBaseY_L2);
-        shader.SetInt("uGIGridBaseZ_L2",    _gridBaseZ_L2);
-        shader.SetFloat("uGIProbeSpacingL2", PROBE_SPACING_L2);
+        shader.SetInt("uGIGridBaseX_L2",      _gridBaseX_L2);
+        shader.SetInt("uGIGridBaseY_L2",      _gridBaseY_L2);
+        shader.SetInt("uGIGridBaseZ_L2",      _gridBaseZ_L2);
+        shader.SetFloat("uGIProbeSpacingL2",  PROBE_SPACING_L2);
 
-        // Общие (одинаковые для всех уровней)
+        // Размер сетки (одинаков для всех уровней)
         shader.SetInt("uGIProbeX", PROBE_X);
         shader.SetInt("uGIProbeY", PROBE_Y);
         shader.SetInt("uGIProbeZ", PROBE_Z);
+
+        // Размеры тайлов для вычисления UV в атласе
+        shader.SetInt("uIrrTile",   IRR_TILE);
+        shader.SetInt("uDepthTile", DEPTH_TILE);
+
+        // Текстуры атласов — units 10..15
+        GL.ActiveTexture(TextureUnit.Texture10);
+        GL.BindTexture(TextureTarget.Texture2D, IrrTexL0);
+        shader.SetInt("uGIIrrAtlas",    10);
+
+        GL.ActiveTexture(TextureUnit.Texture11);
+        GL.BindTexture(TextureTarget.Texture2D, DepthTexL0);
+        shader.SetInt("uGIDepthAtlas",  11);
+
+        GL.ActiveTexture(TextureUnit.Texture12);
+        GL.BindTexture(TextureTarget.Texture2D, IrrTexL1);
+        shader.SetInt("uGIIrrAtlasL1",  12);
+
+        GL.ActiveTexture(TextureUnit.Texture13);
+        GL.BindTexture(TextureTarget.Texture2D, DepthTexL1);
+        shader.SetInt("uGIDepthAtlasL1",13);
+
+        GL.ActiveTexture(TextureUnit.Texture14);
+        GL.BindTexture(TextureTarget.Texture2D, IrrTexL2);
+        shader.SetInt("uGIIrrAtlasL2",  14);
+
+        GL.ActiveTexture(TextureUnit.Texture15);
+        GL.BindTexture(TextureTarget.Texture2D, DepthTexL2);
+        shader.SetInt("uGIDepthAtlasL2",15);
     }
 
     // ─────────────────────────────────────────────────────────
+    // Debug визуализация зондов (читает из position SSBO)
+    // ─────────────────────────────────────────────────────────
     public void DrawProbeDebug(LineRenderer lineRenderer, Vector3 cameraPos)
     {
-        int lod = GameSettings.GIDebugLOD;
-
-        if (lod == 0 || lod == -1)
-            DrawLevelDebug(lineRenderer, cameraPos, ProbePositionSsbo,
-                ProbeIrradianceSsbo, PROBE_SPACING_L0, 24.0f);
-
-        if (lod == 1 || lod == -1)
-            DrawLevelDebug(lineRenderer, cameraPos, ProbePositionSsboL1,
-                ProbeIrradianceSsboL1, PROBE_SPACING_L1, 80.0f);
-
-        if (lod == 2 || lod == -1)
-            DrawLevelDebug(lineRenderer, cameraPos, ProbePositionSsboL2,
-                ProbeIrradianceSsboL2, PROBE_SPACING_L2, 320.0f);
+        DrawLevelDebug(lineRenderer, cameraPos, ProbePositionSsbo,
+            PROBE_SPACING_L0, 12.0f,  new Vector3(0.9f, 0.8f, 0.2f));
+        DrawLevelDebug(lineRenderer, cameraPos, ProbePositionSsboL1,
+            PROBE_SPACING_L1, 64.0f,  new Vector3(0.2f, 0.8f, 0.9f));
+        DrawLevelDebug(lineRenderer, cameraPos, ProbePositionSsboL2,
+            PROBE_SPACING_L2, 256.0f, new Vector3(0.8f, 0.2f, 0.9f));
     }
 
-    private static void DrawLevelDebug(LineRenderer lr, Vector3 camPos,
-                                       int posSSBO, int irrSSBO,
-                                       float spacing, float drawRadius)
+    private static void DrawLevelDebug(LineRenderer lr, Vector3 camPos, int ssbo,
+                                       float spacing, float drawRadius, Vector3 aliveColor)
     {
-        if (posSSBO == 0) return;
-
-        // Читаем позиции (ProbeData = 2×vec4 = 8 float на зонд)
-        float[] posData = new float[PROBE_COUNT * 8];
-        GL.BindBuffer(BufferTarget.ShaderStorageBuffer, posSSBO);
-        GL.GetBufferSubData(BufferTarget.ShaderStorageBuffer, IntPtr.Zero,
-                            posData.Length * sizeof(float), posData);
-
-        // Читаем irradiance (12 float на зонд — SH коэффициенты)
-        float[] irrData = new float[PROBE_COUNT * 12];
-        GL.BindBuffer(BufferTarget.ShaderStorageBuffer, irrSSBO);
-        GL.GetBufferSubData(BufferTarget.ShaderStorageBuffer, IntPtr.Zero,
-                            irrData.Length * sizeof(float), irrData);
+        if (ssbo == 0) return;
+        float[] data = new float[PROBE_COUNT * 8];
+        GL.BindBuffer(BufferTarget.ShaderStorageBuffer, ssbo);
+        GL.GetBufferSubData(BufferTarget.ShaderStorageBuffer,
+            IntPtr.Zero, data.Length * sizeof(float), data);
 
         float r2  = drawRadius * drawRadius;
-        float box = spacing * 0.12f;
+        float box = spacing * 0.08f;
 
         for (int i = 0; i < PROBE_COUNT; i++)
         {
-            // stride = 8: [0..2]=pos.xyz, [3]=pos.w (alive), [4..7]=colorAndState
-            float px    = posData[i * 8 + 0];
-            if (px <= -9000.0f) continue;          // неинициализированный
-            float py    = posData[i * 8 + 1];
-            float pz    = posData[i * 8 + 2];
-            float alive = posData[i * 8 + 3];
-
-            if (alive < 0.5f) continue;            // мёртвые зонды не рисуем
-
+            float px = data[i * 8];
+            if (px <= -9000.0f) continue;
+            float py    = data[i * 8 + 1];
+            float pz    = data[i * 8 + 2];
+            float state = data[i * 8 + 3];
             Vector3 pos = new(px, py, pz);
             if ((pos - camPos).LengthSquared > r2) continue;
-
-            // Цвет зонда: средний цвет из SH DC-коэффициентов (band 0, коэф 0/4/8)
-            // SH[0]=R_dc, SH[4]=G_dc, SH[8]=B_dc
-            int b = i * 12;
-            float cr = irrData[b + 0] * 0.282095f * 3.14159265f;
-            float cg = irrData[b + 4] * 0.282095f * 3.14159265f;
-            float cb = irrData[b + 8] * 0.282095f * 3.14159265f;
-
-            // Нормируем к видимому диапазону (зонды могут быть тёмными или яркими)
-            float maxC = MathF.Max(MathF.Max(cr, cg), MathF.Max(cb, 0.001f));
-            Vector3 col = new(
-                Math.Clamp(cr / maxC, 0f, 1f),
-                Math.Clamp(cg / maxC, 0f, 1f),
-                Math.Clamp(cb / maxC, 0f, 1f)
-            );
-
-            // Яркость куба = насколько зонд вообще освещён
-            float brightness = Math.Clamp(maxC * 0.5f, 0.2f, 1.0f);
-            col *= brightness;
-
+            Vector3 col = state < 0.5f ? new Vector3(0.2f, 0.2f, 0.2f) : aliveColor;
             lr.DrawBox(pos - new Vector3(box), pos + new Vector3(box), col);
         }
     }
@@ -336,11 +367,16 @@ public class GIProbeSystem : IDisposable
     {
         if (_disposed) return;
         _disposed = true;
-        if (ProbePositionSsbo    != 0) GL.DeleteBuffer(ProbePositionSsbo);
-        if (ProbeIrradianceSsbo  != 0) GL.DeleteBuffer(ProbeIrradianceSsbo);
-        if (ProbePositionSsboL1  != 0) GL.DeleteBuffer(ProbePositionSsboL1);
-        if (ProbeIrradianceSsboL1 != 0) GL.DeleteBuffer(ProbeIrradianceSsboL1);
-        if (ProbePositionSsboL2  != 0) GL.DeleteBuffer(ProbePositionSsboL2);
-        if (ProbeIrradianceSsboL2 != 0) GL.DeleteBuffer(ProbeIrradianceSsboL2);
+
+        if (ProbePositionSsbo   != 0) GL.DeleteBuffer(ProbePositionSsbo);
+        if (ProbePositionSsboL1 != 0) GL.DeleteBuffer(ProbePositionSsboL1);
+        if (ProbePositionSsboL2 != 0) GL.DeleteBuffer(ProbePositionSsboL2);
+
+        if (IrrTexL0   != 0) GL.DeleteTexture(IrrTexL0);
+        if (DepthTexL0 != 0) GL.DeleteTexture(DepthTexL0);
+        if (IrrTexL1   != 0) GL.DeleteTexture(IrrTexL1);
+        if (DepthTexL1 != 0) GL.DeleteTexture(DepthTexL1);
+        if (IrrTexL2   != 0) GL.DeleteTexture(IrrTexL2);
+        if (DepthTexL2 != 0) GL.DeleteTexture(DepthTexL2);
     }
 }

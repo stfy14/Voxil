@@ -1,67 +1,128 @@
 // --- Engine/Graphics/GLSL/gi_probe_update.comp ---
+// DDGI compute shader: трассирует лучи и пишет irradiance + depth в октаэдрические атласы
 #version 450 core
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
-/*__BANKS_INJECTION__*/
-
+// ─────────────────────────────────────────────────────────────
+// Константы атласа (должны совпадать с GIProbeSystem.cs)
+// ─────────────────────────────────────────────────────────────
+#define IRR_TILE    8
+#define DEPTH_TILE  16
+#define IRR_PAD     (IRR_TILE   + 2)   // 10
+#define DEPTH_PAD   (DEPTH_TILE + 2)   // 18
 #define VOXELS_IN_UINT 4
-uint GetVoxelData(uint chunkSlot, int voxelIdx) {
-    uint bank      = chunkSlot / uint(CHUNKS_PER_BANK);
-    uint localSlot = chunkSlot % uint(CHUNKS_PER_BANK);
-    uint chunkSzU  = (uint(VOXEL_RESOLUTION) * uint(VOXEL_RESOLUTION) * uint(VOXEL_RESOLUTION)) / uint(VOXELS_IN_UINT);
-    uint offset    = localSlot * chunkSzU + (uint(voxelIdx) >> 2u);
-    uint rawVal    = GetVoxelFromBank(bank, offset);
-    uint shift     = (uint(voxelIdx) & 3u) * 8u;
-    return (rawVal >> shift) & 0xFFu;
-}
+
+// ─────────────────────────────────────────────────────────────
+// Outputs: октаэдрические атласы
+// ─────────────────────────────────────────────────────────────
+layout(binding = 2, r11f_g11f_b10f) uniform image2D uIrrAtlas;
+layout(binding = 3, rg16f)          uniform image2D uDepthAtlas;
+
+// ─────────────────────────────────────────────────────────────
+// Position SSBO (живость зонда)
+// ─────────────────────────────────────────────────────────────
+struct ProbeData { vec4 pos; vec4 colorAndState; };
+layout(std430, binding = 16) buffer ProbeBuffer { ProbeData probes[]; };
+
+// ─────────────────────────────────────────────────────────────
+// Page table + voxel data (как в основном шейдере)
+// ─────────────────────────────────────────────────────────────
+#ifndef CHUNK_SIZE
+#define CHUNK_SIZE        8
+#endif
+#ifndef VOXEL_RESOLUTION
+#define VOXEL_RESOLUTION  8
+#endif
+#ifndef VOXELS_PER_METER
+#define VOXELS_PER_METER  1
+#endif
+#ifndef PAGE_TABLE_SIZE
+#define PAGE_TABLE_SIZE   512
+#endif
 
 layout(binding = 0, r32ui) uniform uimage3D uPageTable;
-const ivec3 PAGE_TABLE_SIZE = ivec3(512, 16, 512);
 
-struct ProbeData {
-    vec4 pos;           // xyz = позиция, w = 1.0 живой / 0.0 мёртвый
-    vec4 colorAndState;
-};
-layout(std430, binding = 16) buffer ProbePositions  { ProbeData probes[]; };
-layout(std430, binding = 17) buffer ProbeIrradiance { float probeIrradiance[]; };
+layout(std430, binding = 5) buffer MaskBuffer { uint chunkMasks[]; };
 
-// === UNIFORMS ===
-uniform int   uProbeStartIndex;
-uniform int   uProbesThisFrame;
-uniform int   uRaysPerProbe;     // <-- uniform, не константа! LOD меняет его
-uniform float uTime;
+// Банки вокселей — те же bindings что и в raycast.frag
+// (определяются через ShaderDefines inject, аналогично основному шейдеру)
+/*__BANKS_INJECTION__*/
+
+// ─────────────────────────────────────────────────────────────
+// Uniforms
+// ─────────────────────────────────────────────────────────────
+uniform int   uGIGridBaseX, uGIGridBaseY, uGIGridBaseZ;
+uniform int   uProbeStartIndex, uProbesThisFrame, uRaysPerProbe;
+uniform float uTime, uProbeSpacing;
 uniform vec3  uSunDir;
-uniform float uProbeSpacing;
-uniform int   uProbeGridX;
-uniform int   uProbeGridY;
-uniform int   uProbeGridZ;
-uniform int   uGIGridBaseX;
-uniform int   uGIGridBaseY;
-uniform int   uGIGridBaseZ;
-uniform int   uBoundMinX; uniform int uBoundMinY; uniform int uBoundMinZ;
-uniform int   uBoundMaxX; uniform int uBoundMaxY; uniform int uBoundMaxZ;
+uniform int   uProbeGridX, uProbeGridY, uProbeGridZ;
+uniform int   uBoundMinX, uBoundMinY, uBoundMinZ;
+uniform int   uBoundMaxX, uBoundMaxY, uBoundMaxZ;
 uniform int   uMaxRaySteps;
-
-#define BLOCK_SIZE 4
 
 // ─────────────────────────────────────────────────────────────
 // Утилиты
 // ─────────────────────────────────────────────────────────────
-float Hash(float a, float b) {
-    vec2 p = vec2(a, b);
-    p = fract(p * vec2(127.1, 311.7));
-    p += dot(p, p.yx + 19.19);
-    return fract((p.x + p.y) * p.x);
-}
-
-vec3 FibonacciDirection(int i, int total, float seed) {
-    float goldenAngle = 2.399963;
-    float theta = acos(clamp(1.0 - 2.0 * (float(i) + 0.5) / float(total), -1.0, 1.0));
-    float phi   = goldenAngle * float(i) + seed * 6.2831853;
-    return normalize(vec3(sin(theta) * cos(phi), cos(theta), sin(theta) * sin(phi)));
-}
-
 int true_mod(int a, int b) { int m = a % b; return m < 0 ? m + b : m; }
+
+float Hash(float a, float b) {
+    vec2 v = vec2(a, b);
+    return fract(sin(dot(v, vec2(127.1, 311.7))) * 43758.5453);
+}
+
+// Равномерное распределение по сфере (спираль Фибоначчи)
+vec3 FibonacciDirection(int i, int n, float seed) {
+    float phi = 2.39996323;
+    float theta = acos(1.0 - 2.0 * (float(i) + seed) / float(n));
+    float psi   = phi * float(i);
+    return vec3(sin(theta) * cos(psi), cos(theta), sin(theta) * sin(psi));
+}
+
+// ─────────────────────────────────────────────────────────────
+// Октаэдрический маппинг
+// ─────────────────────────────────────────────────────────────
+vec2 OctEncode(vec3 n) {
+    n /= (abs(n.x) + abs(n.y) + abs(n.z));
+    if (n.z < 0.0) {
+        float x = n.x, y = n.y;
+        n.x = (1.0 - abs(y)) * (x >= 0.0 ? 1.0 : -1.0);
+        n.y = (1.0 - abs(x)) * (y >= 0.0 ? 1.0 : -1.0);
+    }
+    return n.xy * 0.5 + 0.5; // [0, 1]
+}
+
+vec3 OctDecode(vec2 uv) {
+    uv = uv * 2.0 - 1.0;
+    vec3 n = vec3(uv.x, uv.y, 1.0 - abs(uv.x) - abs(uv.y));
+    if (n.z < 0.0) {
+        float x = n.x, y = n.y;
+        n.x = (1.0 - abs(y)) * (x >= 0.0 ? 1.0 : -1.0);
+        n.y = (1.0 - abs(x)) * (y >= 0.0 ? 1.0 : -1.0);
+    }
+    return normalize(n);
+}
+
+// ─────────────────────────────────────────────────────────────
+// Координата тайла в атласе
+// col = wx,  row = wy + wz * probeGridY
+// ─────────────────────────────────────────────────────────────
+ivec2 IrrTileOrigin(int probeIdx) {
+    int wx = probeIdx % uProbeGridX;
+    int wy = (probeIdx / uProbeGridX) % uProbeGridY;
+    int wz = probeIdx / (uProbeGridX * uProbeGridY);
+    int col = wx;
+    int row = wy + wz * uProbeGridY;
+    return ivec2(col * IRR_PAD + 1, row * IRR_PAD + 1);
+}
+
+ivec2 DepthTileOrigin(int probeIdx) {
+    int wx = probeIdx % uProbeGridX;
+    int wy = (probeIdx / uProbeGridX) % uProbeGridY;
+    int wz = probeIdx / (uProbeGridX * uProbeGridY);
+    int col = wx;
+    int row = wy + wz * uProbeGridY;
+    return ivec2(col * DEPTH_PAD + 1, row * DEPTH_PAD + 1);
+}
 
 // ─────────────────────────────────────────────────────────────
 // Материалы
@@ -80,8 +141,18 @@ vec3 GetVoxelAlbedo(uint matID) {
 bool IsEmissive(uint matID) { return matID == 7u; }
 
 // ─────────────────────────────────────────────────────────────
-// Трассировка
+// Чтение вокселя
 // ─────────────────────────────────────────────────────────────
+uint GetVoxelData(uint chunkSlot, int voxelIdx) {
+    uint bank      = chunkSlot / uint(CHUNKS_PER_BANK);
+    uint localSlot = chunkSlot % uint(CHUNKS_PER_BANK);
+    uint chunkSzU  = (uint(VOXEL_RESOLUTION) * uint(VOXEL_RESOLUTION) * uint(VOXEL_RESOLUTION)) / uint(VOXELS_IN_UINT);
+    uint offset    = localSlot * chunkSzU + (uint(voxelIdx) >> 2u);
+    uint rawVal    = GetVoxelFromBank(bank, offset);
+    uint shift     = (uint(voxelIdx) & 3u) * 8u;
+    return (rawVal >> shift) & 0xFFu;
+}
+
 bool IsSolidAt(vec3 worldPos) {
     ivec3 cMapPos = ivec3(floor(worldPos / float(CHUNK_SIZE)));
     ivec3 bMin = ivec3(uBoundMinX, uBoundMinY, uBoundMinZ);
@@ -203,87 +274,17 @@ out float tHit, out uint matID, out vec3 hitNormal)
 }
 
 // ─────────────────────────────────────────────────────────────
-// Небо
+// Sky + Night ambient
 // ─────────────────────────────────────────────────────────────
 vec3 SkyColor(vec3 rd) {
-    float t = clamp(rd.y * 0.5 + 0.5, 0.0, 1.0);
-    vec3 sky = mix(vec3(0.7, 0.8, 0.9), vec3(0.2, 0.4, 0.8), t * t);
-    float sunIntensity = clamp(uSunDir.y * 5.0, 0.0, 1.0);
-    sky += vec3(1.0, 0.95, 0.8) * pow(max(0.0, dot(rd, uSunDir)), 64.0) * sunIntensity * 4.0;
-    return sky * clamp(uSunDir.y * 2.0 + 0.3, 0.02, 1.0);
+    float t   = clamp(uSunDir.y * 2.0 + 0.3, 0.0, 1.0);
+    vec3  day = mix(vec3(0.6, 0.75, 1.0), vec3(0.3, 0.55, 0.9), rd.y * 0.5 + 0.5);
+    vec3  sun = vec3(1.0, 0.9, 0.7) * pow(max(0.0, dot(rd, uSunDir)), 32.0) * 2.0;
+    return mix(vec3(0.02, 0.03, 0.08), day + sun, t);
 }
 
-// Минимальный ambient ночью — исключает абсолютную тьму
 vec3 NightAmbient(vec3 rd) {
-    float nightIntensity = clamp(-uSunDir.y * 3.0, 0.0, 1.0);
-    float skyVis = clamp(rd.y * 0.5 + 0.5, 0.15, 1.0);
-    return vec3(0.05, 0.07, 0.12) * nightIntensity * skyVis * 0.3;
-}
-
-// ─────────────────────────────────────────────────────────────
-// SH аккумуляция
-// ─────────────────────────────────────────────────────────────
-void AccumulateSH(inout float sh[12], vec3 dir, vec3 radiance) {
-    float y00 = 0.282095;
-    float y10 = 0.488603 * dir.y;
-    float y11 = 0.488603 * dir.z;
-    float y12 = 0.488603 * dir.x;
-
-    sh[0]  += radiance.r * y00; sh[1]  += radiance.r * y10;
-    sh[2]  += radiance.r * y11; sh[3]  += radiance.r * y12;
-    sh[4]  += radiance.g * y00; sh[5]  += radiance.g * y10;
-    sh[6]  += radiance.g * y11; sh[7]  += radiance.g * y12;
-    sh[8]  += radiance.b * y00; sh[9]  += radiance.b * y10;
-    sh[10] += radiance.b * y11; sh[11] += radiance.b * y12;
-}
-
-// ─────────────────────────────────────────────────────────────
-// Bounce Light (читает L0 из предыдущего кадра — binding 16/17)
-// ─────────────────────────────────────────────────────────────
-vec3 FetchBounceLight(vec3 worldPos, vec3 normal) {
-    // ИСПРАВЛЕНИЕ: origin совпадает с compute: targetPos = vec3(gx,gy,gz)*sp + sp*0.5
-    vec3 gridBaseWorld = vec3(float(uGIGridBaseX), float(uGIGridBaseY), float(uGIGridBaseZ))
-    * uProbeSpacing + vec3(uProbeSpacing * 0.5);
-    vec3 localPos = (worldPos - gridBaseWorld) / uProbeSpacing;
-    ivec3 p = ivec3(round(localPos));
-    p = clamp(p, ivec3(0), ivec3(uProbeGridX - 1, uProbeGridY - 1, uProbeGridZ - 1));
-
-    ivec3 gridPos = ivec3(uGIGridBaseX, uGIGridBaseY, uGIGridBaseZ) + p;
-    int modX = true_mod(gridPos.x, uProbeGridX);
-    int modY = true_mod(gridPos.y, uProbeGridY);
-    int modZ = true_mod(gridPos.z, uProbeGridZ);
-    int probeIdx = modX + uProbeGridX * (modY + uProbeGridY * modZ);
-
-    // Мёртвый зонд — не берём от него bounce
-    if (probes[probeIdx].pos.w < 0.5) return vec3(0.0);
-
-    // ИСПРАВЛЕНИЕ УТЕЧКИ СВЕТА: проверяем нет ли стены между точкой и зондом.
-    // Без этой проверки зонды за стеной "просвечивают" через геометрию.
-    vec3 probePos = probes[probeIdx].pos.xyz;
-    vec3 toProbe = probePos - worldPos;
-    float toDist = length(toProbe);
-    if (toDist > 0.01) {
-        float tBlocked; uint bMat; vec3 bNorm;
-        if (TraceProbeRay(worldPos, normalize(toProbe), toDist * 0.95, tBlocked, bMat, bNorm))
-        return vec3(0.0); // стена между нами и зондом — нет bounce
-    }
-
-    int base = probeIdx * 12;
-    float y00 = 0.282095;
-    float y10 = 0.488603 * normal.y;
-    float y11 = 0.488603 * normal.z;
-    float y12 = 0.488603 * normal.x;
-    const float A0 = 3.14159265;
-    const float A1 = 2.09439510;
-
-    float r  = probeIrradiance[base+0]*y00*A0 + probeIrradiance[base+1]*y10*A1
-    + probeIrradiance[base+2]*y11*A1 + probeIrradiance[base+3]*y12*A1;
-    float cG = probeIrradiance[base+4]*y00*A0 + probeIrradiance[base+5]*y10*A1
-    + probeIrradiance[base+6]*y11*A1 + probeIrradiance[base+7]*y12*A1;
-    float b  = probeIrradiance[base+8]*y00*A0 + probeIrradiance[base+9]*y10*A1
-    + probeIrradiance[base+10]*y11*A1 + probeIrradiance[base+11]*y12*A1;
-
-    return max(vec3(0.0), vec3(r, cG, b) / 3.14159265);
+    return vec3(0.01, 0.01, 0.03);
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -295,7 +296,7 @@ void main() {
 
     int probeIdx = (uProbeStartIndex + int(localIdx)) % (uProbeGridX * uProbeGridY * uProbeGridZ);
 
-    // Вычисляем мировую позицию этого зонда
+    // ── Вычисляем мировую позицию этого зонда ────────────────
     int wx = probeIdx % uProbeGridX;
     int wy = (probeIdx / uProbeGridX) % uProbeGridY;
     int wz = probeIdx / (uProbeGridX * uProbeGridY);
@@ -310,94 +311,152 @@ void main() {
 
     vec3 targetPos = vec3(gx, gy, gz) * uProbeSpacing + vec3(uProbeSpacing * 0.5);
 
-    // Зонд внутри блока — помечаем мёртвым, зануляем SH
+    // ── Зонд внутри блока → мёртвый, обнуляем атласные тайлы ─
     if (IsSolidAt(targetPos)) {
-        probes[probeIdx].pos = vec4(targetPos, 0.0);
-        int base = probeIdx * 12;
-        for (int k = 0; k < 12; k++) probeIrradiance[base + k] = 0.0;
+        probes[probeIdx].pos = vec4(targetPos, 0.0); // 0.0 = мёртвый
+
+        ivec2 irrOrigin   = IrrTileOrigin(probeIdx);
+        ivec2 depthOrigin = DepthTileOrigin(probeIdx);
+        for (int py = 0; py < IRR_TILE; py++)
+        for (int px = 0; px < IRR_TILE; px++)
+        imageStore(uIrrAtlas, irrOrigin + ivec2(px, py), vec4(0.0));
+        for (int py = 0; py < DEPTH_TILE; py++)
+        for (int px = 0; px < DEPTH_TILE; px++)
+        imageStore(uDepthAtlas, depthOrigin + ivec2(px, py), vec4(0.0));
         return;
     }
 
-    vec3 oldPos    = probes[probeIdx].pos.xyz;
-    bool isNewPos  = distance(oldPos, targetPos) > uProbeSpacing * 0.5;
+    // ── Temporal blend factor ─────────────────────────────────
+    vec3  oldPos      = probes[probeIdx].pos.xyz;
+    bool  isNewPos    = distance(oldPos, targetPos) > uProbeSpacing * 0.5;
     float blendFactor = isNewPos ? 1.0 : 0.05;
 
-    probes[probeIdx].pos = vec4(targetPos, 1.0); // 1.0 = Живой
+    probes[probeIdx].pos = vec4(targetPos, 1.0); // 1.0 = живой
 
-    float seed = Hash(float(probeIdx), uTime * 0.01 + float(uProbeStartIndex) * 0.137);
-
-    float sh[12];
-    for (int k = 0; k < 12; k++) sh[k] = 0.0;
-
-    // maxRayDist масштабируется со spacing:
-    // L0 (1м)  → 16м, L1 (4м) → 64м, L2 (16м) → 256м
+    float seed       = Hash(float(probeIdx), uTime * 0.01 + float(uProbeStartIndex) * 0.137);
     float maxRayDist = float(uProbeGridX) * uProbeSpacing * 0.5;
 
-    vec3 sumColor = vec3(0.0);
+    // ── Трассируем лучи ───────────────────────────────────────
+    // Для каждого луча сохраняем: направление, radiance, tHit
+    // Затем раскладываем по пикселям атласа
+    const int MAX_RAYS = 64;
+    vec3  rayDirs[MAX_RAYS];
+    vec3  rayRadiance[MAX_RAYS];
+    float rayDist[MAX_RAYS];
 
-    for (int ray = 0; ray < uRaysPerProbe; ray++) {
-        vec3 rd       = FibonacciDirection(ray, uRaysPerProbe, seed);
+    for (int ray = 0; ray < uRaysPerProbe && ray < MAX_RAYS; ray++) {
+        vec3 rd = FibonacciDirection(ray, uRaysPerProbe, seed);
+        rayDirs[ray] = rd;
+
         float tHit    = 0.0;
         uint  matID   = 0u;
-        vec3  hitNormal = vec3(0.0);
-        vec3  radiance  = vec3(0.0);
+        vec3  hitNorm = vec3(0.0);
+        vec3  radiance = vec3(0.0);
+        float dist    = maxRayDist;
 
-        if (TraceProbeRay(targetPos, rd, maxRayDist, tHit, matID, hitNormal)) {
-            vec3 albedo = GetVoxelAlbedo(matID);
-            vec3 hitPos = targetPos + rd * tHit;
-
-            bool inShadow   = false;
-            vec3 shadowStart = hitPos + hitNormal * 0.1;
-
-            if (IsSolidAt(shadowStart)) {
-                inShadow = true;
-            } else if (uSunDir.y > 0.0) {
-                float sHit; uint sMat; vec3 sNorm;
-                if (TraceProbeRay(shadowStart, uSunDir, maxRayDist, sHit, sMat, sNorm))
-                inShadow = true;
-            } else {
-                // Ночь: не трейсим тень к солнцу, но добавляем минимальный ambient
-                inShadow = true;
-            }
-
-            float sunIntensity = clamp(uSunDir.y * 5.0, 0.0, 1.0);
-            float nDotL        = max(0.0, dot(hitNormal, uSunDir));
-            vec3  directLight  = inShadow
-            ? vec3(0.0)
-            : vec3(1.0, 0.95, 0.8) * sunIntensity * nDotL * 3.0;
-
-            // Минимальный ночной ambient — поверхности не уходят в 0
-            float nightAmb = clamp(-uSunDir.y * 2.0, 0.0, 1.0);
-            vec3  ambLight = vec3(0.05, 0.07, 0.12) * nightAmb * max(0.1, dot(hitNormal, vec3(0,1,0)) * 0.5 + 0.5);
-
-            vec3 bounceLight = FetchBounceLight(shadowStart, hitNormal) * 0.6;
+        if (TraceProbeRay(targetPos, rd, maxRayDist, tHit, matID, hitNorm)) {
+            dist = tHit;
 
             if (IsEmissive(matID)) {
-                radiance = albedo * 20.0;
+                radiance = GetVoxelAlbedo(matID) * 20.0;
             } else {
-                radiance = albedo * (directLight + ambLight + bounceLight);
+                vec3  hitPos     = targetPos + rd * tHit;
+                vec3  shadowStart = hitPos + hitNorm * 0.1;
+                bool  inShadow   = false;
+
+                if (IsSolidAt(shadowStart)) {
+                    inShadow = true;
+                } else if (uSunDir.y > 0.0) {
+                    float sHit; uint sMat; vec3 sNorm;
+                    if (TraceProbeRay(shadowStart, uSunDir, maxRayDist, sHit, sMat, sNorm))
+                    inShadow = true;
+                } else {
+                    inShadow = true;
+                }
+
+                float sunIntensity = clamp(uSunDir.y * 5.0, 0.0, 1.0);
+                float nDotL        = max(0.0, dot(hitNorm, uSunDir));
+                vec3  directLight  = inShadow
+                ? vec3(0.0)
+                : vec3(1.0, 0.95, 0.8) * sunIntensity * nDotL * 3.0;
+
+                float nightAmb = clamp(-uSunDir.y * 2.0, 0.0, 1.0);
+                vec3  ambLight = vec3(0.05, 0.07, 0.12) * nightAmb
+                * max(0.1, dot(hitNorm, vec3(0,1,0)) * 0.5 + 0.5);
+
+                radiance = GetVoxelAlbedo(matID) * (directLight + ambLight);
             }
         } else {
-            // Луч ушёл в небо
-            if (rd.y > 0.0) {
-                radiance = SkyColor(rd);
-            } else {
-                // Луч ушёл вниз и ничего не нашёл — минимальный ground bounce
-                radiance = NightAmbient(rd);
-            }
+            dist = maxRayDist;
+            radiance = (rd.y > 0.0) ? SkyColor(rd) : NightAmbient(rd);
         }
 
-        AccumulateSH(sh, rd, radiance);
-        sumColor += radiance;
+        rayRadiance[ray] = radiance;
+        rayDist[ray]     = dist;
     }
 
-    probes[probeIdx].colorAndState = vec4(sumColor / float(uRaysPerProbe), 1.0);
+    // ── Записываем irradiance тайл (8×8 пикселей) ────────────
+    {
+        ivec2 origin = IrrTileOrigin(probeIdx);
+        for (int py = 0; py < IRR_TILE; py++)
+        for (int px = 0; px < IRR_TILE; px++)
+        {
+            vec2 uv       = (vec2(px, py) + 0.5) / float(IRR_TILE);
+            vec3 pixelDir = OctDecode(uv);
 
-    // Накапливаем SH с temporal blend
-    float weight = 4.0 * 3.14159265 / float(uRaysPerProbe);
-    int base = probeIdx * 12;
-    for (int k = 0; k < 12; k++) {
-        float newVal = sh[k] * weight;
-        probeIrradiance[base + k] = mix(probeIrradiance[base + k], newVal, blendFactor);
+            vec3  irrSum = vec3(0.0);
+            float wSum   = 0.0;
+
+            for (int ray = 0; ray < uRaysPerProbe && ray < MAX_RAYS; ray++) {
+                // Косинусное взвешивание: вклад луча в этот пиксель
+                float w = max(0.0, dot(pixelDir, rayDirs[ray]));
+                if (w < 0.001) continue;
+                irrSum += rayRadiance[ray] * w;
+                wSum   += w;
+            }
+
+            vec3 newIrr = (wSum > 0.0) ? irrSum / wSum : vec3(0.0);
+
+            // Temporal blend
+            vec3 prevIrr = imageLoad(uIrrAtlas, origin + ivec2(px, py)).rgb;
+            newIrr = mix(prevIrr, newIrr, blendFactor);
+            imageStore(uIrrAtlas, origin + ivec2(px, py), vec4(newIrr, 1.0));
+        }
     }
+
+    // ── Записываем depth тайл (16×16 пикселей) ───────────────
+    {
+        ivec2 origin = DepthTileOrigin(probeIdx);
+        for (int py = 0; py < DEPTH_TILE; py++)
+        for (int px = 0; px < DEPTH_TILE; px++)
+        {
+            vec2 uv       = (vec2(px, py) + 0.5) / float(DEPTH_TILE);
+            vec3 pixelDir = OctDecode(uv);
+
+            float meanDist  = 0.0;
+            float meanDist2 = 0.0;
+            float wSum      = 0.0;
+
+            for (int ray = 0; ray < uRaysPerProbe && ray < MAX_RAYS; ray++) {
+                float w = max(0.0, dot(pixelDir, rayDirs[ray]));
+                if (w < 0.001) continue;
+                float d = rayDist[ray];
+                meanDist  += d * w;
+                meanDist2 += d * d * w;
+                wSum      += w;
+            }
+
+            vec2 newDepth = (wSum > 0.0)
+            ? vec2(meanDist / wSum, meanDist2 / wSum)
+            : vec2(maxRayDist, maxRayDist * maxRayDist);
+
+            // Temporal blend
+            vec2 prevDepth = imageLoad(uDepthAtlas, origin + ivec2(px, py)).rg;
+            newDepth = mix(prevDepth, newDepth, blendFactor);
+            imageStore(uDepthAtlas, origin + ivec2(px, py), vec4(newDepth, 0.0, 1.0));
+        }
+    }
+
+    // colorAndState — для совместимости с debug visualization
+    probes[probeIdx].colorAndState = vec4(rayRadiance[0], 1.0);
 }
