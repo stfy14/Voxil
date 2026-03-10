@@ -1,19 +1,9 @@
 // --- Engine/Graphics/GLSL/gi_probe_update.comp ---
 #version 450 core
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
-// Each invocation updates one probe.
-// Dispatch: (probesThisFrame, 1, 1)
-layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
-
-// ============================================================
-// BANK INJECTION (replaced by ShaderSystem at compile time)
-// Generates: VoxelSSBO0..N, GetVoxelFromBank(), WriteVoxelToBank()
-// ============================================================
 /*__BANKS_INJECTION__*/
 
-// ============================================================
-// GetVoxelData
-// ============================================================
 #define VOXELS_IN_UINT 4
 uint GetVoxelData(uint chunkSlot, int voxelIdx) {
     uint bank      = chunkSlot / uint(CHUNKS_PER_BANK);
@@ -25,34 +15,19 @@ uint GetVoxelData(uint chunkSlot, int voxelIdx) {
     return (rawVal >> shift) & 0xFFu;
 }
 
-// ============================================================
-// PAGE TABLE  (binding 0, r32ui image3D)
-// ============================================================
 layout(binding = 0, r32ui) uniform uimage3D uPageTable;
 const ivec3 PAGE_TABLE_SIZE = ivec3(512, 16, 512);
+layout(std430, binding = 5) buffer GIPackedMasks { uvec2 giPackedMasks[]; };
 
-// ============================================================
-// MASK SSBO  (binding 5)
-// ============================================================
-layout(std430, binding = 5) buffer GIPackedMasks {
-    uvec2 giPackedMasks[];
+struct ProbeData {
+    vec4 pos;
+    vec4 colorAndState;
 };
+layout(std430, binding = 16) buffer ProbePositions { ProbeData probes[]; };
 
-// ============================================================
-// PROBE DATA BUFFERS  (bindings 16 & 17)
-// ВАЖНО: Убрано readonly у ProbePositions, так как мы двигаем зонды!
-// ============================================================
-layout(std430, binding = 16) buffer ProbePositions {
-    vec4 probePositions[];
-};
+layout(binding = 2, rgba16f) uniform image2D uIrradianceAtlas;
+layout(binding = 3, rg16f)   uniform image2D uDepthAtlas;
 
-layout(std430, binding = 17) buffer ProbeIrradiance {
-    float probeIrradiance[];
-};
-
-// ============================================================
-// UNIFORMS
-// ============================================================
 uniform int   uProbeStartIndex;
 uniform int   uProbesThisFrame;
 uniform int   uRaysPerProbe;
@@ -62,29 +37,20 @@ uniform float uProbeSpacing;
 uniform int   uProbeGridX;
 uniform int   uProbeGridY;
 uniform int   uProbeGridZ;
-
+uniform int   uIrradianceSize;
+uniform int   uDepthSize;
+uniform int   uGIGridBaseX;
+uniform int   uGIGridBaseY;
+uniform int   uGIGridBaseZ;
 uniform int   uBoundMinX; uniform int uBoundMinY; uniform int uBoundMinZ;
 uniform int   uBoundMaxX; uniform int uBoundMaxY; uniform int uBoundMaxZ;
 uniform int   uMaxRaySteps;
 
-// НОВЫЕ UNIFORMS (для кольцевого буфера):
-uniform int   uGIGridBaseX;
-uniform int   uGIGridBaseY;
-uniform int   uGIGridBaseZ;
-
-// ============================================================
-// CONSTANTS
-// ============================================================
-#define BLOCK_SIZE      4
+#define BLOCK_SIZE 4
 #define BLOCKS_PER_AXIS (VOXEL_RESOLUTION / BLOCK_SIZE)
 
-// ============================================================
-// HELPERS
-// ============================================================
 float Hash(float a, float b) {
-    vec2 p = vec2(a, b);
-    p = fract(p * vec2(127.1, 311.7));
-    p += dot(p, p.yx + 19.19);
+    vec2 p = vec2(a, b); p = fract(p * vec2(127.1, 311.7)); p += dot(p, p.yx + 19.19);
     return fract((p.x + p.y) * p.x);
 }
 
@@ -95,244 +61,270 @@ vec3 FibonacciDirection(int i, int total, float seed) {
     return normalize(vec3(sin(theta) * cos(phi), cos(theta), sin(theta) * sin(phi)));
 }
 
-vec3 GetVoxelAlbedo(uint matID) {
-    if (matID == 1u) return vec3(0.45, 0.15, 0.05); // Dirt
-    if (matID == 2u) return vec3(0.50, 0.50, 0.55); // Stone
-    if (matID == 3u) return vec3(0.25, 0.12, 0.05); // Wood
-    if (matID == 4u) return vec3(0.15, 0.25, 0.60); // Water
-    if (matID == 5u) return vec3(0.15, 0.60, 0.05); // Grass
-    if (matID == 6u) return vec3(0.90, 0.10, 0.10); // TNT
-    if (matID == 7u) return vec3(0.97, 0.82, 0.20); // Glow
-    return vec3(0.5);
+vec2 signNotZero(vec2 v) { return vec2((v.x>=0.0)?1.0:-1.0, (v.y>=0.0)?1.0:-1.0); }
+vec3 octDecode(vec2 o) {
+    vec3 v = vec3(o.x, o.y, 1.0 - abs(o.x) - abs(o.y));
+    if (v.z < 0.0) v.xy = (1.0 - abs(v.yx)) * signNotZero(v.xy);
+    return normalize(v);
 }
 
+vec3 GetVoxelAlbedo(uint matID) {
+    if (matID == 1u) return vec3(0.45, 0.15, 0.05);
+    if (matID == 2u) return vec3(0.50, 0.50, 0.55);
+    if (matID == 3u) return vec3(0.25, 0.12, 0.05);
+    if (matID == 4u) return vec3(0.15, 0.25, 0.60);
+    if (matID == 5u) return vec3(0.15, 0.60, 0.05);
+    if (matID == 6u) return vec3(0.90, 0.10, 0.10);
+    if (matID == 7u) return vec3(0.97, 0.82, 0.20);
+    return vec3(0.5);
+}
 bool IsEmissive(uint matID) { return matID == 7u; }
 
 uint ReadVoxel(uint chunkSlot, int vx, int vy, int vz) {
     int idx = vx + VOXEL_RESOLUTION * (vy + VOXEL_RESOLUTION * vz);
     return GetVoxelData(chunkSlot, idx);
 }
+int true_mod(int a, int b) { int m = a % b; return m < 0 ? m + b : m; }
 
-int true_mod(int a, int b) {
-    int m = a % b;
-    return m < 0 ? m + b : m;
-}
-
-// ============================================================
-// RAY TRACER  (simplified DDA, static world only)
-// ============================================================
-bool TraceProbeRay(vec3 ro, vec3 rd, float maxDist, out float tHit, out uint matID) {
-    tHit  = 0.0;
-    matID = 0u;
-
+// ИСПРАВЛЕНИЕ: Теперь функция возвращает НОРМАЛЬ, чтобы мы могли пустить от нее тень!
+bool TraceProbeRay(vec3 ro, vec3 rd, float maxDist, out float tHit, out uint matID, out vec3 hitNormal) {
+    tHit = 0.0; matID = 0u; hitNormal = vec3(0.0);
     vec3 safeRd = rd;
     if (abs(safeRd.x) < 1e-6) safeRd.x = (safeRd.x < 0.0) ? -1e-6 : 1e-6;
     if (abs(safeRd.y) < 1e-6) safeRd.y = (safeRd.y < 0.0) ? -1e-6 : 1e-6;
     if (abs(safeRd.z) < 1e-6) safeRd.z = (safeRd.z < 0.0) ? -1e-6 : 1e-6;
 
-    vec3  pStart     = ro + safeRd * 0.05;
-    ivec3 cMapPos    = ivec3(floor(pStart / float(CHUNK_SIZE)));
-    vec3  cDeltaDist = abs(1.0 / safeRd) * float(CHUNK_SIZE);
-    ivec3 cStepDir   = ivec3(sign(safeRd));
-
+    vec3 pStart = ro;
+    ivec3 cMapPos = ivec3(floor(pStart / float(CHUNK_SIZE)));
+    vec3 cDeltaDist = abs(1.0 / safeRd) * float(CHUNK_SIZE);
+    ivec3 cStepDir = ivec3(sign(safeRd));
     vec3 relPos = pStart - vec3(cMapPos) * float(CHUNK_SIZE);
     vec3 cSideDist;
     cSideDist.x = (safeRd.x > 0.0) ? (float(CHUNK_SIZE) - relPos.x) : relPos.x;
     cSideDist.y = (safeRd.y > 0.0) ? (float(CHUNK_SIZE) - relPos.y) : relPos.y;
     cSideDist.z = (safeRd.z > 0.0) ? (float(CHUNK_SIZE) - relPos.z) : relPos.z;
-    cSideDist  *= abs(1.0 / safeRd);
-
-    vec3  cMask      = vec3(0);
+    cSideDist *= abs(1.0 / safeRd);
+    vec3 cMask = vec3(0);
     float tCurrentRel = 0.0;
-
     ivec3 bMin = ivec3(uBoundMinX, uBoundMinY, uBoundMinZ);
     ivec3 bMax = ivec3(uBoundMaxX, uBoundMaxY, uBoundMaxZ);
 
     for (int i = 0; i < uMaxRaySteps; i++) {
         if (tCurrentRel > maxDist) return false;
         if (any(lessThan(cMapPos, bMin)) || any(greaterThanEqual(cMapPos, bMax))) break;
-
         uint chunkSlot = imageLoad(uPageTable, cMapPos & (PAGE_TABLE_SIZE - 1)).r;
-
         if (chunkSlot != 0xFFFFFFFFu) {
             if ((chunkSlot & 0x80000000u) != 0u) {
-                tHit  = tCurrentRel;
-                matID = chunkSlot & 0x7FFFFFFFu;
+                tHit = tCurrentRel; matID = chunkSlot & 0x7FFFFFFFu;
+                hitNormal = length(cMask) > 0.5 ? -vec3(cStepDir) * cMask : -normalize(rd);
                 return true;
             }
-
-            uint maskBase    = chunkSlot * uint(BLOCKS_PER_AXIS * BLOCKS_PER_AXIS * BLOCKS_PER_AXIS);
+            uint maskBase = chunkSlot * uint(BLOCKS_PER_AXIS * BLOCKS_PER_AXIS * BLOCKS_PER_AXIS);
             vec3 chunkOrigin = vec3(cMapPos) * float(CHUNK_SIZE);
-            vec3 pLocal      = (pStart + safeRd * tCurrentRel) - chunkOrigin;
-
-            if (length(cMask) > 0.5) {
-                if (cMask.x > 0.5) pLocal.x = (safeRd.x > 0.0) ? 0.0 : float(CHUNK_SIZE);
-                if (cMask.y > 0.5) pLocal.y = (safeRd.y > 0.0) ? 0.0 : float(CHUNK_SIZE);
-                if (cMask.z > 0.5) pLocal.z = (safeRd.z > 0.0) ? 0.0 : float(CHUNK_SIZE);
-            }
+            vec3 pLocal = (pStart + safeRd * tCurrentRel) - chunkOrigin;
             pLocal = clamp(pLocal, 0.0, float(CHUNK_SIZE) - 0.0001);
-
-            vec3  pVoxel  = pLocal * VOXELS_PER_METER;
+            vec3 pVoxel = pLocal * VOXELS_PER_METER;
             ivec3 vMapPos = ivec3(floor(pVoxel));
-
             if (length(cMask) > 0.5) {
                 if (cMask.x > 0.5 && safeRd.x < 0.0) vMapPos.x = VOXEL_RESOLUTION - 1;
                 if (cMask.y > 0.5 && safeRd.y < 0.0) vMapPos.y = VOXEL_RESOLUTION - 1;
                 if (cMask.z > 0.5 && safeRd.z < 0.0) vMapPos.z = VOXEL_RESOLUTION - 1;
             }
-
-            vec3  vDeltaDist = abs(1.0 / safeRd);
-            ivec3 vStepDir   = cStepDir;
-            vec3  vSideDist;
+            vec3 vDeltaDist = abs(1.0 / safeRd);
+            vec3 vSideDist;
             vSideDist.x = (safeRd.x > 0.0) ? (float(vMapPos.x + 1) - pVoxel.x) : (pVoxel.x - float(vMapPos.x));
             vSideDist.y = (safeRd.y > 0.0) ? (float(vMapPos.y + 1) - pVoxel.y) : (pVoxel.y - float(vMapPos.y));
             vSideDist.z = (safeRd.z > 0.0) ? (float(vMapPos.z + 1) - pVoxel.z) : (pVoxel.z - float(vMapPos.z));
-            vSideDist  *= vDeltaDist;
-
-            bool exitChunk = false;
-            vec3 vMask = vec3(0);
-
+            vSideDist *= vDeltaDist;
+            bool exitChunk = false; vec3 vMask = vec3(0);
             for (int s = 0; s < 64; s++) {
                 if (((vMapPos.x | vMapPos.y | vMapPos.z) & ~BIT_MASK) != 0) { exitChunk = true; break; }
-
-                ivec3 bMapPos  = vMapPos / BLOCK_SIZE;
-                int   blockIdx = bMapPos.x + BLOCKS_PER_AXIS * (bMapPos.y + BLOCKS_PER_AXIS * bMapPos.z);
-                uvec2 maskVal  = giPackedMasks[maskBase + uint(blockIdx)];
-
+                ivec3 bMapPos = vMapPos / BLOCK_SIZE;
+                int blockIdx = bMapPos.x + BLOCKS_PER_AXIS * (bMapPos.y + BLOCKS_PER_AXIS * bMapPos.z);
+                uvec2 maskVal = giPackedMasks[maskBase + uint(blockIdx)];
                 if (maskVal.x != 0u || maskVal.y != 0u) {
-                    int lx = vMapPos.x % BLOCK_SIZE;
-                    int ly = vMapPos.y % BLOCK_SIZE;
-                    int lz = vMapPos.z % BLOCK_SIZE;
+                    int lx = vMapPos.x % BLOCK_SIZE; int ly = vMapPos.y % BLOCK_SIZE; int lz = vMapPos.z % BLOCK_SIZE;
                     int bitIdx = lx + BLOCK_SIZE * (ly + BLOCK_SIZE * lz);
-                    bool hasVoxel = (bitIdx < 32)
-                    ? ((maskVal.x & (1u << bitIdx)) != 0u)
-                    : ((maskVal.y & (1u << (bitIdx - 32))) != 0u);
-
+                    bool hasVoxel = (bitIdx < 32) ? ((maskVal.x & (1u << bitIdx)) != 0u) : ((maskVal.y & (1u << (bitIdx - 32))) != 0u);
                     if (hasVoxel) {
                         uint m = ReadVoxel(chunkSlot, vMapPos.x, vMapPos.y, vMapPos.z);
                         if (m != 0u && m != 4u) {
-                            float tRelVoxel = (length(vMask) > 0.5)
-                            ? dot(vMask, vSideDist - vDeltaDist) : 0.0;
-                            tHit  = tCurrentRel + (tRelVoxel / VOXELS_PER_METER);
-                            matID = m;
+                            float tRelVoxel = (length(vMask) > 0.5) ? dot(vMask, vSideDist - vDeltaDist) : 0.0;
+                            tHit = tCurrentRel + (tRelVoxel / VOXELS_PER_METER); matID = m;
+                            hitNormal = length(vMask) > 0.5 ? -vec3(cStepDir) * vMask : -normalize(rd);
                             return true;
                         }
                     }
                 }
-
-                vMask = (vSideDist.x < vSideDist.y)
-                ? ((vSideDist.x < vSideDist.z) ? vec3(1,0,0) : vec3(0,0,1))
-                : ((vSideDist.y < vSideDist.z) ? vec3(0,1,0) : vec3(0,0,1));
-                vSideDist += vMask * vDeltaDist;
-                vMapPos   += ivec3(vMask) * vStepDir;
+                vMask = (vSideDist.x < vSideDist.y) ? ((vSideDist.x < vSideDist.z) ? vec3(1,0,0) : vec3(0,0,1)) : ((vSideDist.y < vSideDist.z) ? vec3(0,1,0) : vec3(0,0,1));
+                vSideDist += vMask * vDeltaDist; vMapPos += ivec3(vMask) * cStepDir;
             }
-
             if (exitChunk) cMask = vec3(0);
         }
-
-        cMask = (cSideDist.x < cSideDist.y)
-        ? ((cSideDist.x < cSideDist.z) ? vec3(1,0,0) : vec3(0,0,1))
-        : ((cSideDist.y < cSideDist.z) ? vec3(0,1,0) : vec3(0,0,1));
+        cMask = (cSideDist.x < cSideDist.y) ? ((cSideDist.x < cSideDist.z) ? vec3(1,0,0) : vec3(0,0,1)) : ((cSideDist.y < cSideDist.z) ? vec3(0,1,0) : vec3(0,0,1));
         float chunkStep = dot(cMask, cSideDist);
-        tCurrentRel = chunkStep;
-        cSideDist  += cMask * cDeltaDist;
-        cMapPos    += ivec3(cMask) * cStepDir;
+        tCurrentRel = chunkStep; cSideDist += cMask * cDeltaDist; cMapPos += ivec3(cMask) * cStepDir;
     }
     return false;
 }
 
 vec3 SkyColor(vec3 rd) {
-    float t   = clamp(rd.y * 0.5 + 0.5, 0.0, 1.0);
-    vec3  sky = mix(vec3(0.7, 0.8, 0.9), vec3(0.2, 0.4, 0.8), t * t);
-    float sunDot       = max(0.0, dot(rd, uSunDir));
+    float t = clamp(rd.y * 0.5 + 0.5, 0.0, 1.0);
+    vec3 sky = mix(vec3(0.7, 0.8, 0.9), vec3(0.2, 0.4, 0.8), t * t);
     float sunIntensity = clamp(uSunDir.y * 5.0, 0.0, 1.0);
-    sky += vec3(1.0, 0.95, 0.8) * pow(sunDot, 64.0) * sunIntensity * 4.0;
-    sky *= clamp(uSunDir.y * 2.0 + 0.3, 0.02, 1.0);
-    return sky;
+    sky += vec3(1.0, 0.95, 0.8) * pow(max(0.0, dot(rd, uSunDir)), 64.0) * sunIntensity * 4.0;
+    return sky * clamp(uSunDir.y * 2.0 + 0.3, 0.02, 1.0);
 }
 
-// ============================================================
-// SH L1 ACCUMULATION
-// ============================================================
-void AccumulateSH(inout float sh[12], vec3 dir, vec3 radiance) {
-    float y00 = 0.282095;
-    float y10 = 0.488603 * dir.y;
-    float y11 = 0.488603 * dir.z;
-    float y12 = 0.488603 * dir.x;
+shared vec3  shared_RayDir[64];
+shared vec3  shared_RayRadiance[64];
+shared float shared_RayDist[64];
 
-    sh[0]  += radiance.r * y00; sh[1]  += radiance.r * y10;
-    sh[2]  += radiance.r * y11; sh[3]  += radiance.r * y12;
-    sh[4]  += radiance.g * y00; sh[5]  += radiance.g * y10;
-    sh[6]  += radiance.g * y11; sh[7]  += radiance.g * y12;
-    sh[8]  += radiance.b * y00; sh[9]  += radiance.b * y10;
-    sh[10] += radiance.b * y11; sh[11] += radiance.b * y12;
-}
-
-// ============================================================
-// MAIN
-// ============================================================
 void main() {
-    uint localIdx = gl_GlobalInvocationID.x;
-    if (localIdx >= uint(uProbesThisFrame)) return;
+    uint probeLocalIdx = gl_WorkGroupID.x;
+    uint rayIdx = gl_LocalInvocationID.x;
 
-    // Циклический индекс зонда
-    int probeIdx = (uProbeStartIndex + int(localIdx)) % (uProbeGridX * uProbeGridY * uProbeGridZ);
+    if (probeLocalIdx >= uint(uProbesThisFrame)) return;
 
-    // Локальные координаты в массиве (от 0 до Size-1)
+    int probeIdx = (uProbeStartIndex + int(probeLocalIdx)) % (uProbeGridX * uProbeGridY * uProbeGridZ);
+
     int wx = probeIdx % uProbeGridX;
     int wy = (probeIdx / uProbeGridX) % uProbeGridY;
     int wz = probeIdx / (uProbeGridX * uProbeGridY);
-
-    // TOROIDAL MATH: Ищем абсолютные координаты сетки
     int modBaseX = true_mod(uGIGridBaseX, uProbeGridX);
     int modBaseY = true_mod(uGIGridBaseY, uProbeGridY);
     int modBaseZ = true_mod(uGIGridBaseZ, uProbeGridZ);
-
     int gx = uGIGridBaseX + true_mod(wx - modBaseX, uProbeGridX);
     int gy = uGIGridBaseY + true_mod(wy - modBaseY, uProbeGridY);
     int gz = uGIGridBaseZ + true_mod(wz - modBaseZ, uProbeGridZ);
 
-    vec3 targetPos = vec3(gx, gy, gz) * uProbeSpacing;
-    vec3 lastPos = probePositions[probeIdx].xyz;
+    vec3 targetPos = vec3(gx, gy, gz) * uProbeSpacing + vec3(0.5);
 
-    // Если зонд переместился в пространстве больше чем на 10см -> сброс истории
-    float temporalBlend = 0.15; // Стандартное плавное обновление (85% истории)
-    if (distance(lastPos, targetPos) > 0.1) {
-        temporalBlend = 1.0; // Мгновенная перезапись
-        probePositions[probeIdx].xyz = targetPos;
+    vec3 oldPos;
+    if (rayIdx == 0u) {
+        oldPos = probes[probeIdx].pos.xyz;
+        if (distance(oldPos, targetPos) > 0.5) {
+            probes[probeIdx].pos.xyz = targetPos;
+        }
     }
+    barrier();
+    oldPos = probes[probeIdx].pos.xyz;
+
+    // ИСПРАВЛЕНИЕ МОРГАНИЯ: Плавное и предсказуемое смешивание (без скачков)
+    bool isNewPos = distance(oldPos, targetPos) > 0.5;
+    float temporalBlend = isNewPos ? 1.0 : 0.03;
 
     float seed = Hash(float(probeIdx), uTime * 0.01 + float(uProbeStartIndex) * 0.137);
+    vec3 rd = FibonacciDirection(int(rayIdx), uRaysPerProbe, seed);
 
-    float sh[12];
-    for (int k = 0; k < 12; k++) sh[k] = 0.0;
+    float tHit = 0.0; uint matID = 0u; vec3 hitNormal = vec3(0);
+    vec3 radiance = vec3(0.0);
+    float maxDist = float(uProbeGridX) * uProbeSpacing * 1.5;
+    float dist = maxDist;
 
-    float maxRayDist = float(uProbeGridX) * uProbeSpacing * 1.5;
+    if (TraceProbeRay(targetPos, rd, maxDist, tHit, matID, hitNormal)) {
+        vec3 albedo = GetVoxelAlbedo(matID);
+        vec3 hitPos = targetPos + rd * tHit;
 
-    for (int ray = 0; ray < uRaysPerProbe; ray++) {
-        vec3  rd  = FibonacciDirection(ray, uRaysPerProbe, seed);
-        float tHit = 0.0;
-        uint  matID = 0u;
-        vec3  radiance;
-
-        if (TraceProbeRay(targetPos, rd, maxRayDist, tHit, matID)) {
-            vec3 albedo = GetVoxelAlbedo(matID);
-
-            radiance = IsEmissive(matID)
-            ? albedo * 15.0 // СИЯНИЕ для статических светящихся вокселей!
-            : albedo * (0.1 + clamp(uSunDir.y * 5.0, 0.0, 1.0) * 0.4);
+        // === ИСПРАВЛЕНИЕ "СВЕТЛЫХ ПЕЩЕР" (ТЕНЕВЫЕ ЛУЧИ) ===
+        // Теперь зонд проверяет, видит ли поверхность солнце!
+        bool inShadow = false;
+        if (uSunDir.y > 0.0) {
+            float sHit; uint sMat; vec3 sNorm;
+            if (TraceProbeRay(hitPos + hitNormal * 0.1, uSunDir, maxDist, sHit, sMat, sNorm)) {
+                inShadow = true;
+            }
         } else {
-            radiance = SkyColor(rd);
+            inShadow = true;
         }
-        AccumulateSH(sh, rd, radiance);
+
+        float sunIntensity = clamp(uSunDir.y * 5.0, 0.0, 1.0);
+        float nDotL = max(0.0, dot(hitNormal, uSunDir));
+
+        vec3 directLight = inShadow ? vec3(0.0) : vec3(1.0, 0.95, 0.8) * sunIntensity * nDotL * 3.0;
+
+        // Если мы высоко, добавим чуть-чуть амбиента от неба, чтобы тени не были черными
+        float skyVis = clamp(hitNormal.y * 0.5 + 0.5, 0.0, 1.0) * clamp((hitPos.y - 30.0) / 10.0, 0.0, 1.0);
+        vec3 ambientLight = vec3(0.1, 0.15, 0.25) * skyVis * sunIntensity;
+
+        radiance = IsEmissive(matID) ? albedo * 20.0 : albedo * (directLight + ambientLight);
+        dist = tHit;
+    } else {
+        radiance = (rd.y > 0.0) ? SkyColor(rd) : vec3(0.0);
     }
 
-    float weight = 4.0 * 3.14159265 / float(uRaysPerProbe);
-    for (int k = 0; k < 12; k++) sh[k] *= weight;
+    shared_RayDir[rayIdx] = rd;
+    shared_RayRadiance[rayIdx] = radiance;
+    shared_RayDist[rayIdx] = dist;
 
-    int base = probeIdx * 12;
-    for (int k = 0; k < 12; k++) {
-        // Миксуем со старым значением или полностью заменяем
-        probeIrradiance[base + k] = mix(probeIrradiance[base + k], sh[k], temporalBlend);
+    barrier();
+
+    // 0-й поток обновляет цвет для Visual Debug
+    if (rayIdx == 0u) {
+        vec3 sumColor = vec3(0.0);
+        for(int i = 0; i < 64; i++) sumColor += shared_RayRadiance[i];
+        probes[probeIdx].colorAndState = vec4(sumColor / 64.0, 1.0);
+    }
+    barrier();
+
+    int atlasX = probeIdx % uProbeGridX;
+    int atlasY = (probeIdx / uProbeGridX) % uProbeGridY;
+    int atlasZ = probeIdx / (uProbeGridX * uProbeGridY);
+    int atlasGridY = atlasY + atlasZ * uProbeGridY;
+
+    // --- IRRADIANCE ---
+    int irrBaseX = atlasX * uIrradianceSize;
+    int irrBaseY = atlasGridY * uIrradianceSize;
+    int tx = int(rayIdx) % uIrradianceSize;
+    int ty = int(rayIdx) / uIrradianceSize;
+
+    if (tx < uIrradianceSize && ty < uIrradianceSize) {
+        vec2 octUV = (vec2(tx, ty) - vec2(0.5)) / float(uIrradianceSize - 2) * 2.0 - 1.0;
+        vec3 texelDir = octDecode(octUV);
+
+        vec3 sumIrr = vec3(0.0); float weightSumIrr = 0.0;
+        for(int i=0; i<64; i++) {
+            float w = max(0.0, dot(texelDir, shared_RayDir[i]));
+            sumIrr += shared_RayRadiance[i] * w;
+            weightSumIrr += w;
+        }
+
+        vec3 finalIrr = (weightSumIrr > 0.001) ? (sumIrr / weightSumIrr) : vec3(0.0);
+
+        ivec2 irrCoord = ivec2(irrBaseX + tx, irrBaseY + ty);
+        vec4 oldIrrData = imageLoad(uIrradianceAtlas, irrCoord);
+
+        float blend = (oldIrrData.a < 0.5) ? 1.0 : temporalBlend;
+        imageStore(uIrradianceAtlas, irrCoord, vec4(mix(oldIrrData.rgb, finalIrr, blend), 1.0));
+    }
+
+    // --- DEPTH ---
+    int depBaseX = atlasX * uDepthSize;
+    int depBaseY = atlasGridY * uDepthSize;
+
+    for(int i=0; i<4; i++) {
+        int depIdx = int(rayIdx) + i * 64;
+        int dx = depIdx % uDepthSize;
+        int dy = depIdx / uDepthSize;
+
+        if (dx < uDepthSize && dy < uDepthSize) {
+            vec2 dOctUV = (vec2(dx, dy) - vec2(0.5)) / float(uDepthSize - 2) * 2.0 - 1.0;
+            vec3 dTexelDir = octDecode(dOctUV);
+
+            vec2 sumDep = vec2(0.0); float weightSumDep = 0.0;
+            for(int r=0; r<64; r++) {
+                float w = pow(max(0.0, dot(dTexelDir, shared_RayDir[r])), 64.0);
+                sumDep += vec2(shared_RayDist[r], shared_RayDist[r] * shared_RayDist[r]) * w;
+                weightSumDep += w;
+            }
+
+            vec2 finalDep = (weightSumDep > 0.001) ? (sumDep / weightSumDep) : vec2(0.0);
+
+            ivec2 depCoord = ivec2(depBaseX + dx, depBaseY + dy);
+            vec4 oldDepData = imageLoad(uDepthAtlas, depCoord);
+
+            float blend = (oldDepData.a < 0.5) ? 1.0 : temporalBlend;
+            imageStore(uDepthAtlas, depCoord, vec4(mix(oldDepData.rg, finalDep, blend), 0.0, 1.0));
+        }
     }
 }

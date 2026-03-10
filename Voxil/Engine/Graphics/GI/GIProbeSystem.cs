@@ -5,23 +5,28 @@ using System;
 
 public class GIProbeSystem : IDisposable
 {
-    public const int PROBE_X = 8;
-    public const int PROBE_Y = 4;
-    public const int PROBE_Z = 8;
+    public const int PROBE_X = 16;
+    public const int PROBE_Y = 8;
+    public const int PROBE_Z = 16;
     public const int PROBE_COUNT = PROBE_X * PROBE_Y * PROBE_Z;
     public const float PROBE_SPACING = 4.0f;
 
-    public const int SH_FLOATS_PER_PROBE = 12;
     public const int RAYS_PER_PROBE = 64;
-    public const int PROBES_PER_FRAME = 16; 
+    public const int PROBES_PER_FRAME = 128; 
 
-    public const int BINDING_PROBE_POSITIONS = 16;
-    public const int BINDING_PROBE_IRRADIANCE = 17;
+    public const int IRRADIANCE_PROBE_SIZE = 8;  
+    public const int DEPTH_PROBE_SIZE = 16;      
 
-    private int _probePositionSsbo;  
-    private int _probeIrradianceSsbo; 
+    public readonly int IrradianceAtlasWidth = PROBE_X * IRRADIANCE_PROBE_SIZE;
+    public readonly int IrradianceAtlasHeight = (PROBE_Y * PROBE_Z) * IRRADIANCE_PROBE_SIZE;
+    
+    public readonly int DepthAtlasWidth = PROBE_X * DEPTH_PROBE_SIZE;
+    public readonly int DepthAtlasHeight = (PROBE_Y * PROBE_Z) * DEPTH_PROBE_SIZE;
 
-    // Храним БАЗОВЫЙ индекс сетки, а не float-координаты
+    public int ProbePositionSsbo { get; private set; }
+    public int IrradianceAtlasTex { get; private set; }
+    public int DepthAtlasTex { get; private set; }
+
     private int _gridBaseX, _gridBaseY, _gridBaseZ;
     private int _updateCursor = 0; 
     private readonly Shader _updateShader;
@@ -37,17 +42,34 @@ public class GIProbeSystem : IDisposable
 
     private void InitBuffers()
     {
-        // Инициализируем позиции значением -9999, чтобы в 1 кадре они все считались "грязными" и мгновенно обновились
-        float[] emptyPos = new float[PROBE_COUNT * 4];
-        Array.Fill(emptyPos, -9999.0f);
+        // ИСПРАВЛЕНИЕ: Теперь структура занимает 8 float-ов (32 байта) на зонд
+        float[] emptyPos = new float[PROBE_COUNT * 8];
+        for (int i = 0; i < PROBE_COUNT; i++)
+        {
+            emptyPos[i * 8 + 0] = -9999.0f; // pos.x
+            emptyPos[i * 8 + 1] = -9999.0f; // pos.y
+            emptyPos[i * 8 + 2] = -9999.0f; // pos.z
+        }
 
-        _probePositionSsbo = GL.GenBuffer();
-        GL.BindBuffer(BufferTarget.ShaderStorageBuffer, _probePositionSsbo);
-        GL.BufferData(BufferTarget.ShaderStorageBuffer, PROBE_COUNT * 4 * sizeof(float), emptyPos, BufferUsageHint.DynamicDraw);
+        ProbePositionSsbo = GL.GenBuffer();
+        GL.BindBuffer(BufferTarget.ShaderStorageBuffer, ProbePositionSsbo);
+        GL.BufferData(BufferTarget.ShaderStorageBuffer, PROBE_COUNT * 8 * sizeof(float), emptyPos, BufferUsageHint.DynamicDraw);
 
-        _probeIrradianceSsbo = GL.GenBuffer();
-        GL.BindBuffer(BufferTarget.ShaderStorageBuffer, _probeIrradianceSsbo);
-        GL.BufferData(BufferTarget.ShaderStorageBuffer, PROBE_COUNT * SH_FLOATS_PER_PROBE * sizeof(float), IntPtr.Zero, BufferUsageHint.DynamicDraw);
+        IrradianceAtlasTex = GL.GenTexture();
+        GL.BindTexture(TextureTarget.Texture2D, IrradianceAtlasTex);
+        GL.TexImage2D(TextureTarget.Texture2D, 0, PixelInternalFormat.Rgba16f, IrradianceAtlasWidth, IrradianceAtlasHeight, 0, PixelFormat.Rgba, PixelType.Float, IntPtr.Zero);
+        GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Linear);
+        GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMinFilter.Linear);
+        GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, (int)TextureWrapMode.ClampToEdge);
+        GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)TextureWrapMode.ClampToEdge);
+
+        DepthAtlasTex = GL.GenTexture();
+        GL.BindTexture(TextureTarget.Texture2D, DepthAtlasTex);
+        GL.TexImage2D(TextureTarget.Texture2D, 0, PixelInternalFormat.Rg16f, DepthAtlasWidth, DepthAtlasHeight, 0, PixelFormat.Rg, PixelType.Float, IntPtr.Zero);
+        GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Linear);
+        GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMinFilter.Linear);
+        GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, (int)TextureWrapMode.ClampToEdge);
+        GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)TextureWrapMode.ClampToEdge);
 
         Bind();
     }
@@ -58,9 +80,9 @@ public class GIProbeSystem : IDisposable
                        int maxRaySteps)
     {
         if (!IsValid) return;
+
         Bind();
 
-        // Вычисляем базовый индекс сетки сдвига (Toroidal Base)
         float floatBaseX = (cameraPosition.X / PROBE_SPACING) - (PROBE_X * 0.5f);
         float floatBaseY = (cameraPosition.Y / PROBE_SPACING) - (PROBE_Y * 0.5f);
         float floatBaseZ = (cameraPosition.Z / PROBE_SPACING) - (PROBE_Z * 0.5f);
@@ -70,7 +92,6 @@ public class GIProbeSystem : IDisposable
         _gridBaseZ = (int)Math.Floor(floatBaseZ);
 
         _updateShader.Use();
-        // Передаем координаты сетки
         _updateShader.SetInt("uGIGridBaseX", _gridBaseX);
         _updateShader.SetInt("uGIGridBaseY", _gridBaseY);
         _updateShader.SetInt("uGIGridBaseZ", _gridBaseZ);
@@ -81,27 +102,32 @@ public class GIProbeSystem : IDisposable
         _updateShader.SetFloat("uTime",          time);
         _updateShader.SetVector3("uSunDir",      sunDir);
         _updateShader.SetFloat("uProbeSpacing",  PROBE_SPACING);
-        _updateShader.SetInt("uProbeGridX",      PROBE_X);
-        _updateShader.SetInt("uProbeGridY",      PROBE_Y);
-        _updateShader.SetInt("uProbeGridZ",      PROBE_Z);
-        _updateShader.SetInt("uBoundMinX",       boundMinX);
-        _updateShader.SetInt("uBoundMinY",       boundMinY);
-        _updateShader.SetInt("uBoundMinZ",       boundMinZ);
-        _updateShader.SetInt("uBoundMaxX",       boundMaxX);
-        _updateShader.SetInt("uBoundMaxY",       boundMaxY);
-        _updateShader.SetInt("uBoundMaxZ",       boundMaxZ);
-        _updateShader.SetInt("uMaxRaySteps",     maxRaySteps / 2);
+        
+        _updateShader.SetInt("uProbeGridX", PROBE_X);
+        _updateShader.SetInt("uProbeGridY", PROBE_Y);
+        _updateShader.SetInt("uProbeGridZ", PROBE_Z);
+        _updateShader.SetInt("uIrradianceSize", IRRADIANCE_PROBE_SIZE);
+        _updateShader.SetInt("uDepthSize", DEPTH_PROBE_SIZE);
 
-        GL.DispatchCompute(PROBES_PER_FRAME, 1, 1);
-        GL.MemoryBarrier(MemoryBarrierFlags.ShaderStorageBarrierBit);
+        _updateShader.SetInt("uBoundMinX", boundMinX);
+        _updateShader.SetInt("uBoundMinY", boundMinY);
+        _updateShader.SetInt("uBoundMinZ", boundMinZ);
+        _updateShader.SetInt("uBoundMaxX", boundMaxX);
+        _updateShader.SetInt("uBoundMaxY", boundMaxY);
+        _updateShader.SetInt("uBoundMaxZ", boundMaxZ);
+        _updateShader.SetInt("uMaxRaySteps", maxRaySteps / 2);
+
+        GL.DispatchCompute(PROBES_PER_FRAME, RAYS_PER_PROBE, 1);
+        GL.MemoryBarrier(MemoryBarrierFlags.ShaderImageAccessBarrierBit | MemoryBarrierFlags.ShaderStorageBarrierBit);
 
         _updateCursor = (_updateCursor + PROBES_PER_FRAME) % PROBE_COUNT;
     }
 
     public void Bind()
     {
-        GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, BINDING_PROBE_POSITIONS,  _probePositionSsbo);
-        GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, BINDING_PROBE_IRRADIANCE, _probeIrradianceSsbo);
+        GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 16, ProbePositionSsbo);
+        GL.BindImageTexture(2, IrradianceAtlasTex, 0, false, 0, TextureAccess.ReadWrite, SizedInternalFormat.Rgba16f);
+        GL.BindImageTexture(3, DepthAtlasTex, 0, false, 0, TextureAccess.ReadWrite, SizedInternalFormat.Rg16f);
     }
 
     public void SetSamplingUniforms(Shader shader)
@@ -114,22 +140,56 @@ public class GIProbeSystem : IDisposable
         shader.SetInt("uGIProbeX",       PROBE_X);
         shader.SetInt("uGIProbeY",       PROBE_Y);
         shader.SetInt("uGIProbeZ",       PROBE_Z);
+        shader.SetInt("uIrradianceSize", IRRADIANCE_PROBE_SIZE);
+        shader.SetInt("uDepthSize",      DEPTH_PROBE_SIZE);
     }
 
+    // ИСПРАВЛЕНИЕ: Читаем с видеокарты и рисуем маленькие кубики!
     public void DrawProbeDebug(LineRenderer lineRenderer, Vector3 cameraPos)
     {
-        var yellow = new Vector3(1.0f, 0.85f, 0.1f);
-        var dim    = new Vector3(0.4f, 0.35f, 0.05f);
-        float nearDist = PROBE_SPACING * 2.0f;
+        if (ProbePositionSsbo == 0) return;
 
-        // Рисуем сетку на основе базовых координат (без Toroidal смешивания, чисто визуал)
-        for (int z = 0; z < PROBE_Z; z++)
-        for (int y = 0; y < PROBE_Y; y++)
-        for (int x = 0; x < PROBE_X; x++)
+        float[] probeData = new float[PROBE_COUNT * 8];
+        GL.BindBuffer(BufferTarget.ShaderStorageBuffer, ProbePositionSsbo);
+        GL.GetBufferSubData(BufferTarget.ShaderStorageBuffer, IntPtr.Zero, probeData.Length * sizeof(float), probeData);
+
+        float boxRadius = 0.08f; 
+
+        for (int i = 0; i < PROBE_COUNT; i++)
         {
-            Vector3 pos = new Vector3(_gridBaseX + x, _gridBaseY + y, _gridBaseZ + z) * PROBE_SPACING;
-            float dist = (pos - cameraPos).Length;
-            lineRenderer.DrawPoint(pos, dist < nearDist ? 0.3f : 0.15f, dist < nearDist ? yellow : dim);
+            float px = probeData[i * 8 + 0];
+            if (px <= -9000.0f) continue; 
+
+            float py = probeData[i * 8 + 1];
+            float pz = probeData[i * 8 + 2];
+            
+            float cr = probeData[i * 8 + 4];
+            float cg = probeData[i * 8 + 5];
+            float cb = probeData[i * 8 + 6];
+            float state = probeData[i * 8 + 7];
+
+            // Координаты уже приходят смещенными из шейдера, так что они идеально совпадут
+            Vector3 pos = new Vector3(px, py, pz);
+            
+            if ((pos - cameraPos).LengthSquared > 25.0f * 25.0f) continue;
+
+            Vector3 color;
+
+            if (state < 0.5f) 
+            {
+                color = new Vector3(0.25f, 0.25f, 0.25f);
+            } 
+            else 
+            {
+                color = new Vector3(cr, cg, cb);
+                color *= 1.5f; 
+                
+                color.X = Math.Clamp(color.X, 0.1f, 1.0f);
+                color.Y = Math.Clamp(color.Y, 0.1f, 1.0f);
+                color.Z = Math.Clamp(color.Z, 0.1f, 1.0f);
+            }
+
+            lineRenderer.DrawBox(pos - new Vector3(boxRadius), pos + new Vector3(boxRadius), color);
         }
     }
 
@@ -137,7 +197,8 @@ public class GIProbeSystem : IDisposable
     {
         if (_disposed) return;
         _disposed = true;
-        if (_probePositionSsbo  != 0) GL.DeleteBuffer(_probePositionSsbo);
-        if (_probeIrradianceSsbo != 0) GL.DeleteBuffer(_probeIrradianceSsbo);
+        if (ProbePositionSsbo != 0) GL.DeleteBuffer(ProbePositionSsbo);
+        if (IrradianceAtlasTex != 0) GL.DeleteTexture(IrradianceAtlasTex);
+        if (DepthAtlasTex != 0) GL.DeleteTexture(DepthAtlasTex);
     }
 }
