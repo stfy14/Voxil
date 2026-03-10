@@ -7,6 +7,7 @@ using System.Collections.Generic;
 public class GIProbeSystem : IDisposable
 {
     private int _debugVbo;
+    private int _frameIndex = 0;
 
     public const float PROBE_SPACING_L0 = 1.0f;
     public const int PROBE_X = 32, PROBE_Y = 16, PROBE_Z = 32;
@@ -309,6 +310,9 @@ public class GIProbeSystem : IDisposable
         _updateShader.SetInt("uGridSize", gridSize);
         _updateShader.SetInt("uObjectCount", objectCount);
         _updateShader.SetInt("uPointLightCount", pointLightCount);
+
+        _updateShader.SetInt("uFrameIndex", _frameIndex);
+        _frameIndex++;
 
         GL.DispatchCompute((updateCount + 63) / 64, 1, 1);
         GL.MemoryBarrier(MemoryBarrierFlags.ShaderImageAccessBarrierBit | MemoryBarrierFlags.ShaderStorageBarrierBit | MemoryBarrierFlags.TextureFetchBarrierBit);
