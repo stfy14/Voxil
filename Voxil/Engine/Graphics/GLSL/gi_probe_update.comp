@@ -31,11 +31,31 @@ uniform int   uProbeGridX, uProbeGridY, uProbeGridZ;
 int true_mod(int a, int b) { int m = a % b; return m < 0 ? m + b : m; }
 float Hash(float a, float b) { vec2 v = vec2(a, b); return fract(sin(dot(v, vec2(127.1, 311.7))) * 43758.5453); }
 
-vec3 FibonacciDirection(int i, int n, float seed) {
-    float phi2  = 2.39996323;
-    float theta = acos(1.0 - 2.0 * (float(i) + seed) / float(n));
-    float psi   = phi2 * float(i) + seed * 1.0;
-    return vec3(sin(theta) * cos(psi), cos(theta), sin(theta) * sin(psi));
+vec3 SphericalFibonacci(int i, int n) {
+    float phi2 = 2.39996323;
+    float z = 1.0 - (2.0 * float(i) + 1.0) / float(n);
+    float r = sqrt(max(1.0 - z * z, 0.0));
+    float psi = phi2 * float(i);
+    return vec3(r * cos(psi), z, r * sin(psi));
+}
+
+mat3 GetRandomRotation(float seed1, float seed2) {
+    float u1 = fract(seed1);
+    float u2 = fract(seed2);
+    float u3 = fract(seed1 * 1.3 + seed2 * 1.7);
+    float r = sqrt(max(1.0 - u1, 0.0));
+    float sq = sqrt(u1);
+    float a1 = 6.2831853 * u2;
+    float a2 = 6.2831853 * u3;
+    float x = r * cos(a1);
+    float y = r * sin(a1);
+    float z = sq * cos(a2);
+    float w = sq * sin(a2);
+    return mat3(
+        1.0 - 2.0*(y*y + z*z), 2.0*(x*y - w*z),   2.0*(x*z + w*y),
+        2.0*(x*y + w*z),   1.0 - 2.0*(x*x + z*z), 2.0*(y*z - w*x),
+        2.0*(x*z - w*y),   2.0*(y*z + w*x),   1.0 - 2.0*(x*x + y*y)
+    );
 }
 
 vec2 OctEncode(vec3 n) {
@@ -105,8 +125,7 @@ bool IsSolidAt(vec3 worldPos) {
     return (m != 0u && m != 4u);
 }
 
-bool TraceGIRay(vec3 ro, vec3 rd, float maxDist, out float tHit, out uint matID, out vec3 hitNormal)
-{
+bool TraceGIRay(vec3 ro, vec3 rd, float maxDist, out float tHit, out uint matID, out vec3 hitNormal) {
     tHit = 0.0; matID = 0u; hitNormal = vec3(0.0);
 
     vec3 safeRd = rd;
@@ -208,7 +227,6 @@ bool TraceGIRay(vec3 ro, vec3 rd, float maxDist, out float tHit, out uint matID,
             }
         }
     }
-
     return hitStatic;
 }
 
@@ -255,13 +273,30 @@ vec3 GetBounceGI(vec3 pos, vec3 norm) {
     return (wSum > 0.0001) ? irrSum / wSum : vec3(0.0);
 }
 
-vec3 SkyColor(vec3 rd) {
-    float t   = clamp(uSunDir.y * 2.0 + 0.3, 0.0, 1.0);
-    vec3  day = mix(vec3(0.6, 0.75, 1.0), vec3(0.3, 0.55, 0.9), rd.y * 0.5 + 0.5);
-    vec3  sun = vec3(1.0, 0.9, 0.7) * pow(max(0.0, dot(rd, uSunDir)), 32.0) * 2.0;
-    return mix(vec3(0.02, 0.03, 0.08), day + sun, t);
+// ИСПРАВЛЕНИЕ: Даем зондам видеть закат! (Цвета синхронизированы с atmosphere.glsl)
+vec3 SkyColor(vec3 rayDir) {
+    vec3 dayHorizon = vec3(0.60, 0.75, 0.95);
+    vec3 dayTop = vec3(0.3, 0.5, 0.85);
+    vec3 sunsetHorizon = vec3(1.0, 0.4, 0.1); 
+    vec3 sunsetTop = vec3(0.4, 0.3, 0.6);
+    vec3 nightHorizon = vec3(0.02, 0.02, 0.05);
+    vec3 nightTop = vec3(0.005, 0.005, 0.015);
+
+    float sunHeight = uSunDir.y;
+    float dayFactor = clamp(sunHeight * 4.0 + 0.2, 0.0, 1.0); 
+    float sunsetFactor = clamp(1.0 - abs(sunHeight) * 5.0, 0.0, 1.0); 
+
+    vec3 currentHorizon = mix(mix(nightHorizon, dayHorizon, dayFactor), sunsetHorizon, sunsetFactor);
+    vec3 currentTop = mix(mix(nightTop, dayTop, dayFactor), sunsetTop, sunsetFactor);
+    
+    vec3 baseSky = mix(currentHorizon, currentTop, max(rayDir.y, 0.0));
+    
+    float sunDot = dot(rayDir, uSunDir);
+    float sunGlow = pow(max(sunDot, 0.0), 16.0) * dayFactor;
+    baseSky += vec3(1.0, 0.8, 0.6) * sunGlow * 0.5;
+
+    return baseSky;
 }
-vec3 NightAmbient(vec3 rd) { return vec3(0.01, 0.01, 0.03); }
 
 void main() {
     uint localIdx = gl_GlobalInvocationID.x;
@@ -282,18 +317,19 @@ void main() {
     int gz = uGIGridBaseZ + true_mod(wz - modBaseZ, uProbeGridZ);
 
     vec3 targetPos = vec3(gx, gy, gz) * uProbeSpacing + vec3(uProbeSpacing * 0.5);
+    ivec2 irrOrigin   = IrrTileOrigin(probeIdx);
+    ivec2 depthOrigin = DepthTileOrigin(probeIdx);
 
     if (IsSolidAt(targetPos)) {
         probes[probeIdx].pos          = vec4(targetPos, 0.0);
         probes[probeIdx].colorAndState = vec4(0.0);
-        ivec2 irrOrigin   = IrrTileOrigin(probeIdx);
-        ivec2 depthOrigin = DepthTileOrigin(probeIdx);
-        for (int py = 0; py < IRR_TILE;   py++) 
-            for (int px = 0; px < IRR_TILE;   px++) 
-                imageStore(uIrrAtlas,   irrOrigin   + ivec2(px, py), vec4(0.0));
-        float deadDist = float(uProbeGridX) * uProbeSpacing;
-        for (int py = 0; py < DEPTH_TILE; py++) 
-            for (int px = 0; px < DEPTH_TILE; px++) 
+        
+        for (int py = -1; py <= IRR_TILE; py++) 
+            for (int px = -1; px <= IRR_TILE; px++) 
+                imageStore(uIrrAtlas, irrOrigin + ivec2(px, py), vec4(0.0));
+                
+        for (int py = -1; py <= DEPTH_TILE; py++) 
+            for (int px = -1; px <= DEPTH_TILE; px++) 
                 imageStore(uDepthAtlas, depthOrigin + ivec2(px, py), vec4(0.0));
         return;
     }
@@ -306,19 +342,22 @@ void main() {
 
     probes[probeIdx].pos = vec4(targetPos, 1.0);
 
-    float seed = Hash(float(wx + wy * 7 + wz * 13), float(wz + wx * 5)) * 0.5;
-    float maxRayDist = float(uProbeGridX) * uProbeSpacing * 0.5;
+    // ИСПРАВЛЕНИЕ РАЗНИЦЫ L0 И L1: 
+    // Заставляем L0 пускать лучи минимум на 48 метров, чтобы они не слепли на мелких расстояниях, 
+    // думая, что ближайшая гора - это предел вселенной.
+    float maxRayDist = max(float(uProbeGridX) * uProbeSpacing * 0.75, 48.0);
 
     const int MAX_RAYS = 128;
     vec3  rayDirs[MAX_RAYS];
     vec3  rayRadiance[MAX_RAYS];
     float rayDist[MAX_RAYS];
 
-    // -----------------------------------------------------------------------
-    // ШАГ 1: Цикл лучей — считаем radiance для каждого луча
-    // -----------------------------------------------------------------------
+    float seed1 = Hash(float(wx + wy * 7 + wz * 13), uTime);
+    float seed2 = Hash(uTime, float(wz + wx * 5));
+    mat3 probeRot = GetRandomRotation(seed1, seed2);
+
     for (int ray = 0; ray < uRaysPerProbe && ray < MAX_RAYS; ray++) {
-        vec3 rd = FibonacciDirection(ray, uRaysPerProbe, seed);
+        vec3 rd = probeRot * SphericalFibonacci(ray, uRaysPerProbe);
         rayDirs[ray] = rd;
 
         float tHit = 0.0; uint matID = 0u; vec3 hitNorm = vec3(0.0);
@@ -330,19 +369,14 @@ void main() {
 
             if (dot(rd, hitNorm) > 0.0) {
                 radiance = vec3(0.0);
-                dist = tHit * 0.2; // ← ДОБАВИТЬ: сокращаем depth на 80%
-
+                dist = tHit * 0.2; 
             } else if (IsEmissive(matID)) {
-                // Прямое попадание в источник света — с затуханием по дистанции
                 float falloff = 1.0 / max(tHit * tHit, 1.0);
                 radiance = GetVoxelAlbedo(matID) * 20.0 * falloff;
-
             } else {
-                // Обычная поверхность — считаем освещение на точке попадания
                 vec3 hitPos      = targetPos + rd * tHit;
                 vec3 shadowStart = hitPos + hitNorm * 0.02;
 
-                // --- Солнечный свет ---
                 bool inShadow = IsSolidAt(shadowStart);
                 if (!inShadow && uSunDir.y > 0.0) {
                     float sHit; uint sMat; vec3 sNorm;
@@ -354,7 +388,6 @@ void main() {
                 vec3  directLight  = inShadow ? vec3(0.0)
                                               : vec3(1.0, 0.95, 0.8) * sunIntensity * nDotL * 3.0;
 
-                // --- Point lights (непрямое — свет на поверхностях рядом с зондом) ---
                 vec3 pointLightLight = vec3(0.0);
                 for (int pl = 0; pl < uPointLightCount && pl < 32; pl++) {
                     vec3  lPos   = pointLights[pl].posRadius.xyz;
@@ -380,39 +413,32 @@ void main() {
                     pointLightLight += lCol * plNDotL * (lInt / max(plDist * plDist, 1.0)) * win * plShadow;
                 }
 
-                // --- Bounce GI ---
                 vec3 bounce = GetBounceGI(shadowStart, hitNorm) * 0.3;
-
-                // --- Ночной амбиент ---
+                
+                // ИСПРАВЛЕНИЕ: Добавляем теплое закатное освещение в тени, чтобы они не были угольно-черными!
+                float sunsetAmb = clamp(1.0 - abs(uSunDir.y) * 5.0, 0.0, 1.0);
                 float nightAmb = clamp(-uSunDir.y * 2.0, 0.0, 1.0);
-                vec3  ambLight = vec3(0.05, 0.07, 0.12) * nightAmb
-                               * max(0.1, dot(hitNorm, vec3(0,1,0)) * 0.5 + 0.5);
+                vec3 ambLight = vec3(0.05, 0.07, 0.12) * nightAmb;
+                ambLight += vec3(0.3, 0.15, 0.05) * sunsetAmb; 
+                ambLight *= max(0.1, dot(hitNorm, vec3(0,1,0)) * 0.5 + 0.5);
 
                 radiance = GetVoxelAlbedo(matID) * (directLight + pointLightLight + bounce + ambLight);
             }
         } else {
             dist     = maxRayDist;
-            radiance = (rd.y > 0.0) ? SkyColor(rd) : NightAmbient(rd);
+            radiance = SkyColor(rd); // ← Вызов нашей новой синхронизированной функции
         }
 
-        // === ИСПРАВЛЕНИЕ: FIREFLY CLAMPING ===
-        // Если яркость этого луча слишком велика (например, вплотную к Glow блоку),
-        // ограничиваем ее. Это убивает "утечки" и резкие вспышки зондов.
-        float maxRadiance = 15.0; // Максимальная допустимая энергия одного луча
+        float maxRadiance = 15.0; 
         float lum = dot(radiance, vec3(0.2126, 0.7152, 0.0722));
         if (lum > maxRadiance) {
             radiance *= maxRadiance / lum;
         }
-        // =====================================
 
         rayRadiance[ray] = radiance;
         rayDist[ray]     = dist;
     }
 
-    // -----------------------------------------------------------------------
-    // ШАГ 2: Кэш прямой видимости point lights с позиции зонда
-    // (для равномерного распределения по всему атласу)
-    // -----------------------------------------------------------------------
     vec3 plDirs[32];
     vec3 plColors[32];
     int  plCount = 0;
@@ -423,16 +449,15 @@ void main() {
         vec3  lCol  = pointLights[pl].colorIntensity.rgb;
         float lInt  = pointLights[pl].colorIntensity.a;
 
-        vec3  toL  = lPos - targetPos;   // от зонда к источнику
+        vec3  toL  = lPos - targetPos;  
         float dist = length(toL);
         if (dist > lRad || dist < 0.05) continue;
 
         vec3 L = toL / dist;
 
-        // Проверяем прямую видимость источника с позиции зонда
         float dD; uint dM; vec3 dN;
         if (TraceGIRay(targetPos + L * 0.1, L, dist - 0.3, dD, dM, dN))
-            if (dM != 7u) continue;  // заблокирован — пропускаем
+            if (dM != 7u) continue; 
 
         float win = max(0.0, 1.0 - dist / lRad);
         win = win * win * win * win;
@@ -442,19 +467,14 @@ void main() {
         plCount++;
     }
 
-    // -----------------------------------------------------------------------
-    // ШАГ 3: Запись irradiance атласа
-    // -----------------------------------------------------------------------
     vec3 avgColor = vec3(0.0);
 
     {
-        ivec2 origin = IrrTileOrigin(probeIdx);
         for (int py = 0; py < IRR_TILE; py++) {
         for (int px = 0; px < IRR_TILE; px++) {
             vec2 uv       = (vec2(px, py) + 0.5) / float(IRR_TILE);
             vec3 pixelDir = OctDecode(uv);
 
-            // Суммируем вклад лучей
             vec3  irrSum = vec3(0.0);
             float wSum   = 0.0;
             for (int ray = 0; ray < uRaysPerProbe && ray < MAX_RAYS; ray++) {
@@ -465,18 +485,16 @@ void main() {
             }
             vec3 newIrr = (wSum > 0.0) ? irrSum / wSum : vec3(0.0);
 
-            // Добавляем прямой вклад point lights (равномерно по атласу)
             for (int pl = 0; pl < plCount; pl++) {
                 float nDotL = max(0.0, dot(pixelDir, plDirs[pl]));
                 newIrr += plColors[pl] * nDotL * 0.318;
             }
 
-            // Hysteresis
             float blend   = justWokeUp ? 1.0 : 0.10;
             vec3  prevIrr = vec3(0.0);
 
             if (!justWokeUp) {
-                prevIrr = imageLoad(uIrrAtlas, origin + ivec2(px, py)).rgb;
+                prevIrr = imageLoad(uIrrAtlas, irrOrigin + ivec2(px, py)).rgb;
                 float lumPrev = dot(prevIrr, vec3(0.299, 0.587, 0.114));
                 float lumNew  = dot(newIrr,  vec3(0.299, 0.587, 0.114));
                 float diff    = abs(lumNew - lumPrev);
@@ -485,15 +503,11 @@ void main() {
 
             newIrr = mix(prevIrr, newIrr, blend);
             avgColor += newIrr;
-            imageStore(uIrrAtlas, origin + ivec2(px, py), vec4(newIrr, 1.0));
+            imageStore(uIrrAtlas, irrOrigin + ivec2(px, py), vec4(newIrr, 1.0));
         }}
     }
 
-    // -----------------------------------------------------------------------
-    // ШАГ 4: Запись depth атласа
-    // -----------------------------------------------------------------------
     {
-        ivec2 origin = DepthTileOrigin(probeIdx);
         for (int py = 0; py < DEPTH_TILE; py++) {
         for (int px = 0; px < DEPTH_TILE; px++) {
             vec2 uv       = (vec2(px, py) + 0.5) / float(DEPTH_TILE);
@@ -503,8 +517,6 @@ void main() {
             for (int ray = 0; ray < uRaysPerProbe && ray < MAX_RAYS; ray++) {
                 float w_cos = max(0.0, dot(pixelDir, rayDirs[ray]));
                 if (w_cos < 0.001) continue;
-                // Sharpened lobe: делает depth boundaries резче → Chebyshev точнее
-                // для воксельных стен с жёсткими границами это особенно важно
                 float cageDiagonal = uProbeSpacing * 1.732;
                 float w = pow(w_cos, 4.0);
                 float d = min(rayDist[ray], cageDiagonal);
@@ -519,13 +531,41 @@ void main() {
             float blend    = justWokeUp ? 1.0 : 0.10;
             vec2  prevDepth = vec2(maxRayDist, maxRayDist * maxRayDist);
             if (!justWokeUp)
-                prevDepth = imageLoad(uDepthAtlas, origin + ivec2(px, py)).rg;
+                prevDepth = imageLoad(uDepthAtlas, depthOrigin + ivec2(px, py)).rg;
 
             newDepth = mix(prevDepth, newDepth, blend);
-            imageStore(uDepthAtlas, origin + ivec2(px, py), vec4(newDepth, 0.0, 1.0));
+            imageStore(uDepthAtlas, depthOrigin + ivec2(px, py), vec4(newDepth, 0.0, 1.0));
         }}
     }
 
-    // Сохраняем средний цвет зонда для debug-кубиков
     probes[probeIdx].colorAndState = vec4(avgColor / float(IRR_TILE * IRR_TILE), 1.0);
+    
+    memoryBarrierImage();
+    barrier();
+
+    for (int px = 0; px < IRR_TILE; px++) {
+        imageStore(uIrrAtlas, irrOrigin + ivec2(px, -1),       imageLoad(uIrrAtlas, irrOrigin + ivec2(IRR_TILE - 1 - px, 0)));
+        imageStore(uIrrAtlas, irrOrigin + ivec2(px, IRR_TILE), imageLoad(uIrrAtlas, irrOrigin + ivec2(IRR_TILE - 1 - px, IRR_TILE - 1)));
+    }
+    for (int py = 0; py < IRR_TILE; py++) {
+        imageStore(uIrrAtlas, irrOrigin + ivec2(-1, py),       imageLoad(uIrrAtlas, irrOrigin + ivec2(0, IRR_TILE - 1 - py)));
+        imageStore(uIrrAtlas, irrOrigin + ivec2(IRR_TILE, py), imageLoad(uIrrAtlas, irrOrigin + ivec2(IRR_TILE - 1, IRR_TILE - 1 - py)));
+    }
+    imageStore(uIrrAtlas, irrOrigin + ivec2(-1, -1),             imageLoad(uIrrAtlas, irrOrigin + ivec2(0, 0)));
+    imageStore(uIrrAtlas, irrOrigin + ivec2(IRR_TILE, -1),       imageLoad(uIrrAtlas, irrOrigin + ivec2(IRR_TILE - 1, 0)));
+    imageStore(uIrrAtlas, irrOrigin + ivec2(-1, IRR_TILE),       imageLoad(uIrrAtlas, irrOrigin + ivec2(0, IRR_TILE - 1)));
+    imageStore(uIrrAtlas, irrOrigin + ivec2(IRR_TILE, IRR_TILE), imageLoad(uIrrAtlas, irrOrigin + ivec2(IRR_TILE - 1, IRR_TILE - 1)));
+
+    for (int px = 0; px < DEPTH_TILE; px++) {
+        imageStore(uDepthAtlas, depthOrigin + ivec2(px, -1),         imageLoad(uDepthAtlas, depthOrigin + ivec2(DEPTH_TILE - 1 - px, 0)));
+        imageStore(uDepthAtlas, depthOrigin + ivec2(px, DEPTH_TILE), imageLoad(uDepthAtlas, depthOrigin + ivec2(DEPTH_TILE - 1 - px, DEPTH_TILE - 1)));
+    }
+    for (int py = 0; py < DEPTH_TILE; py++) {
+        imageStore(uDepthAtlas, depthOrigin + ivec2(-1, py),         imageLoad(uDepthAtlas, depthOrigin + ivec2(0, DEPTH_TILE - 1 - py)));
+        imageStore(uDepthAtlas, depthOrigin + ivec2(DEPTH_TILE, py), imageLoad(uDepthAtlas, depthOrigin + ivec2(DEPTH_TILE - 1, DEPTH_TILE - 1 - py)));
+    }
+    imageStore(uDepthAtlas, depthOrigin + ivec2(-1, -1),                 imageLoad(uDepthAtlas, depthOrigin + ivec2(0, 0)));
+    imageStore(uDepthAtlas, depthOrigin + ivec2(DEPTH_TILE, -1),         imageLoad(uDepthAtlas, depthOrigin + ivec2(DEPTH_TILE - 1, 0)));
+    imageStore(uDepthAtlas, depthOrigin + ivec2(-1, DEPTH_TILE),         imageLoad(uDepthAtlas, depthOrigin + ivec2(0, DEPTH_TILE - 1)));
+    imageStore(uDepthAtlas, depthOrigin + ivec2(DEPTH_TILE, DEPTH_TILE), imageLoad(uDepthAtlas, depthOrigin + ivec2(DEPTH_TILE - 1, DEPTH_TILE - 1)));
 }
