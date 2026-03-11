@@ -8,21 +8,24 @@ public class GIProbeSystem : IDisposable
 {
     private int _debugVbo;
 
-    public const float PROBE_SPACING_L0 = 1.0f;
-    public const int PROBE_X = 32, PROBE_Y = 16, PROBE_Z = 32;
-    public const int PROBE_COUNT = PROBE_X * PROBE_Y * PROBE_Z;
+    // Оптимизированная сетка: покрывает ту же площадь, но требует в 5 раз меньше памяти!
+    public const float PROBE_SPACING_L0 = 2.0f;
+    public const int PROBE_X = 16, PROBE_Y = 12, PROBE_Z = 16;
+    public const int PROBE_COUNT = PROBE_X * PROBE_Y * PROBE_Z; // Всего 3072 зонда!
 
-    public const float PROBE_SPACING_L1 = 4.0f;
-    public const float PROBE_SPACING_L2 = 16.0f;
+    public const float PROBE_SPACING_L1 = 6.0f;
+    public const float PROBE_SPACING_L2 = 18.0f;
 
+    // Максимальное качество лучей
     public const int RAYS_PER_PROBE_L0 = 64;
     public const int RAYS_PER_PROBE_L1 = 32;
     public const int RAYS_PER_PROBE_L2 = 16;
 
-    // Чтобы не убить GPU количеством лучей, можно снизить число обновляемых зондов:
+    // При 512 обновлениях за кадр вся сетка L0 (3072 зонда) обновится за 6 кадров!
+    // Это 10-20 полных обновлений света в секунду!
     public const int PROBES_PER_FRAME_L0 = 512;
-    public const int PROBES_PER_FRAME_L1 = 256;  // Было 512
-    public const int PROBES_PER_FRAME_L2 = 128;  // Было 256
+    public const int PROBES_PER_FRAME_L1 = 256;
+    public const int PROBES_PER_FRAME_L2 = 128;
 
     public const float PROBE_SPACING = PROBE_SPACING_L0;
     public const int RAYS_PER_PROBE = RAYS_PER_PROBE_L0;
@@ -70,7 +73,6 @@ public class GIProbeSystem : IDisposable
     private readonly Shader _updateShader;
     private bool _disposed;
 
-    // --- Для дебага (цельные кубики) ---
     private Shader _debugShader;
     private int _debugVao;
 
@@ -139,7 +141,7 @@ public class GIProbeSystem : IDisposable
         layout(std430, binding = 16) buffer ProbeBuffer { ProbeData probes[]; };
         
         uniform mat4 uViewProj;
-        uniform float uCubeSize; // <--- НОВОЕ: Динамический размер кубика
+        uniform float uCubeSize;
         out vec3 vColor;
         
         void main() {
@@ -148,9 +150,8 @@ public class GIProbeSystem : IDisposable
                 gl_Position = vec4(10000.0, 10000.0, 10000.0, 1.0); 
                 vColor = vec3(0.0);
             } else {
-                vec3 localPos = aPos * uCubeSize; // <--- ИСПОЛЬЗУЕМ UNIFORM
+                vec3 localPos = aPos * uCubeSize;
                 vec3 worldPos = p.pos.xyz + localPos;
-                
                 gl_Position = uViewProj * vec4(worldPos, 1.0);
                 vColor = p.color.rgb; 
             }
@@ -167,7 +168,6 @@ public class GIProbeSystem : IDisposable
 
         _debugShader = new Shader(vert, frag, true);
 
-        // Физические вершины куба
         float[] cubeVerts = new float[] {
             -1,-1,-1,  1,-1,-1,  1, 1,-1,  1, 1,-1, -1, 1,-1, -1,-1,-1,
         -1,-1, 1,  1,-1, 1,  1, 1, 1,  1, 1, 1, -1, 1, 1, -1,-1, 1,
@@ -175,19 +175,15 @@ public class GIProbeSystem : IDisposable
          1, 1, 1,  1, 1,-1,  1,-1,-1,  1,-1,-1,  1,-1, 1,  1, 1, 1,
         -1,-1,-1,  1,-1,-1,  1,-1, 1,  1,-1, 1, -1,-1, 1, -1,-1,-1,
         -1, 1,-1,  1, 1,-1,  1, 1, 1,  1, 1, 1, -1, 1, 1, -1, 1,-1
-        }
-        ;
+        };
 
         _debugVao = GL.GenVertexArray();
         _debugVbo = GL.GenBuffer();
-
         GL.BindVertexArray(_debugVao);
         GL.BindBuffer(BufferTarget.ArrayBuffer, _debugVbo);
         GL.BufferData(BufferTarget.ArrayBuffer, cubeVerts.Length * sizeof(float), cubeVerts, BufferUsageHint.StaticDraw);
-
         GL.EnableVertexAttribArray(0);
         GL.VertexAttribPointer(0, 3, VertexAttribPointerType.Float, false, 3 * sizeof(float), 0);
-
         GL.BindVertexArray(0);
     }
 
@@ -225,7 +221,7 @@ public class GIProbeSystem : IDisposable
                        int boundMaxX, int boundMaxY, int boundMaxZ,
                        int maxRaySteps,
                        Vector3 gridOrigin, float gridStep, int gridSize, int objectCount, int pointLightCount,
-                       int pageTableTex, int gridHeadTex) // <--- ВОТ ЭТИ ДВА
+                       int pageTableTex, int gridHeadTex)
     {
         if (!IsValid) return;
 
@@ -272,6 +268,8 @@ public class GIProbeSystem : IDisposable
             if (!level.IsInPriority[idx]) _updateBufferCPU[updateCount++] = idx;
         }
 
+        if (updateCount == 0) return;
+
         GL.BindBuffer(BufferTarget.ShaderStorageBuffer, _updateListSsbo);
         GL.BufferSubData(BufferTarget.ShaderStorageBuffer, IntPtr.Zero, updateCount * sizeof(int), _updateBufferCPU);
         GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 22, _updateListSsbo);
@@ -280,12 +278,10 @@ public class GIProbeSystem : IDisposable
         GL.BindImageTexture(2, irrTex, 0, false, 0, TextureAccess.ReadWrite, SizedInternalFormat.R11fG11fB10f);
         GL.BindImageTexture(3, depthTex, 0, false, 0, TextureAccess.ReadWrite, SizedInternalFormat.Rg32f);
 
-        // ИСПРАВЛЕНИЕ: Было захардкожено IrrTexL0. Теперь каждый каскад читает СВОЮ историю света!
         GL.ActiveTexture(TextureUnit.Texture5);
         GL.BindTexture(TextureTarget.Texture2D, irrTex);
 
         _updateShader.Use();
-        // ---> ДОБАВЬ ЭТО: Биндим текстуры поиска путей
         GL.ActiveTexture(TextureUnit.Texture6);
         GL.BindTexture(TextureTarget.Texture3D, pageTableTex);
         _updateShader.SetInt("uPageTable", 6);
@@ -293,7 +289,7 @@ public class GIProbeSystem : IDisposable
         GL.ActiveTexture(TextureUnit.Texture7);
         GL.BindTexture(TextureTarget.Texture3D, gridHeadTex);
         _updateShader.SetInt("uObjectGridHead", 7);
-        // ---------------------------------------------
+
         _updateShader.SetInt("uBounceIrrAtlas", 5);
         _updateShader.SetInt("uGIGridBaseX", bx);
         _updateShader.SetInt("uGIGridBaseY", by);
@@ -320,12 +316,11 @@ public class GIProbeSystem : IDisposable
         _updateShader.SetInt("uObjectCount", objectCount);
         _updateShader.SetInt("uPointLightCount", pointLightCount);
 
-        // ---> ДОБАВИТЬ ЭТИ ДВЕ СТРОКИ <---
         _updateShader.SetVector3("uCamPos", camPos);
-        _updateShader.SetFloat("uLodDistance", 100000.0f); // Выключаем LOD для GI-лучей
-        // ---------------------------------
+        _updateShader.SetFloat("uLodDistance", 100000.0f);
 
-        GL.DispatchCompute((updateCount + 63) / 64, 1, 1);
+        // ИСПРАВЛЕНИЕ: Теперь мы запускаем updateCount ГРУПП. Каждая группа = 1 зонд (внутри 64 потока)
+        GL.DispatchCompute(updateCount, 1, 1);
         GL.MemoryBarrier(MemoryBarrierFlags.ShaderImageAccessBarrierBit | MemoryBarrierFlags.ShaderStorageBarrierBit | MemoryBarrierFlags.TextureFetchBarrierBit);
     }
 
@@ -361,20 +356,15 @@ public class GIProbeSystem : IDisposable
     {
         if (_debugShader == null || !GameSettings.ShowGIProbes) return;
 
-        // ИСПРАВЛЕНИЕ: Читаем настройку X-Ray!
-        if (GameSettings.ShowGIProbesXRay)
-            GL.Disable(EnableCap.DepthTest); // Рентген: видно сквозь стены
-        else
-            GL.Enable(EnableCap.DepthTest);  // Обычный: кубики прячутся за горами
+        if (GameSettings.ShowGIProbesXRay) GL.Disable(EnableCap.DepthTest);
+        else GL.Enable(EnableCap.DepthTest);
 
         _debugShader.Use();
         _debugShader.SetMatrix4("uViewProj", cam.View * cam.Projection);
-
         GL.BindVertexArray(_debugVao);
 
         int lod = GameSettings.GIDebugLOD;
 
-        // Вспомогательная функция для отрисовки нужного уровня
         void DrawLevel(int ssbo, float size)
         {
             GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 16, ssbo);
@@ -387,8 +377,6 @@ public class GIProbeSystem : IDisposable
         if (lod == 2 || lod == -1) DrawLevel(ProbePositionSsboL2, 1.2f);
 
         GL.BindVertexArray(0);
-
-        // Обязательно возвращаем стандартный DepthTest для остального движка
         GL.Enable(EnableCap.DepthTest);
     }
 

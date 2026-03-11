@@ -1,6 +1,4 @@
 // --- START OF FILE gi.glsl.txt ---
-// DDGI: октаэдрические атласы irradiance + depth, Chebyshev visibility test
-
 uniform sampler2D uGIIrrAtlas;
 uniform sampler2D uGIDepthAtlas;
 uniform sampler2D uGIIrrAtlasL1;
@@ -35,12 +33,9 @@ vec2 ProbeAtlasUV(int probeIdx, vec3 dir, int tileSize, int atlasW, int atlasH) 
     int wx = probeIdx % uGIProbeX;
     int wy = (probeIdx / uGIProbeX) % uGIProbeY;
     int wz = probeIdx / (uGIProbeX * uGIProbeY);
-    int col = wx;
-    int row = wy + wz * uGIProbeY;
-    vec2 tileOrigin = vec2(float(col * pad) + 1.0, float(row * pad) + 1.0);
+    vec2 tileOrigin = vec2(float(wx * pad) + 1.0, float((wy + wz * uGIProbeY) * pad) + 1.0);
     vec2 octUV   = OctEncode(normalize(dir));
-    vec2 pixelXY = tileOrigin + octUV * float(tileSize);
-    return pixelXY / vec2(float(atlasW), float(atlasH));
+    return (tileOrigin + octUV * float(tileSize)) / vec2(float(atlasW), float(atlasH));
 }
 
 float ChebyshevVisibility(vec2 depthMoments, float dist, float spacing) {
@@ -74,7 +69,8 @@ vec3 GIFallback(vec3 normal) {
 }
 
 float ComputeEdgeFade(vec3 worldPos, int bX, int bY, int bZ, float sp) {
-    vec3 gridCenter = (vec3(float(bX), float(bY), float(bZ)) + vec3(float(uGIProbeX), float(uGIProbeY), float(uGIProbeZ)) * 0.5) * sp;
+    vec3 gridCenter = (vec3(float(bX), float(bY), float(bZ)) + 
+                       vec3(float(uGIProbeX), float(uGIProbeY), float(uGIProbeZ)) * 0.5) * sp;
     vec3 halfExt    = vec3(float(uGIProbeX), float(uGIProbeY), float(uGIProbeZ)) * sp * 0.5;
     vec3 distEdge   = halfExt - abs(worldPos - gridCenter);
     return clamp(min(min(distEdge.x, distEdge.y), distEdge.z) / (sp * 2.0), 0.0, 1.0);
@@ -105,6 +101,13 @@ vec4 SampleProbeLevel(vec3 worldPos, vec3 normal, vec3 viewDir, sampler2D irrAtl
     for (int dz = 0; dz <= 1; dz++)
     for (int dy = 0; dy <= 1; dy++)
     for (int dx = 0; dx <= 1; dx++) {
+        float trilinear = ((dx == 0) ? (1.0 - fs.x) : fs.x) * 
+                          ((dy == 0) ? (1.0 - fs.y) : fs.y) * 
+                          ((dz == 0) ? (1.0 - fs.z) : fs.z);
+                          
+        // СУПЕР ОПТИМИЗАЦИЯ 1: Если вес трилинейки нулевой, даже не считаем вектора!
+        if (trilinear < 0.001) continue;
+
         ivec3 p = clamp(p0 + ivec3(dx, dy, dz), ivec3(0), ivec3(uGIProbeX-1, uGIProbeY-1, uGIProbeZ-1));
         ivec3 g   = ivec3(bX, bY, bZ) + p;
         int   idx = gi_mod(g.x, uGIProbeX) + uGIProbeX * (gi_mod(g.y, uGIProbeY) + uGIProbeY *  gi_mod(g.z, uGIProbeZ));
@@ -114,7 +117,13 @@ vec4 SampleProbeLevel(vec3 worldPos, vec3 normal, vec3 viewDir, sampler2D irrAtl
         float probeDist = length(toProbe) + 0.0001;
         vec3  dirToProbe = toProbe / probeDist;
 
-        float trilinear = ((dx == 0) ? (1.0 - fs.x) : fs.x) * ((dy == 0) ? (1.0 - fs.y) : fs.y) * ((dz == 0) ? (1.0 - fs.z) : fs.z);
+        float backfaceW = (dot(normal, dirToProbe) + 0.3) / 1.3;
+        backfaceW = clamp(backfaceW, 0.0, 1.0);
+        
+        float w = trilinear * backfaceW;
+        
+        // СУПЕР ОПТИМИЗАЦИЯ 2: Если луч смотрит в стену, НЕ лезем в память за текстурой глубины!
+        if (w < 0.001) continue;
 
         vec3  fromProbeDir = -dirToProbe;
         vec2  depthMoments = texture(depthAtlas, ProbeAtlasUV(idx, fromProbeDir, uDepthTile, depthAtlasW, depthAtlasH)).rg;
@@ -127,15 +136,10 @@ vec4 SampleProbeLevel(vec3 worldPos, vec3 normal, vec3 viewDir, sampler2D irrAtl
             backupWs  += trilinear;
         }
 
-        float backfaceW = (dot(normal, dirToProbe) + 0.3) / 1.3;
-        backfaceW = clamp(backfaceW, 0.0, 1.0);
-        
-        float w = trilinear * backfaceW;
-        if (w < 0.001) continue;
-
         float visibility = ChebyshevVisibility(depthMoments, probeDist, sp);
         w *= (visibility * visibility); 
 
+        // СУПЕР ОПТИМИЗАЦИЯ 3: Если зонд перекрыт стеной, НЕ лезем в память за текстурой цвета!
         if (w < 0.001) continue;
 
         vec2 irrUV = ProbeAtlasUV(idx, normal, uIrrTile, irrAtlasW, irrAtlasH);
@@ -147,30 +151,25 @@ vec4 SampleProbeLevel(vec3 worldPos, vec3 normal, vec3 viewDir, sampler2D irrAtl
     return vec4(irrSum, wsSum);
 }
 
-// ОПТИМИЗАЦИЯ ДЛЯ 200+ FPS: EARLY-OUT (РАННИЙ ВЫХОД)
 vec3 SampleGIProbes(vec3 worldPos, vec3 normal, vec3 viewDir) {
     vec3 fallback = GIFallback(normal);
 
-    // 1. Считаем L0
+    // Считаем L0
     float fade0 = ComputeEdgeFade(worldPos, uGIGridBaseX, uGIGridBaseY, uGIGridBaseZ, uGIProbeSpacing);
     vec4 s0 = SampleProbeLevel(worldPos, normal, viewDir, uGIIrrAtlas, uGIDepthAtlas, uGIGridBaseX, uGIGridBaseY, uGIGridBaseZ, uGIProbeSpacing);
     
-    // Если мы глубоко внутри сетки L0 и нашли хороший свет - СКИПАЕМ L1 и L2! (Экономит 70% производительности GI)
-    if (s0.a > 0.01 && fade0 >= 0.999) {
-        return s0.rgb / s0.a;
-    }
+    // ОГРОМНАЯ ОПТИМИЗАЦИЯ ДЛЯ ФПС: 
+    // Если мы идеально внутри L0 (в радиусе 16м от камеры) и есть качественный свет - скипаем расчеты дальних слоев!
+    if (fade0 >= 0.999 && s0.a > 0.01) return s0.rgb / s0.a;
 
-    // 2. Считаем L1
+    // Считаем L1
     float fade1 = ComputeEdgeFade(worldPos, uGIGridBaseX_L1, uGIGridBaseY_L1, uGIGridBaseZ_L1, uGIProbeSpacingL1);
     vec4 s1 = SampleProbeLevel(worldPos, normal, viewDir, uGIIrrAtlasL1, uGIDepthAtlasL1, uGIGridBaseX_L1, uGIGridBaseY_L1, uGIGridBaseZ_L1, uGIProbeSpacingL1);
     
-    // Если мы глубоко внутри L1 (но на краю L0) - СКИПАЕМ L2!
-    if (s1.a > 0.01 && fade1 >= 0.999) {
-        vec3 irr0 = (s0.a > 0.01) ? (s0.rgb / s0.a) : (s1.rgb / s1.a);
-        return mix(s1.rgb / s1.a, irr0, fade0);
-    }
+    // ОПТИМИЗАЦИЯ: Если мы внутри L1, скипаем L2!
+    if (fade1 >= 0.999 && fade0 <= 0.001 && s1.a > 0.01) return s1.rgb / s1.a;
 
-    // 3. Только если мы на самом краю мира, считаем L2
+    // Считаем L2
     float fade2 = ComputeEdgeFade(worldPos, uGIGridBaseX_L2, uGIGridBaseY_L2, uGIGridBaseZ_L2, uGIProbeSpacingL2);
     vec4 s2 = SampleProbeLevel(worldPos, normal, viewDir, uGIIrrAtlasL2, uGIDepthAtlasL2, uGIGridBaseX_L2, uGIGridBaseY_L2, uGIGridBaseZ_L2, uGIProbeSpacingL2);
     

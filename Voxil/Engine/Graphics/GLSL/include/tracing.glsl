@@ -137,7 +137,6 @@ bool TraceDynamicRay(vec3 ro, vec3 rd, float maxDist, inout float tHit, inout in
     vec3 rayOriginWorld = ro + safeRd * tCurrent;
     rayOriginWorld = clamp(rayOriginWorld, gridMin + 0.001, gridMax - 0.001);
 
-    // НАДЕЖНАЯ ФОРМУЛА DDA
     vec3 rayPosGrid = (rayOriginWorld - uGridOrigin) / uGridStep;
     ivec3 mapPos = ivec3(floor(rayPosGrid));
     vec3 deltaDist = abs(invRd) * uGridStep;
@@ -212,7 +211,6 @@ bool TraceStaticRay(vec3 ro, vec3 rd, float maxDist, float tStart, inout float t
     vec3 rayOrigin = ro + safeRd * tCurrent;
     rayOrigin = clamp(rayOrigin, worldMin + 0.001, worldMax - 0.001);
 
-    // НАДЕЖНАЯ ФОРМУЛА DDA
     vec3 rayPosChunk = rayOrigin / float(CHUNK_SIZE);
     ivec3 cMapPos = ivec3(floor(rayPosChunk));
     vec3 cDeltaDist = abs(invRd) * float(CHUNK_SIZE);
@@ -232,8 +230,15 @@ bool TraceStaticRay(vec3 ro, vec3 rd, float maxDist, float tStart, inout float t
 
         if (chunkSlot != 0xFFFFFFFFu) {
             if ((chunkSlot & 0x80000000u) != 0u) {
-                tHit = tCurrent; matID = chunkSlot & 0x7FFFFFFFu;
-                normal = length(cMask) > 0.5 ? -vec3(cStepDir) * cMask : -vec3(cStepDir);
+                // Идеальное пересечение с AABB целого чанка! Никаких погрешностей
+                if (length(cMask) < 0.5) tHit = tCurrent;
+                else {
+                    vec3 hitMin = vec3(cMapPos) * float(CHUNK_SIZE);
+                    vec3 tEntry = min((hitMin - ro) * invRd, (hitMin + float(CHUNK_SIZE) - ro) * invRd);
+                    tHit = max(max(tEntry.x, tEntry.y), tEntry.z);
+                }
+                matID = chunkSlot & 0x7FFFFFFFu;
+                normal = length(cMask) > 0.5 ? -vec3(cStepDir) * cMask : -normalize(safeRd);
                 return true;
             }
 
@@ -271,19 +276,15 @@ bool TraceStaticRay(vec3 ro, vec3 rd, float maxDist, float tStart, inout float t
                         uint lodMatID = GetVoxelData(chunkSlot, idx);
                         
                         if (lodMatID != 0u) {
-                            vec2 tBlock = IntersectAABB(ro, invRd, chunkOrigin + vec3(blockOrigin), chunkOrigin + vec3(blockOrigin) + vec3(BLOCK_SIZE));
-                            if (tBlock.x <= tBlock.y && tBlock.y > 0.0) {
-                                tHit = max(tCurrent, tBlock.x); 
-                                matID = lodMatID;
-                                
-                                vec3 btNear = min((chunkOrigin + vec3(blockOrigin) - ro) * invRd, (chunkOrigin + vec3(blockOrigin) + vec3(BLOCK_SIZE) - ro) * invRd);
-                                if (abs(btNear.x - tBlock.x) < 0.001) normal = vec3(-sign(safeRd.x), 0.0, 0.0);
-                                else if (abs(btNear.y - tBlock.x) < 0.001) normal = vec3(0.0, -sign(safeRd.y), 0.0);
-                                else if (abs(btNear.z - tBlock.x) < 0.001) normal = vec3(0.0, 0.0, -sign(safeRd.z));
-                                else normal = -normalize(safeRd);
-                                
-                                return true;
+                            if (length(bMask) < 0.5) tHit = tCurrent;
+                            else {
+                                vec3 hitMin = chunkOrigin + vec3(blockOrigin);
+                                vec3 tEntry = min((hitMin - ro) * invRd, (hitMin + float(BLOCK_SIZE) - ro) * invRd);
+                                tHit = max(max(tEntry.x, tEntry.y), tEntry.z);
                             }
+                            matID = lodMatID;
+                            normal = length(bMask) > 0.5 ? -vec3(cStepDir) * bMask : -normalize(safeRd);
+                            return true;
                         }
                     }
                     if (bSideDist.x < bSideDist.y && bSideDist.x < bSideDist.z) { bMask = vec3(1,0,0); bSideDist.x += bDeltaDist.x; blockPos.x += bStepDir.x; }
@@ -306,7 +307,6 @@ bool TraceStaticRay(vec3 ro, vec3 rd, float maxDist, float tStart, inout float t
                     uvec2 maskVal = packedMasks[maskBaseOffset + bIdx];
 
                     if (maskVal.x == 0u && maskVal.y == 0u) {
-                        // ИСПРАВЛЕНИЕ: Обновляем маску при пропуске пустоты!
                         for(int j=0; j<64; j++) {
                             if (vSideDist.x < vSideDist.y && vSideDist.x < vSideDist.z) { 
                                 vMask = vec3(1,0,0); vSideDist.x += vDeltaDist.x; vMapPos.x += vStepDir.x; 
@@ -329,10 +329,15 @@ bool TraceStaticRay(vec3 ro, vec3 rd, float maxDist, float tStart, inout float t
                             int idx = vMapPos.x + VOXEL_RESOLUTION * (vMapPos.y + VOXEL_RESOLUTION * vMapPos.z);
                             uint m = GetVoxelData(chunkSlot, idx);
                             if (m != 0u) {
-                                float tRelVoxel = length(vMask) > 0.5 ? dot(vMask, vSideDist - vDeltaDist) : 0.0;
-                                tHit = tCurrent + tRelVoxel; 
+                                // Идеальное вычисление AABB 1x1 вокселя
+                                if (length(vMask) < 0.5) tHit = tCurrent;
+                                else {
+                                    vec3 hitMin = chunkOrigin + vec3(vMapPos) / VOXELS_PER_METER;
+                                    vec3 tEntry = min((hitMin - ro) * invRd, (hitMin + (1.0/VOXELS_PER_METER) - ro) * invRd);
+                                    tHit = max(max(tEntry.x, tEntry.y), tEntry.z);
+                                }
                                 matID = m; 
-                                normal = -vec3(vStepDir) * vMask;
+                                normal = length(vMask) > 0.5 ? -vec3(vStepDir) * vMask : -normalize(safeRd);
                                 return true;
                             }
                         }
@@ -363,7 +368,7 @@ bool TraceShadowRay(vec3 ro, vec3 rd, float maxDist, inout float tHit, inout uin
     if (abs(safeRd.z) < 1e-6) safeRd.z = (safeRd.z < 0.0) ? -1e-6 : 1e-6;
     vec3 invRd = 1.0 / safeRd;
 
-    vec3 pStart = ro + safeRd * 0.001;
+    vec3 pStart = ro + safeRd * 0.001; // Защита от самопересечения
     
     vec3 rayPosChunk = pStart / float(CHUNK_SIZE);
     ivec3 cMapPos = ivec3(floor(rayPosChunk));
@@ -434,7 +439,6 @@ bool TraceShadowRay(vec3 ro, vec3 rd, float maxDist, inout float tHit, inout uin
                     
                     if (maskVal.x == 0u && maskVal.y == 0u) {
                         for(int s=0; s<64; s++) {
-                            // ИСПРАВЛЕНИЕ: То же самое для теней!
                             if (vSideDist.x < vSideDist.y && vSideDist.x < vSideDist.z) { 
                                 vMask = vec3(1,0,0); vSideDist.x += vDeltaDist.x; vMapPos.x += vStepDir.x; 
                             }
@@ -456,8 +460,13 @@ bool TraceShadowRay(vec3 ro, vec3 rd, float maxDist, inout float tHit, inout uin
                             int idx = vMapPos.x + VOXEL_RESOLUTION * (vMapPos.y + VOXEL_RESOLUTION * vMapPos.z);
                             uint m = GetVoxelData(chunkSlot, idx);
                             if (m != 0u) {
-                                float tRelVoxel = length(vMask) > 0.5 ? dot(vMask, vSideDist - vDeltaDist) : 0.0;
-                                tHit = tCurrentRel + tRelVoxel; 
+                                // Идеальное вычисление AABB 1x1 вокселя для теней
+                                if (length(vMask) < 0.5) tHit = tCurrentRel;
+                                else {
+                                    vec3 hitMin = chunkOrigin + vec3(vMapPos) / VOXELS_PER_METER;
+                                    vec3 tEntry = min((hitMin - pStart) * invRd, (hitMin + (1.0/VOXELS_PER_METER) - pStart) * invRd);
+                                    tHit = max(max(tEntry.x, tEntry.y), tEntry.z);
+                                }
                                 matID = m;
                                 return true;
                             }
