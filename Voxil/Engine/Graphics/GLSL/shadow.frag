@@ -1,13 +1,17 @@
 #version 450 core
 
 layout(location = 0) out vec2 outShadowAo;
-layout(location = 1) out vec4 outPointLights; // Второе окно вывода для цветного света
+layout(location = 1) out vec4 outPointLights; // Сохраняем размытый свет и GI сюда
 
 in vec2 uv;
 
 #include "include/common.glsl"
 #include "include/tracing.glsl"
 #include "include/lighting.glsl"
+
+#ifdef ENABLE_GI
+#include "include/gi.glsl"
+#endif
 
 uniform sampler2D uGColor;
 uniform sampler2D uGData;
@@ -54,7 +58,6 @@ void main() {
         hasLight = true;
     }
 
-    // === SHADOW ===
     float shadow = 1.0;
     if (hasLight) {
         if (directFactor <= 0.001) {
@@ -64,7 +67,6 @@ void main() {
         }
     }
 
-    // === AO ===
     float ao = 1.0;
     #ifdef ENABLE_AO
     ao = CalculateAO(hitPos, normal);
@@ -72,10 +74,17 @@ void main() {
 
     outShadowAo = vec2(shadow, ao);
 
-    // === POINT LIGHTS ===
     vec3 pointLightColor = vec3(0.0);
     if (uPointLightCount > 0) {
         pointLightColor = EvaluatePointLights(hitPos, normal);
     }
+
+    // ВПЛЕТАЕМ GI ПРЯМО В POINT LIGHTS
+    #ifdef ENABLE_GI
+    vec3 viewDir = normalize(uCamPos - hitPos);
+    vec3 giIrradiance = SampleGIProbes(hitPos, normal, viewDir);
+    pointLightColor += giIrradiance * max(ao, 0.15);
+    #endif
+
     outPointLights = vec4(pointLightColor, 1.0);
 }

@@ -310,6 +310,11 @@ public class GIProbeSystem : IDisposable
         _updateShader.SetInt("uObjectCount", objectCount);
         _updateShader.SetInt("uPointLightCount", pointLightCount);
 
+        // ---> ДОБАВИТЬ ЭТИ ДВЕ СТРОКИ <---
+        _updateShader.SetVector3("uCamPos", camPos);
+        _updateShader.SetFloat("uLodDistance", 100000.0f); // Выключаем LOD для GI-лучей
+        // ---------------------------------
+
         GL.DispatchCompute((updateCount + 63) / 64, 1, 1);
         GL.MemoryBarrier(MemoryBarrierFlags.ShaderImageAccessBarrierBit | MemoryBarrierFlags.ShaderStorageBarrierBit | MemoryBarrierFlags.TextureFetchBarrierBit);
     }

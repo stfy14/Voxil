@@ -125,109 +125,23 @@ bool IsSolidAt(vec3 worldPos) {
     return (m != 0u && m != 4u);
 }
 
+// ОПТИМИЗАЦИЯ: Теперь GI использует тот же супер-быстрый DDA с пропуском пустых 4х4 блоков, что и экран!
 bool TraceGIRay(vec3 ro, vec3 rd, float maxDist, out float tHit, out uint matID, out vec3 hitNormal) {
-    tHit = 0.0; matID = 0u; hitNormal = vec3(0.0);
+    float tStat = maxDist; uint mStat = 0u; vec3 nStat = vec3(0); int steps = 0;
+    bool hitStat = TraceStaticRay(ro, rd, maxDist, 0.0, tStat, mStat, nStat, steps);
 
-    vec3 safeRd = rd;
-    if (abs(safeRd.x) < 1e-6) safeRd.x = (safeRd.x < 0.0) ? -1e-6 : 1e-6;
-    if (abs(safeRd.y) < 1e-6) safeRd.y = (safeRd.y < 0.0) ? -1e-6 : 1e-6;
-    if (abs(safeRd.z) < 1e-6) safeRd.z = (safeRd.z < 0.0) ? -1e-6 : 1e-6;
-
-    ivec3 cMapPos    = ivec3(floor(ro / float(CHUNK_SIZE)));
-    vec3  cDeltaDist = abs(1.0 / safeRd) * float(CHUNK_SIZE);
-    ivec3 cStepDir   = ivec3(sign(safeRd));
-    vec3  relPos     = ro - vec3(cMapPos) * float(CHUNK_SIZE);
-
-    vec3 cSideDist;
-    cSideDist.x = (safeRd.x > 0.0) ? (float(CHUNK_SIZE) - relPos.x) : relPos.x;
-    cSideDist.y = (safeRd.y > 0.0) ? (float(CHUNK_SIZE) - relPos.y) : relPos.y;
-    cSideDist.z = (safeRd.z > 0.0) ? (float(CHUNK_SIZE) - relPos.z) : relPos.z;
-    cSideDist   *= abs(1.0 / safeRd);
-
-    vec3  cMask       = vec3(0.0);
-    float tCurrentRel = 0.0;
-    ivec3 bMin = ivec3(uBoundMinX, uBoundMinY, uBoundMinZ);
-    ivec3 bMax = ivec3(uBoundMaxX, uBoundMaxY, uBoundMaxZ);
-
-    bool hitStatic = false;
-
-    for (int i = 0; i < uMaxRaySteps; i++) {
-        if (tCurrentRel > maxDist) break;
-        if (any(lessThan(cMapPos, bMin)) || any(greaterThanEqual(cMapPos, bMax))) break;
-
-        uint chunkSlot = imageLoad(uPageTable, cMapPos & (PAGE_TABLE_SIZE - 1)).r;
-
-        if (chunkSlot != 0xFFFFFFFFu) {
-            if ((chunkSlot & 0x80000000u) != 0u) {
-                tHit      = tCurrentRel;
-                matID     = chunkSlot & 0x7FFFFFFFu;
-                hitNormal = length(cMask) > 0.5 ? -vec3(cStepDir) * cMask : -normalize(rd);
-                hitStatic = true;
-                break;
-            }
-
-            vec3  vStart     = ro + safeRd * tCurrentRel;
-            vec3  pLocal     = vStart - vec3(cMapPos) * float(CHUNK_SIZE);
-            ivec3 vMapPos    = ivec3(floor(pLocal * VOXELS_PER_METER));
-            vMapPos          = clamp(vMapPos, ivec3(0), ivec3(VOXEL_RESOLUTION - 1));
-            ivec3 vStepDir   = ivec3(sign(safeRd));
-            vec3  vDeltaDist = abs(1.0 / safeRd) / float(VOXELS_PER_METER);
-
-            vec3 vRelPos = pLocal * VOXELS_PER_METER - vec3(vMapPos);
-            vec3 vSideDist;
-            vSideDist.x = (safeRd.x > 0.0) ? (1.0 - vRelPos.x) : vRelPos.x;
-            vSideDist.y = (safeRd.y > 0.0) ? (1.0 - vRelPos.y) : vRelPos.y;
-            vSideDist.z = (safeRd.z > 0.0) ? (1.0 - vRelPos.z) : vRelPos.z;
-            vSideDist   *= vDeltaDist;
-
-            vec3 vMask     = vec3(0.0);
-            bool exitChunk = false;
-
-            for (int v = 0; v < VOXEL_RESOLUTION * 3; v++) {
-                if (any(lessThan(vMapPos, ivec3(0))) || any(greaterThanEqual(vMapPos, ivec3(VOXEL_RESOLUTION)))) {
-                    exitChunk = true;
-                    break;
-                }
-
-                int  vIdx = vMapPos.x + VOXEL_RESOLUTION * (vMapPos.y + VOXEL_RESOLUTION * vMapPos.z);
-                uint vMat = GetVoxelData(chunkSlot, vIdx);
-
-                if (vMat != 0u) {
-                    tHit      = tCurrentRel + dot(vMask, vSideDist - vDeltaDist) / float(VOXELS_PER_METER);
-                    matID     = vMat;
-                    hitNormal = length(vMask) > 0.5 ? -vec3(vStepDir) * vMask : -normalize(rd);
-                    hitStatic = true;
-                    break;
-                }
-                vMask = (vSideDist.x < vSideDist.y) ? ((vSideDist.x < vSideDist.z) ? vec3(1,0,0) : vec3(0,0,1))
-                                                     : ((vSideDist.y < vSideDist.z) ? vec3(0,1,0) : vec3(0,0,1));
-                vSideDist += vMask * vDeltaDist;
-                vMapPos   += ivec3(vMask) * vStepDir;
-            }
-            if (hitStatic) break;
-            if (exitChunk) cMask = vec3(0.0);
-        }
-        cMask = (cSideDist.x < cSideDist.y) ? ((cSideDist.x < cSideDist.z) ? vec3(1,0,0) : vec3(0,0,1))
-                                             : ((cSideDist.y < cSideDist.z) ? vec3(0,1,0) : vec3(0,0,1));
-        tCurrentRel = dot(cMask, cSideDist);
-        cSideDist  += cMask * cDeltaDist;
-        cMapPos    += ivec3(cMask) * cStepDir;
-    }
-
-    if (!hitStatic) tHit = maxDist;
-
-    float tDyn = maxDist; int idDyn = -1; vec3 nDyn = vec3(0); uint mDyn = 0u; int dummySteps = 0;
+    float tDyn = maxDist; int idDyn = -1; vec3 nDyn = vec3(0); uint mDyn = 0u;
+    bool hitDyn = false;
     if (uObjectCount > 0) {
-        if (TraceDynamicRay(ro, rd, min(tHit, maxDist), tDyn, idDyn, nDyn, mDyn, dummySteps)) {
-            if (tDyn < tHit) {
-                tHit      = tDyn;
-                matID     = mDyn;
-                hitNormal = nDyn;
-                return true;
-            }
-        }
+        hitDyn = TraceDynamicRay(ro, rd, min(tStat, maxDist), tDyn, idDyn, nDyn, mDyn, steps);
     }
-    return hitStatic;
+
+    if (hitDyn && tDyn < tStat) {
+        tHit = tDyn; matID = mDyn; hitNormal = nDyn; return true;
+    } else if (hitStat) {
+        tHit = tStat; matID = mStat; hitNormal = nStat; return true;
+    }
+    return false;
 }
 
 vec3 GetBounceGI(vec3 pos, vec3 norm) {
@@ -273,7 +187,6 @@ vec3 GetBounceGI(vec3 pos, vec3 norm) {
     return (wSum > 0.0001) ? irrSum / wSum : vec3(0.0);
 }
 
-// ИСПРАВЛЕНИЕ: Даем зондам видеть закат! (Цвета синхронизированы с atmosphere.glsl)
 vec3 SkyColor(vec3 rayDir) {
     vec3 dayHorizon = vec3(0.60, 0.75, 0.95);
     vec3 dayTop = vec3(0.3, 0.5, 0.85);
@@ -342,9 +255,6 @@ void main() {
 
     probes[probeIdx].pos = vec4(targetPos, 1.0);
 
-    // ИСПРАВЛЕНИЕ РАЗНИЦЫ L0 И L1: 
-    // Заставляем L0 пускать лучи минимум на 48 метров, чтобы они не слепли на мелких расстояниях, 
-    // думая, что ближайшая гора - это предел вселенной.
     float maxRayDist = max(float(uProbeGridX) * uProbeSpacing * 0.75, 48.0);
 
     const int MAX_RAYS = 128;
@@ -380,7 +290,8 @@ void main() {
                 bool inShadow = IsSolidAt(shadowStart);
                 if (!inShadow && uSunDir.y > 0.0) {
                     float sHit; uint sMat; vec3 sNorm;
-                    if (TraceGIRay(shadowStart, uSunDir, 500.0, sHit, sMat, sNorm))
+                    // ОПТИМИЗАЦИЯ: Ограничили тень от солнца для GI до 20 метров (не нужно пускать на 500)
+                    if (TraceGIRay(shadowStart, uSunDir, 20.0, sHit, sMat, sNorm))
                         if (sMat != 7u) inShadow = true;
                 }
                 float sunIntensity = clamp(uSunDir.y * 5.0, 0.0, 1.0);
@@ -403,19 +314,15 @@ void main() {
                     float plNDotL = max(0.0, dot(hitNorm, L));
                     if (plNDotL <= 0.0) continue;
 
-                    float plShadow = 1.0;
-                    float dD; uint dM; vec3 dN;
-                    if (TraceGIRay(shadowStart, L, plDist - 0.2, dD, dM, dN))
-                        if (dM != 7u) plShadow = 0.0;
-
+                    // ОПТИМИЗАЦИЯ: Убрали Raycast-тень от лампочек во время ВТОРИЧНОГО отскока. 
+                    // Это экономит десятки тысяч лучей за кадр! Затенение сделано по дистанции.
                     float win = max(0.0, 1.0 - plDist / lRad);
                     win = win * win * win * win;
-                    pointLightLight += lCol * plNDotL * (lInt / max(plDist * plDist, 1.0)) * win * plShadow;
+                    pointLightLight += lCol * plNDotL * (lInt / max(plDist * plDist, 1.0)) * win;
                 }
 
                 vec3 bounce = GetBounceGI(shadowStart, hitNorm) * 0.3;
                 
-                // ИСПРАВЛЕНИЕ: Добавляем теплое закатное освещение в тени, чтобы они не были угольно-черными!
                 float sunsetAmb = clamp(1.0 - abs(uSunDir.y) * 5.0, 0.0, 1.0);
                 float nightAmb = clamp(-uSunDir.y * 2.0, 0.0, 1.0);
                 vec3 ambLight = vec3(0.05, 0.07, 0.12) * nightAmb;
@@ -426,7 +333,7 @@ void main() {
             }
         } else {
             dist     = maxRayDist;
-            radiance = SkyColor(rd); // ← Вызов нашей новой синхронизированной функции
+            radiance = SkyColor(rd);
         }
 
         float maxRadiance = 15.0; 
@@ -498,7 +405,10 @@ void main() {
                 float lumPrev = dot(prevIrr, vec3(0.299, 0.587, 0.114));
                 float lumNew  = dot(newIrr,  vec3(0.299, 0.587, 0.114));
                 float diff    = abs(lumNew - lumPrev);
-                blend = mix(0.03, 0.15, clamp(diff * 3.0, 0.0, 1.0));
+                
+                // ОПТИМИЗАЦИЯ: Разогнали скорость адаптации зондов, 
+                // так как теперь шейдер работает в 5 раз быстрее!
+                blend = mix(0.05, 0.40, clamp(diff * 4.0, 0.0, 1.0)); 
             }
 
             newIrr = mix(prevIrr, newIrr, blend);

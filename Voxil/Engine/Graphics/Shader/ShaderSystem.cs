@@ -25,29 +25,27 @@ public class ShaderSystem : IDisposable
         var defines = ShaderDefines.GetRuntimeDefines(banksCount, chunksPerBank);
         Shader.GlobalBanksInjection = ShaderDefines.GenerateBanksCode(banksCount);
 
-        // shadow.frag компилируется с дополнительным define SHADOW_PASS
-        var shadowDefines = new List<string>(defines) { "SHADOW_PASS" };
-
-        // GI defines: добавляем ENABLE_GI если включено в настройках
-        var giDefines = new List<string>(defines);
+        // 1. СНАЧАЛА добавляем ENABLE_GI в базовый список (если включено)
         if (GameSettings.EnableGI)
         {
-            giDefines.Add("ENABLE_GI");
-            defines.Add("ENABLE_GI"); // composite тоже нужен
+            defines.Add("ENABLE_GI");
         }
+
+        // 2. ТОЛЬКО ПОСЛЕ ЭТОГО клонируем список для шейдера теней!
+        var shadowDefines = new List<string>(defines) { "SHADOW_PASS" };
 
         try
         {
-            RaycastShader        = new Shader(ShaderPaths.RaycastVert, ShaderPaths.RaycastFrag, defines);
-            ShadowShader         = new Shader(ShaderPaths.RaycastVert, ShaderPaths.ShadowFrag, shadowDefines);
+            RaycastShader = new Shader(ShaderPaths.RaycastVert, ShaderPaths.RaycastFrag, defines);
+            ShadowShader = new Shader(ShaderPaths.RaycastVert, ShaderPaths.ShadowFrag, shadowDefines); // Теперь он видит GI!
             ShadowUpsampleShader = new Shader(ShaderPaths.RaycastVert, ShaderPaths.ShadowUpsampleFrag, defines);
-            CompositeShader      = new Shader(ShaderPaths.RaycastVert, ShaderPaths.CompositeFrag, defines);
-            EditUpdaterShader    = new Shader(ShaderPaths.EditUpdater, defines);
+            CompositeShader = new Shader(ShaderPaths.RaycastVert, ShaderPaths.CompositeFrag, defines);
+            EditUpdaterShader = new Shader(ShaderPaths.EditUpdater, defines);
 
-            // GI Probe Update — compute shader (компилируется только если GI включён)
+            // Compute-шейдеру достаточно базового списка, так как там уже есть ENABLE_GI
             if (GameSettings.EnableGI)
             {
-                GIProbeUpdateShader = new Shader(ShaderPaths.GIProbeUpdate, giDefines);
+                GIProbeUpdateShader = new Shader(ShaderPaths.GIProbeUpdate, defines);
                 Console.WriteLine("[ShaderSystem] GI probe update shader compiled.");
             }
 

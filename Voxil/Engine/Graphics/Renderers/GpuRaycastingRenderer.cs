@@ -619,8 +619,8 @@ public class GpuRaycastingRenderer : IDisposable
                     shadowShader.SetInt("uBoundMaxX", cx + r); shadowShader.SetInt("uBoundMaxY", WorldManager.WorldHeightChunks); shadowShader.SetInt("uBoundMaxZ", cz + r);
                 }
 
-                shadowShader.SetTexture("uGColor", _gColorTexture, TextureUnit.Texture10);
-                shadowShader.SetTexture("uGData", _gDataTexture, TextureUnit.Texture11);
+                shadowShader.SetTexture("uGColor", _gColorTexture, TextureUnit.Texture8);
+                shadowShader.SetTexture("uGData", _gDataTexture, TextureUnit.Texture9);
 
                 GL.BindImageTexture(0, _pageTableTexture, 0, true, 0, TextureAccess.ReadOnly, SizedInternalFormat.R32ui);
                 BindAllBuffers();
@@ -633,10 +633,17 @@ public class GpuRaycastingRenderer : IDisposable
                 shadowShader.SetVector3("uGridOrigin", _lastGridOrigin);
                 shadowShader.SetFloat("uGridStep", _gridCellSize);
                 shadowShader.SetInt("uGridSize", OBJ_GRID_SIZE);
-                
+
                 // Передаем буфер света в ShadowShader!
                 GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, POINT_LIGHT_BINDING, _pointLightSsbo);
                 shadowShader.SetInt("uPointLightCount", _lastPointLightCount);
+
+                // ---> ДОБАВИТЬ ЭТОТ БЛОК <---
+                if (_giSystem != null && GameSettings.EnableGI)
+                {
+                    _giSystem.SetSamplingUniforms(shadowShader);
+                }
+                // -----------------------------
 
                 GL.DrawArrays(PrimitiveType.TriangleStrip, 0, 4);
             }
@@ -680,11 +687,6 @@ public class GpuRaycastingRenderer : IDisposable
         compositeShader.SetTexture("uGData", _gDataTexture, TextureUnit.Texture1);
         compositeShader.SetTexture("uShadowFull", _shadowFullTexture, TextureUnit.Texture2);
         compositeShader.SetTexture("uPointLightFull", _shadowPointLightFullTexture, TextureUnit.Texture3); // Читаем апсемпленный свет
-
-        if (_giSystem != null && GameSettings.EnableGI)
-        {
-            _giSystem.SetSamplingUniforms(compositeShader);
-        }
 
         GL.DrawArrays(PrimitiveType.TriangleStrip, 0, 4);
 
