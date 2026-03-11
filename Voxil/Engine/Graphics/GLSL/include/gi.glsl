@@ -49,7 +49,10 @@ float ChebyshevVisibility(vec2 depthMoments, float dist) {
     variance = max(variance, 0.0001);
     float d    = dist - depthMoments.x;
     float cheb = variance / (variance + d * d);
-    return clamp((cheb - 0.1) / 0.9, 0.0, 1.0);
+    // ИСПРАВЛЕНИЕ: Возводим результат в степень, чтобы сделать затухание
+    // от перекрытых зондов гораздо более резким.
+    float visibility = clamp((cheb - 0.1) / 0.9, 0.0, 1.0);
+    return visibility * visibility * visibility * visibility; // pow(visibility, 4.0)
 }
 
 vec3 GIFallback(vec3 normal) {
@@ -68,7 +71,7 @@ float ComputeEdgeFade(vec3 worldPos, int bX, int bY, int bZ, float sp) {
 vec4 SampleProbeLevel(vec3 worldPos, vec3 normal, sampler2D irrAtlas, sampler2D depthAtlas, int bX, int bY, int bZ, float sp) {
     // ИСПРАВЛЕНИЕ 3: Ограничиваем Normal Bias (смещение), чтобы L2 зонды не пробивали потолок
     // Воксели у нас размером 1 метр, значит смещение должно быть не больше 0.5м (чтобы не улететь в соседнюю комнату)
-    vec3 samplePos  = worldPos + normal * min(sp * 0.5, 0.5); 
+    vec3 samplePos  = worldPos + normal * min(sp * 0.1, 0.45);
     
     vec3 gridOrigin = vec3(float(bX), float(bY), float(bZ)) * sp + sp * 0.5;
     vec3 localPos   = clamp((samplePos - gridOrigin) / sp, vec3(0.0), vec3(float(uGIProbeX)-1.0, float(uGIProbeY)-1.0, float(uGIProbeZ)-1.0));

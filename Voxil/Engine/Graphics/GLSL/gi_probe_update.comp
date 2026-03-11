@@ -304,7 +304,7 @@ void main() {
     float seed = Hash(float(wx + wy * 7 + wz * 13), float(wz + wx * 5)) * 0.5;
     float maxRayDist = float(uProbeGridX) * uProbeSpacing * 0.5;
 
-    const int MAX_RAYS = 64;
+    const int MAX_RAYS = 128;
     vec3  rayDirs[MAX_RAYS];
     vec3  rayRadiance[MAX_RAYS];
     float rayDist[MAX_RAYS];
@@ -389,6 +389,16 @@ void main() {
             dist     = maxRayDist;
             radiance = (rd.y > 0.0) ? SkyColor(rd) : NightAmbient(rd);
         }
+
+        // === ИСПРАВЛЕНИЕ: FIREFLY CLAMPING ===
+        // Если яркость этого луча слишком велика (например, вплотную к Glow блоку),
+        // ограничиваем ее. Это убивает "утечки" и резкие вспышки зондов.
+        float maxRadiance = 15.0; // Максимальная допустимая энергия одного луча
+        float lum = dot(radiance, vec3(0.2126, 0.7152, 0.0722));
+        if (lum > maxRadiance) {
+            radiance *= maxRadiance / lum;
+        }
+        // =====================================
 
         rayRadiance[ray] = radiance;
         rayDist[ray]     = dist;

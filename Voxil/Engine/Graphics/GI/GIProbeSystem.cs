@@ -15,14 +15,15 @@ public class GIProbeSystem : IDisposable
     public const float PROBE_SPACING_L1 = 4.0f;
     public const float PROBE_SPACING_L2 = 16.0f;
 
-    public const int RAYS_PER_PROBE_L0 = 32;
-    public const int RAYS_PER_PROBE_L1 = 16;
-    public const int RAYS_PER_PROBE_L2 = 8;
+    public const int RAYS_PER_PROBE_L0 = 128; 
+    public const int RAYS_PER_PROBE_L1 = 64;  // Тоже можно немного поднять
+    public const int RAYS_PER_PROBE_L2 = 32;
 
-    // Скорость обновления: 1024 зонда = весь L0 обновляется за 16 кадров (~0.25 сек)
-    public const int PROBES_PER_FRAME_L0 = 1024;
-    public const int PROBES_PER_FRAME_L1 = 512;
-    public const int PROBES_PER_FRAME_L2 = 256;
+    // Снизим количество обновляемых зондов за кадр, 
+    // иначе GPU может не успеть выстрелить столько лучей и ФПС просядет
+    public const int PROBES_PER_FRAME_L0 = 512;  // Было 1024
+    public const int PROBES_PER_FRAME_L1 = 256;  // Было 512
+    public const int PROBES_PER_FRAME_L2 = 128;  // Было 256
 
     public const float PROBE_SPACING = PROBE_SPACING_L0;
     public const int RAYS_PER_PROBE = RAYS_PER_PROBE_L0;
