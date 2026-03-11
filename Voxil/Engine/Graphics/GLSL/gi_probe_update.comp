@@ -30,6 +30,8 @@ uniform int   uGIGridBaseX, uGIGridBaseY, uGIGridBaseZ;
 uniform int   uProbesThisFrame, uRaysPerProbe;
 uniform float uProbeSpacing;
 uniform int   uProbeGridX, uProbeGridY, uProbeGridZ;
+shared bool s_justWokeUp;
+shared vec3 s_oldPos; // ← сохраняем ДО перезаписи
 
 int true_mod(int a, int b) { int m = a % b; return m < 0 ? m + b : m; }
 float Hash(float a, float b) { vec2 v = vec2(a, b); return fract(sin(dot(v, vec2(127.1, 311.7))) * 43758.5453); }
@@ -178,16 +180,15 @@ void main() {
         return; // Выход всей группы!
     }
 
-    // Состояние зонда
-    bool justWokeUp = false;
+    // Состояние зонда — только tid=0 читает старое значение ДО перезаписи
     if (tid == 0) {
-        vec3 oldPos = probes[probeIdx].pos.xyz;
+        vec3  oldPos   = probes[probeIdx].pos.xyz;
         float oldState = probes[probeIdx].pos.w;
-        justWokeUp = (oldState < 0.5) || (distance(oldPos, targetPos) > uProbeSpacing * 0.5);
+        s_justWokeUp = (oldState < 0.5) || (distance(oldPos, targetPos) > uProbeSpacing * 0.5);
         probes[probeIdx].pos = vec4(targetPos, 1.0);
     }
-    // Ждем, пока 0-й поток проверит WokeUp. (Но так как justWokeUp нам нужен у всех, мы его продублируем)
-    justWokeUp = (probes[probeIdx].pos.w < 0.5) || (distance(probes[probeIdx].pos.xyz, targetPos) > uProbeSpacing * 0.5);
+    barrier(); // все потоки ждут пока tid=0 запишет s_justWokeUp
+    bool justWokeUp = s_justWokeUp; // теперь все 64 потока читают правильное значение
 
     float maxRayDist = max(float(uProbeGridX) * uProbeSpacing * 0.75, 48.0);
     mat3 probeRot = GetRandomRotation(Hash(float(wx + wy * 7 + wz * 13), uTime), Hash(uTime, float(wz + wx * 5)));
