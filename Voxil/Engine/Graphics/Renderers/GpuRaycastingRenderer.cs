@@ -547,10 +547,11 @@ public class GpuRaycastingRenderer : IDisposable
 
             // Передаем _lastPointLightCount !
             _giSystem.Update(cam.Position, sunDir, _totalTime,
-                cx - r, 0, cz - r,
-                cx + r, WorldManager.WorldHeightChunks, cz + r,
-                maxSteps,
-                _lastGridOrigin, _gridCellSize, OBJ_GRID_SIZE, objCount, _lastPointLightCount);
+                            cx - r, 0, cz - r,
+                            cx + r, WorldManager.WorldHeightChunks, cz + r,
+                            maxSteps,
+                            _lastGridOrigin, _gridCellSize, OBJ_GRID_SIZE, objCount, _lastPointLightCount,
+                            _pageTableTexture, _gridHeadTexture); // <--- ВОТ ОНИ!
 
             _shaderSystem.Use();
             shader = _shaderSystem.RaycastShader;

@@ -1,5 +1,4 @@
 ﻿// --- Engine/Graphics/GLSL/include/common.glsl ---
-// (Добавлен Glow material ID 7, остальное без изменений)
 
 // === ГЛАВНЫЕ UNIFORMS ===
 uniform vec3 uCamPos;
@@ -40,7 +39,8 @@ uniform vec3 uHoverVoxelMin;
 uniform vec3 uHoverVoxelMax;
 #endif
 
-layout(binding = 0, r32ui) uniform uimage3D uPageTable;
+// ИСПРАВЛЕНИЕ: usampler3D вместо uimage3D - Включает аппаратный кэш!
+layout(binding = 6) uniform usampler3D uPageTable;
 const ivec3 PAGE_TABLE_SIZE = ivec3(512, 16, 512);
 
 struct DynamicObject {
@@ -63,7 +63,8 @@ struct ListNode {
 layout(std430, binding = 2) buffer DynObjects { DynamicObject dynObjects[]; };
 layout(std430, binding = 3) buffer LinkedList { ListNode listNodes[]; };
 
-layout(binding = 1, r32i) uniform iimage3D uObjectGridHead;
+// ИСПРАВЛЕНИЕ: isampler3D вместо iimage3D
+layout(binding = 7) uniform isampler3D uObjectGridHead;
 
 // === HELPERS ===
 vec3 GetColor(uint id) {
@@ -73,7 +74,7 @@ vec3 GetColor(uint id) {
     if (id == 4u) return vec3(0.15, 0.25, 0.60); // Water
     if (id == 5u) return vec3(0.15, 0.60, 0.05); // Grass
     if (id == 6u) return vec3(0.9,  0.1,  0.1);  // TNT
-    if (id == 7u) return vec3(0.97, 0.82, 0.20); // Glow ← НОВЫЙ
+    if (id == 7u) return vec3(0.97, 0.82, 0.20); // Glow
     return vec3(1.0, 0.0, 1.0); // Error pink
 }
 

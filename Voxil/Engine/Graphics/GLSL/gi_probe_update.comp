@@ -112,7 +112,8 @@ bool IsSolidAt(vec3 worldPos) {
     ivec3 bMax = ivec3(uBoundMaxX, uBoundMaxY, uBoundMaxZ);
     if (any(lessThan(cMapPos, bMin)) || any(greaterThanEqual(cMapPos, bMax))) return false;
 
-    uint chunkSlot = imageLoad(uPageTable, cMapPos & (PAGE_TABLE_SIZE - 1)).r;
+    // ИСПРАВЛЕНИЕ: texelFetch с кэшем!
+    uint chunkSlot = texelFetch(uPageTable, cMapPos & (PAGE_TABLE_SIZE - 1), 0).r;
     if (chunkSlot == 0xFFFFFFFFu) return false;
     if ((chunkSlot & 0x80000000u) != 0u) return true;
 
@@ -125,7 +126,8 @@ bool IsSolidAt(vec3 worldPos) {
     return (m != 0u && m != 4u);
 }
 
-// ОПТИМИЗАЦИЯ: Теперь GI использует тот же супер-быстрый DDA с пропуском пустых 4х4 блоков, что и экран!
+// ... (остальной код файла без изменений) ...
+
 bool TraceGIRay(vec3 ro, vec3 rd, float maxDist, out float tHit, out uint matID, out vec3 hitNormal) {
     float tStat = maxDist; uint mStat = 0u; vec3 nStat = vec3(0); int steps = 0;
     bool hitStat = TraceStaticRay(ro, rd, maxDist, 0.0, tStat, mStat, nStat, steps);
@@ -287,13 +289,7 @@ void main() {
                 vec3 hitPos      = targetPos + rd * tHit;
                 vec3 shadowStart = hitPos + hitNorm * 0.02;
 
-                bool inShadow = IsSolidAt(shadowStart);
-                if (!inShadow && uSunDir.y > 0.0) {
-                    float sHit; uint sMat; vec3 sNorm;
-                    // ОПТИМИЗАЦИЯ: Ограничили тень от солнца для GI до 20 метров (не нужно пускать на 500)
-                    if (TraceGIRay(shadowStart, uSunDir, 20.0, sHit, sMat, sNorm))
-                        if (sMat != 7u) inShadow = true;
-                }
+                bool inShadow = (uSunDir.y > 0.0) ? IsSolidAt(shadowStart + uSunDir * 1.0) : false;
                 float sunIntensity = clamp(uSunDir.y * 5.0, 0.0, 1.0);
                 float nDotL        = max(0.0, dot(hitNorm, uSunDir));
                 vec3  directLight  = inShadow ? vec3(0.0)
@@ -305,17 +301,12 @@ void main() {
                     float lRad   = pointLights[pl].posRadius.w;
                     vec3  lCol   = pointLights[pl].colorIntensity.rgb;
                     float lInt   = pointLights[pl].colorIntensity.a;
-
                     vec3  toL    = lPos - hitPos;
                     float plDist = length(toL);
                     if (plDist > lRad || plDist < 0.05) continue;
-
                     vec3  L       = toL / plDist;
                     float plNDotL = max(0.0, dot(hitNorm, L));
                     if (plNDotL <= 0.0) continue;
-
-                    // ОПТИМИЗАЦИЯ: Убрали Raycast-тень от лампочек во время ВТОРИЧНОГО отскока. 
-                    // Это экономит десятки тысяч лучей за кадр! Затенение сделано по дистанции.
                     float win = max(0.0, 1.0 - plDist / lRad);
                     win = win * win * win * win;
                     pointLightLight += lCol * plNDotL * (lInt / max(plDist * plDist, 1.0)) * win;
@@ -355,20 +346,15 @@ void main() {
         float lRad  = pointLights[pl].posRadius.w;
         vec3  lCol  = pointLights[pl].colorIntensity.rgb;
         float lInt  = pointLights[pl].colorIntensity.a;
-
         vec3  toL  = lPos - targetPos;  
         float dist = length(toL);
         if (dist > lRad || dist < 0.05) continue;
-
         vec3 L = toL / dist;
-
         float dD; uint dM; vec3 dN;
         if (TraceGIRay(targetPos + L * 0.1, L, dist - 0.3, dD, dM, dN))
             if (dM != 7u) continue; 
-
         float win = max(0.0, 1.0 - dist / lRad);
         win = win * win * win * win;
-
         plDirs[plCount]   = L;
         plColors[plCount] = min(lCol * lInt / max(dist * dist, 1.0) * win, vec3(5.0));
         plCount++;
@@ -399,18 +385,13 @@ void main() {
 
             float blend   = justWokeUp ? 1.0 : 0.10;
             vec3  prevIrr = vec3(0.0);
-
             if (!justWokeUp) {
                 prevIrr = imageLoad(uIrrAtlas, irrOrigin + ivec2(px, py)).rgb;
                 float lumPrev = dot(prevIrr, vec3(0.299, 0.587, 0.114));
                 float lumNew  = dot(newIrr,  vec3(0.299, 0.587, 0.114));
                 float diff    = abs(lumNew - lumPrev);
-                
-                // ОПТИМИЗАЦИЯ: Разогнали скорость адаптации зондов, 
-                // так как теперь шейдер работает в 5 раз быстрее!
                 blend = mix(0.05, 0.40, clamp(diff * 4.0, 0.0, 1.0)); 
             }
-
             newIrr = mix(prevIrr, newIrr, blend);
             avgColor += newIrr;
             imageStore(uIrrAtlas, irrOrigin + ivec2(px, py), vec4(newIrr, 1.0));
@@ -434,15 +415,10 @@ void main() {
                 meanDist2 += d * d * w;
                 wSum      += w;
             }
-            vec2 newDepth = (wSum > 0.0)
-                ? vec2(meanDist / wSum, meanDist2 / wSum)
-                : vec2(maxRayDist, maxRayDist * maxRayDist);
-
-            float blend    = justWokeUp ? 1.0 : 0.10;
-            vec2  prevDepth = vec2(maxRayDist, maxRayDist * maxRayDist);
-            if (!justWokeUp)
-                prevDepth = imageLoad(uDepthAtlas, depthOrigin + ivec2(px, py)).rg;
-
+            vec2 newDepth = (wSum > 0.0) ? vec2(meanDist / wSum, meanDist2 / wSum) : vec2(maxRayDist, maxRayDist * maxRayDist);
+            float blend = justWokeUp ? 1.0 : 0.10;
+            vec2 prevDepth = vec2(maxRayDist, maxRayDist * maxRayDist);
+            if (!justWokeUp) prevDepth = imageLoad(uDepthAtlas, depthOrigin + ivec2(px, py)).rg;
             newDepth = mix(prevDepth, newDepth, blend);
             imageStore(uDepthAtlas, depthOrigin + ivec2(px, py), vec4(newDepth, 0.0, 1.0));
         }}

@@ -224,16 +224,17 @@ public class GIProbeSystem : IDisposable
                        int boundMinX, int boundMinY, int boundMinZ,
                        int boundMaxX, int boundMaxY, int boundMaxZ,
                        int maxRaySteps,
-                       Vector3 gridOrigin, float gridStep, int gridSize, int objectCount, int pointLightCount)
+                       Vector3 gridOrigin, float gridStep, int gridSize, int objectCount, int pointLightCount,
+                       int pageTableTex, int gridHeadTex) // <--- ВОТ ЭТИ ДВА
     {
         if (!IsValid) return;
 
-        UpdateLevel(_l0, ProbePositionSsbo, IrrTexL0, DepthTexL0, cameraPosition, PROBE_SPACING_L0, RAYS_PER_PROBE_L0, PROBES_PER_FRAME_L0, sunDir, time, boundMinX, boundMinY, boundMinZ, boundMaxX, boundMaxY, boundMaxZ, maxRaySteps / 2, gridOrigin, gridStep, gridSize, objectCount, pointLightCount);
-        UpdateLevel(_l1, ProbePositionSsboL1, IrrTexL1, DepthTexL1, cameraPosition, PROBE_SPACING_L1, RAYS_PER_PROBE_L1, PROBES_PER_FRAME_L1, sunDir, time, boundMinX, boundMinY, boundMinZ, boundMaxX, boundMaxY, boundMaxZ, maxRaySteps / 4, gridOrigin, gridStep, gridSize, objectCount, pointLightCount);
-        UpdateLevel(_l2, ProbePositionSsboL2, IrrTexL2, DepthTexL2, cameraPosition, PROBE_SPACING_L2, RAYS_PER_PROBE_L2, PROBES_PER_FRAME_L2, sunDir, time, boundMinX, boundMinY, boundMinZ, boundMaxX, boundMaxY, boundMaxZ, maxRaySteps / 8, gridOrigin, gridStep, gridSize, objectCount, pointLightCount);
+        UpdateLevel(_l0, ProbePositionSsbo, IrrTexL0, DepthTexL0, cameraPosition, PROBE_SPACING_L0, RAYS_PER_PROBE_L0, PROBES_PER_FRAME_L0, sunDir, time, boundMinX, boundMinY, boundMinZ, boundMaxX, boundMaxY, boundMaxZ, maxRaySteps / 2, gridOrigin, gridStep, gridSize, objectCount, pointLightCount, pageTableTex, gridHeadTex);
+        UpdateLevel(_l1, ProbePositionSsboL1, IrrTexL1, DepthTexL1, cameraPosition, PROBE_SPACING_L1, RAYS_PER_PROBE_L1, PROBES_PER_FRAME_L1, sunDir, time, boundMinX, boundMinY, boundMinZ, boundMaxX, boundMaxY, boundMaxZ, maxRaySteps / 4, gridOrigin, gridStep, gridSize, objectCount, pointLightCount, pageTableTex, gridHeadTex);
+        UpdateLevel(_l2, ProbePositionSsboL2, IrrTexL2, DepthTexL2, cameraPosition, PROBE_SPACING_L2, RAYS_PER_PROBE_L2, PROBES_PER_FRAME_L2, sunDir, time, boundMinX, boundMinY, boundMinZ, boundMaxX, boundMaxY, boundMaxZ, maxRaySteps / 8, gridOrigin, gridStep, gridSize, objectCount, pointLightCount, pageTableTex, gridHeadTex);
     }
 
-    private void UpdateLevel(LevelData level, int posSSBO, int irrTex, int depthTex, Vector3 camPos, float spacing, int raysPerProbe, int probesThisFrame, Vector3 sunDir, float time, int bMinX, int bMinY, int bMinZ, int bMaxX, int bMaxY, int bMaxZ, int maxRaySteps, Vector3 gridOrigin, float gridStep, int gridSize, int objectCount, int pointLightCount)
+    private void UpdateLevel(LevelData level, int posSSBO, int irrTex, int depthTex, Vector3 camPos, float spacing, int raysPerProbe, int probesThisFrame, Vector3 sunDir, float time, int bMinX, int bMinY, int bMinZ, int bMaxX, int bMaxY, int bMaxZ, int maxRaySteps, Vector3 gridOrigin, float gridStep, int gridSize, int objectCount, int pointLightCount, int pageTableTex, int gridHeadTex)
     {
         int bx = (int)Math.Floor(camPos.X / spacing - PROBE_X * 0.5f);
         int by = (int)Math.Floor(camPos.Y / spacing - PROBE_Y * 0.5f);
@@ -284,6 +285,15 @@ public class GIProbeSystem : IDisposable
         GL.BindTexture(TextureTarget.Texture2D, irrTex);
 
         _updateShader.Use();
+        // ---> ДОБАВЬ ЭТО: Биндим текстуры поиска путей
+        GL.ActiveTexture(TextureUnit.Texture6);
+        GL.BindTexture(TextureTarget.Texture3D, pageTableTex);
+        _updateShader.SetInt("uPageTable", 6);
+
+        GL.ActiveTexture(TextureUnit.Texture7);
+        GL.BindTexture(TextureTarget.Texture3D, gridHeadTex);
+        _updateShader.SetInt("uObjectGridHead", 7);
+        // ---------------------------------------------
         _updateShader.SetInt("uBounceIrrAtlas", 5);
         _updateShader.SetInt("uGIGridBaseX", bx);
         _updateShader.SetInt("uGIGridBaseY", by);

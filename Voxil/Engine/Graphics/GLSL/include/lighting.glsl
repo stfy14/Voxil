@@ -1,4 +1,6 @@
-﻿#define AO_STRENGTH 0.6
+﻿// --- START OF FILE lighting.glsl.txt ---
+
+#define AO_STRENGTH 0.6
 #define BLOCKER_SAMPLES 6
 #define SOFT_SHADOW_RADIUS 0.08
 
@@ -8,7 +10,8 @@ bool IsSolidForAO(ivec3 pos) {
     if (any(lessThan(pos, boundMin)) || any(greaterThanEqual(pos, boundMax))) return false;
 
     ivec3 chunkCoord = pos >> BIT_SHIFT;
-    uint chunkSlot = imageLoad(uPageTable, chunkCoord & (PAGE_TABLE_SIZE - 1)).r;
+    // ИСПРАВЛЕНИЕ: texelFetch вместо imageLoad
+    uint chunkSlot = texelFetch(uPageTable, chunkCoord & (PAGE_TABLE_SIZE - 1), 0).r;
     if (chunkSlot == 0xFFFFFFFFu) return false;
 
     if ((chunkSlot & 0x80000000u) != 0u) return true;
@@ -90,9 +93,7 @@ float CalculateAO(vec3 hitPos, vec3 normal) {
     return clamp(mix(1.0, ao, AO_STRENGTH), 0.0, 1.0);
 }
 
-// =============================================================================
-// УНИВЕРСАЛЬНЫЙ ТРЕЙСИНГ ТЕНЕЙ (Игнорирует светящиеся блоки)
-// =============================================================================
+// ... (остальной код файла без изменений) ...
 
 bool TraceAnyShadow(vec3 origin, vec3 dir, float maxDist, out float hitDist) {
     float tStatic = 0.0; uint matStatic = 0u;
@@ -122,10 +123,6 @@ bool TraceAnyShadow(vec3 origin, vec3 dir, float maxDist, out float hitDist) {
 
     return false;
 }
-
-// =============================================================================
-// ТЕНИ ОТ СОЛНЦА И ЛУНЫ
-// =============================================================================
 
 float CalculateSoftShadow(vec3 hitPos, vec3 normal, vec3 sunDir) {
     float distToCam = length(hitPos - uCamPos);
@@ -209,9 +206,6 @@ float CalculateShadow(vec3 hitPos, vec3 normal, vec3 sunDir) {
     #endif
 }
 
-// =============================================================================
-// ТОЧЕЧНЫЕ ИСТОЧНИКИ И МЯГКИЕ ТЕНИ (POINT LIGHTS)
-// =============================================================================
 #define MAX_POINT_LIGHTS 32
 struct PointLightData { vec4 posRadius; vec4 colorIntensity; };
 layout(std430, binding = 18) readonly buffer PointLightBuffer { PointLightData pointLights[]; };
@@ -219,70 +213,20 @@ uniform int uPointLightCount;
 
 float CalculatePointLightShadow(vec3 hitPos, vec3 normal, vec3 lightPos, float lightRadius, float distToLight, vec3 L) {
     vec3 shadowOrigin = hitPos + normal * 0.05;
-    // Останавливаем луч ДО центра источника, чтобы не затеняться о его физические границы, если они есть
     float traceDist = max(0.0, distToLight - 0.2);
 
-    #ifdef SHADOW_MODE_HARD
-        float noise = IGN(gl_FragCoord.xy);
+    float noise = IGN(gl_FragCoord.xy);
     vec3 up = abs(L.y) < 0.999 ? vec3(0,1,0) : vec3(1,0,0);
     vec3 right = normalize(cross(L, up));
     up = cross(right, L);
     float angle = noise * 6.283185;
-    vec2 randOffset = vec2(cos(angle), sin(angle)) * 0.025; // Легкий джиттер убирает артефакты DDA!
+    vec2 randOffset = vec2(cos(angle), sin(angle)) * 0.05;
+    
     vec3 shadowDir = normalize(L + right * randOffset.x + up * randOffset.y);
 
     float hd = 0.0;
     if (TraceAnyShadow(shadowOrigin, shadowDir, traceDist, hd)) return 0.0;
     return 1.0;
-    #elif defined(SHADOW_MODE_SOFT)
-        float noiseVal = IGN(gl_FragCoord.xy);
-    vec3 up = abs(L.y) < 0.999 ? vec3(0,1,0) : vec3(1,0,0);
-    vec3 right = normalize(cross(L, up));
-    up = cross(right, L);
-
-    float lightAreaRadius = 0.15;
-    float avgBlockerDist = 0.0;
-    int blockerCount = 0;
-
-    for(int k = 0; k < BLOCKER_SAMPLES; k++) {
-        float angle = (float(k) + noiseVal) * 2.39996;
-        float r = sqrt(float(k) + 0.5) / sqrt(float(BLOCKER_SAMPLES));
-        vec2 off = vec2(cos(angle), sin(angle)) * r * lightAreaRadius;
-        vec3 dir = normalize(L + right * off.x + up * off.y);
-
-        float hd = 0.0;
-        if (TraceAnyShadow(shadowOrigin, dir, traceDist, hd)) {
-            avgBlockerDist += hd;
-            blockerCount++;
-        }
-    }
-
-    if (blockerCount == 0) return 1.0;
-    avgBlockerDist /= float(blockerCount);
-
-    float penumbra = clamp((distToLight - avgBlockerDist) / avgBlockerDist, 0.0, 1.0);
-    float shadowRadius = penumbra * lightAreaRadius;
-    if (shadowRadius < 0.001) return 0.0;
-
-    // Для локального света используем максимум половину сэмплов от солнца для FPS
-    int samples = max(2, uSoftShadowSamples / 2);
-    float totalVis = 0.0;
-
-    for(int k = 0; k < samples; k++) {
-        float angle = (float(k) + noiseVal) * 2.39996;
-        float r = sqrt(float(k) + 0.5) / sqrt(float(samples));
-        vec2 off = vec2(cos(angle), sin(angle)) * r * shadowRadius;
-        vec3 dir = normalize(L + right * off.x + up * off.y);
-
-        float hd = 0.0;
-        if (!TraceAnyShadow(shadowOrigin, dir, traceDist, hd)) {
-            totalVis += 1.0;
-        }
-    }
-    return smoothstep(0.0, 1.0, totalVis / float(samples));
-    #else
-        return 1.0;
-    #endif
 }
 
 vec3 EvaluatePointLights(vec3 hitPos, vec3 normal) {
