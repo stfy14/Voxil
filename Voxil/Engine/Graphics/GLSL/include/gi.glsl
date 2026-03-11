@@ -100,7 +100,7 @@ vec4 SampleProbeLevel(vec3 worldPos, vec3 normal, sampler2D irrAtlas, sampler2D 
 
         vec3  toProbe   = probeWorldPos - samplePos;
         float probeDist = length(toProbe) + 0.0001;
-        w *= max((dot(normal, toProbe / probeDist) + 1.0) * 0.5, 0.02);
+        w *= max((dot(normal, toProbe / probeDist) + 1.0) * 0.5, 0.001);
 
         if (w < 0.0001) continue;
 
