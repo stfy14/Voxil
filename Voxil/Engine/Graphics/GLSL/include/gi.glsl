@@ -97,7 +97,7 @@ vec4 SampleProbeLevel(vec3 worldPos, vec3 normal, sampler2D irrAtlas, sampler2D 
 
         vec3  toProbe   = probeWorldPos - samplePos;
         float probeDist = length(toProbe) + 0.0001;
-        w *= max((dot(normal, toProbe / probeDist) + 1.0) * 0.5, 0.05);
+        w *= max((dot(normal, toProbe / probeDist) + 1.0) * 0.5, 0.02);
 
         if (w < 0.0001) continue;
 
@@ -126,15 +126,15 @@ vec3 SampleGIProbes(vec3 worldPos, vec3 normal) {
 
     vec4  s0    = SampleProbeLevel(worldPos, normal, uGIIrrAtlas, uGIDepthAtlas, uGIGridBaseX, uGIGridBaseY, uGIGridBaseZ, uGIProbeSpacing);
     float fade0 = ComputeEdgeFade(worldPos, uGIGridBaseX, uGIGridBaseY, uGIGridBaseZ, uGIProbeSpacing);
-    vec3  irr0  = (s0.a > 0.001) ? s0.rgb / s0.a : vec3(0.001);
+    vec3 irr0 = (s0.a > 0.001) ? s0.rgb / s0.a : fallback * 0.1;
 
     vec4  s1    = SampleProbeLevel(worldPos, normal, uGIIrrAtlasL1, uGIDepthAtlasL1, uGIGridBaseX_L1, uGIGridBaseY_L1, uGIGridBaseZ_L1, uGIProbeSpacingL1);
     float fade1 = ComputeEdgeFade(worldPos, uGIGridBaseX_L1, uGIGridBaseY_L1, uGIGridBaseZ_L1, uGIProbeSpacingL1);
-    vec3  irr1  = (s1.a > 0.001) ? s1.rgb / s1.a : vec3(0.001);
+    vec3 irr1 = (s1.a > 0.001) ? s1.rgb / s1.a : fallback * 0.1;
 
     vec4  s2    = SampleProbeLevel(worldPos, normal, uGIIrrAtlasL2, uGIDepthAtlasL2, uGIGridBaseX_L2, uGIGridBaseY_L2, uGIGridBaseZ_L2, uGIProbeSpacingL2);
     float fade2 = ComputeEdgeFade(worldPos, uGIGridBaseX_L2, uGIGridBaseY_L2, uGIGridBaseZ_L2, uGIProbeSpacingL2);
-    vec3  irr2  = (s2.a > 0.001) ? s2.rgb / s2.a : vec3(0.001);
+    vec3 irr2 = (s2.a > 0.001) ? s2.rgb / s2.a : fallback * 0.1;
 
     // Каскады смешиваются от крупного к мелкому по краям сетки
     vec3 result = mix(fallback, irr2, fade2);
