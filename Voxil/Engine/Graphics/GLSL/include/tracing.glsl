@@ -1,4 +1,5 @@
-﻿layout(std430, binding = 5) buffer MaskSSBO { uvec2 packedMasks[]; };
+﻿// --- START OF FILE tracing.glsl.txt ---
+layout(std430, binding = 5) buffer MaskSSBO { uvec2 packedMasks[]; };
 layout(std430, binding = 7) buffer DynSVOBuffer { uvec4 svoNodes[]; };
 
 /*__BANKS_INJECTION__*/
@@ -28,6 +29,7 @@ vec2 IntersectAABB(vec3 ro, vec3 invRd, vec3 boxMin, vec3 boxMax) {
     return vec2(tNear, tFar);
 }
 
+// === TraceSVO (Dynamic Objects) ===
 uint TraceSVO(vec3 localRo, vec3 localRd, uint svoOffset, uint gridSize, float voxelSize, inout float tHit, out vec3 outNormal, inout int steps) {
     outNormal = vec3(0.0);
     if (gridSize == 0u || voxelSize == 0.0) return 0u;
@@ -112,6 +114,7 @@ uint TraceSVO(vec3 localRo, vec3 localRd, uint svoOffset, uint gridSize, float v
     return bestMat;
 }
 
+// === TraceDynamicRay ===
 bool TraceDynamicRay(vec3 ro, vec3 rd, float maxDist, inout float tHit, inout int outObjID, inout vec3 outLocalNormal, out uint outMatID, inout int steps) {
     tHit = maxDist;
     outMatID = 0u;
@@ -121,11 +124,10 @@ bool TraceDynamicRay(vec3 ro, vec3 rd, float maxDist, inout float tHit, inout in
     if (abs(safeRd.x) < 1e-6) safeRd.x = (safeRd.x < 0.0) ? -1e-6 : 1e-6;
     if (abs(safeRd.y) < 1e-6) safeRd.y = (safeRd.y < 0.0) ? -1e-6 : 1e-6;
     if (abs(safeRd.z) < 1e-6) safeRd.z = (safeRd.z < 0.0) ? -1e-6 : 1e-6;
+    vec3 invRd = 1.0 / safeRd;
 
     vec3 gridMin = uGridOrigin;
     vec3 gridMax = uGridOrigin + vec3(uGridSize) * uGridStep;
-
-    vec3 invRd = 1.0 / safeRd;
     vec2 tGrid = IntersectAABB(ro, invRd, gridMin, gridMax);
     if (tGrid.x > tGrid.y || tGrid.y < 0.0 || tGrid.x > maxDist) return false;
 
@@ -135,11 +137,12 @@ bool TraceDynamicRay(vec3 ro, vec3 rd, float maxDist, inout float tHit, inout in
     vec3 rayOriginWorld = ro + safeRd * tCurrent;
     rayOriginWorld = clamp(rayOriginWorld, gridMin + 0.001, gridMax - 0.001);
 
-    ivec3 mapPos = ivec3(floor((rayOriginWorld - uGridOrigin) / uGridStep));
-    vec3 deltaDist = abs(1.0 / safeRd) * uGridStep;
+    // НАДЕЖНАЯ ФОРМУЛА DDA
+    vec3 rayPosGrid = (rayOriginWorld - uGridOrigin) / uGridStep;
+    ivec3 mapPos = ivec3(floor(rayPosGrid));
+    vec3 deltaDist = abs(invRd) * uGridStep;
     ivec3 stepDir = ivec3(sign(safeRd));
-    vec3 relPos = rayOriginWorld - (uGridOrigin + vec3(mapPos) * uGridStep);
-    vec3 sideDist = ((vec3(stepDir) * 0.5 + 0.5) * uGridStep - relPos) * invRd;
+    vec3 sideDist = (sign(safeRd) * (vec3(mapPos) - rayPosGrid) + (sign(safeRd) * 0.5 + 0.5)) * deltaDist;
 
     vec3 mask;
     for (int safetyLoop = 0; safetyLoop < 512; safetyLoop++) {
@@ -195,12 +198,12 @@ bool TraceStaticRay(vec3 ro, vec3 rd, float maxDist, float tStart, inout float t
     if (abs(safeRd.x) < 1e-6) safeRd.x = (safeRd.x < 0.0) ? -1e-6 : 1e-6;
     if (abs(safeRd.y) < 1e-6) safeRd.y = (safeRd.y < 0.0) ? -1e-6 : 1e-6;
     if (abs(safeRd.z) < 1e-6) safeRd.z = (safeRd.z < 0.0) ? -1e-6 : 1e-6;
+    vec3 invRd = 1.0 / safeRd;
 
     vec3 worldMin = vec3(uBoundMinX, uBoundMinY, uBoundMinZ) * float(CHUNK_SIZE);
     vec3 worldMax = vec3(uBoundMaxX, uBoundMaxY, uBoundMaxZ) * float(CHUNK_SIZE);
 
     float tCurrent = max(0.0, tStart);
-    vec3 invRd = 1.0 / safeRd;
     vec2 tWorld = IntersectAABB(ro, invRd, worldMin, worldMax);
     if (tWorld.x > tWorld.y || tWorld.y < 0.0) return false;
     if (tWorld.x > tCurrent) tCurrent = tWorld.x + 0.001;
@@ -209,13 +212,14 @@ bool TraceStaticRay(vec3 ro, vec3 rd, float maxDist, float tStart, inout float t
     vec3 rayOrigin = ro + safeRd * tCurrent;
     rayOrigin = clamp(rayOrigin, worldMin + 0.001, worldMax - 0.001);
 
-    ivec3 cMapPos = ivec3(floor(rayOrigin / float(CHUNK_SIZE)));
+    // НАДЕЖНАЯ ФОРМУЛА DDA
+    vec3 rayPosChunk = rayOrigin / float(CHUNK_SIZE);
+    ivec3 cMapPos = ivec3(floor(rayPosChunk));
     vec3 cDeltaDist = abs(invRd) * float(CHUNK_SIZE);
     ivec3 cStepDir = ivec3(sign(safeRd));
-    vec3 relPos = rayOrigin - (vec3(cMapPos) * float(CHUNK_SIZE));
-    vec3 cSideDist = ((vec3(cStepDir) * 0.5 + 0.5) * float(CHUNK_SIZE) - relPos) * invRd;
-    
+    vec3 cSideDist = (sign(safeRd) * (vec3(cMapPos) - rayPosChunk) + (sign(safeRd) * 0.5 + 0.5)) * cDeltaDist;
     vec3 cMask = vec3(0);
+    
     ivec3 bMin = ivec3(uBoundMinX, uBoundMinY, uBoundMinZ);
     ivec3 bMax = ivec3(uBoundMaxX, uBoundMaxY, uBoundMaxZ);
 
@@ -242,36 +246,42 @@ bool TraceStaticRay(vec3 ro, vec3 rd, float maxDist, float tStart, inout float t
 
             uint maskBaseOffset = chunkSlot * (uint(BLOCKS_PER_AXIS)*uint(BLOCKS_PER_AXIS)*uint(BLOCKS_PER_AXIS));
             vec3 chunkOrigin = vec3(cMapPos) * float(CHUNK_SIZE);
+            vec3 pLocal = (ro + safeRd * tCurrent) - chunkOrigin;
+            pLocal = clamp(pLocal, 0.0, float(CHUNK_SIZE) - 0.0001);
 
             if (isLodChunk) {
-                vec3 pLocal = (ro + safeRd * tCurrent) - chunkOrigin;
-                pLocal = clamp(pLocal, 0.0, float(CHUNK_SIZE) - 0.0001);
-                ivec3 blockPos = ivec3(floor(pLocal / float(BLOCK_SIZE)));
+                vec3 rayPosBlock = pLocal / float(BLOCK_SIZE);
+                ivec3 blockPos = ivec3(floor(rayPosBlock));
                 blockPos = clamp(blockPos, ivec3(0), ivec3(BLOCKS_PER_AXIS - 1));
 
                 vec3 bDeltaDist = abs(invRd) * float(BLOCK_SIZE);
                 ivec3 bStepDir = cStepDir;
-                vec3 blockRelPos = pLocal - (vec3(blockPos) * float(BLOCK_SIZE));
-                vec3 bSideDist = ((vec3(bStepDir) * 0.5 + 0.5) * float(BLOCK_SIZE) - blockRelPos) * invRd;
+                vec3 bSideDist = (sign(safeRd) * (vec3(blockPos) - rayPosBlock) + (sign(safeRd) * 0.5 + 0.5)) * bDeltaDist;
                 vec3 bMask = cMask;
 
                 for (int bStep = 0; bStep < 64; bStep++) {
                     if (any(lessThan(blockPos, ivec3(0))) || any(greaterThanEqual(blockPos, ivec3(BLOCKS_PER_AXIS)))) break;
-                    uvec2 maskVal = packedMasks[maskBaseOffset + uint(blockPos.x + BLOCKS_PER_AXIS * (blockPos.y + BLOCKS_PER_AXIS * blockPos.z))];
+                    uint bIdx = uint(blockPos.x + BLOCKS_PER_AXIS * (blockPos.y + BLOCKS_PER_AXIS * blockPos.z));
+                    uvec2 maskVal = packedMasks[maskBaseOffset + bIdx];
+                    
                     if (maskVal.x != 0u || maskVal.y != 0u) {
                         uint bitIdx = (maskVal.x != 0u) ? uint(findLSB(maskVal.x)) : 32u + uint(findLSB(maskVal.y));
                         ivec3 blockOrigin = blockPos * BLOCK_SIZE;
                         int idx = (blockOrigin.x + (int(bitIdx) & 3)) + VOXEL_RESOLUTION * ((blockOrigin.y + ((int(bitIdx) >> 2) & 3)) + VOXEL_RESOLUTION * (blockOrigin.z + (int(bitIdx) >> 4)));
                         uint lodMatID = GetVoxelData(chunkSlot, idx);
+                        
                         if (lodMatID != 0u) {
                             vec2 tBlock = IntersectAABB(ro, invRd, chunkOrigin + vec3(blockOrigin), chunkOrigin + vec3(blockOrigin) + vec3(BLOCK_SIZE));
                             if (tBlock.x <= tBlock.y && tBlock.y > 0.0) {
-                                tHit = max(tCurrent, tBlock.x); matID = lodMatID;
+                                tHit = max(tCurrent, tBlock.x); 
+                                matID = lodMatID;
+                                
                                 vec3 btNear = min((chunkOrigin + vec3(blockOrigin) - ro) * invRd, (chunkOrigin + vec3(blockOrigin) + vec3(BLOCK_SIZE) - ro) * invRd);
-                                if (abs(btNear.x - tBlock.x) < 0.001) normal.x = -sign(safeRd.x);
-                                else if (abs(btNear.y - tBlock.x) < 0.001) normal.y = -sign(safeRd.y);
-                                else if (abs(btNear.z - tBlock.x) < 0.001) normal.z = -sign(safeRd.z);
+                                if (abs(btNear.x - tBlock.x) < 0.001) normal = vec3(-sign(safeRd.x), 0.0, 0.0);
+                                else if (abs(btNear.y - tBlock.x) < 0.001) normal = vec3(0.0, -sign(safeRd.y), 0.0);
+                                else if (abs(btNear.z - tBlock.x) < 0.001) normal = vec3(0.0, 0.0, -sign(safeRd.z));
                                 else normal = -normalize(safeRd);
+                                
                                 return true;
                             }
                         }
@@ -281,39 +291,48 @@ bool TraceStaticRay(vec3 ro, vec3 rd, float maxDist, float tStart, inout float t
                     else { bMask = vec3(0,0,1); bSideDist.z += bDeltaDist.z; blockPos.z += bStepDir.z; }
                 }
             } else {
-                vec3 pLocal = (ro + safeRd * tCurrent) - chunkOrigin;
-                pLocal = clamp(pLocal, 0.0, float(CHUNK_SIZE) - 0.0001);
-                vec3 pVoxel = pLocal * VOXELS_PER_METER;
-                ivec3 vMapPos = ivec3(floor(pVoxel));
+                vec3 rayPosVoxel = pLocal * VOXELS_PER_METER;
+                ivec3 vMapPos = ivec3(floor(rayPosVoxel));
 
-                vec3 vDeltaDist = abs(invRd);
+                vec3 vDeltaDist = abs(invRd) / VOXELS_PER_METER;
                 ivec3 vStepDir = cStepDir;
-                vec3 vSideDist = ((vec3(vStepDir) * 0.5 + 0.5) + vec3(vMapPos) - pVoxel) * vDeltaDist;
+                vec3 vSideDist = (sign(safeRd) * (vec3(vMapPos) - rayPosVoxel) + (sign(safeRd) * 0.5 + 0.5)) * vDeltaDist;
                 vec3 vMask = cMask;
 
                 for (int s = 0; s < 512; s++) {
                     if (((vMapPos.x | vMapPos.y | vMapPos.z) & ~BIT_MASK) != 0) break;
                     ivec3 bMapPos = vMapPos >> 2;
-                    uvec2 maskVal = packedMasks[maskBaseOffset + uint(bMapPos.x + BLOCKS_PER_AXIS * (bMapPos.y + BLOCKS_PER_AXIS * bMapPos.z))];
+                    uint bIdx = uint(bMapPos.x + BLOCKS_PER_AXIS * (bMapPos.y + BLOCKS_PER_AXIS * bMapPos.z));
+                    uvec2 maskVal = packedMasks[maskBaseOffset + bIdx];
 
                     if (maskVal.x == 0u && maskVal.y == 0u) {
+                        // ИСПРАВЛЕНИЕ: Обновляем маску при пропуске пустоты!
                         for(int j=0; j<64; j++) {
-                            if (vSideDist.x < vSideDist.y && vSideDist.x < vSideDist.z) { vSideDist.x += vDeltaDist.x; vMapPos.x += vStepDir.x; }
-                            else if (vSideDist.y < vSideDist.z) { vSideDist.y += vDeltaDist.y; vMapPos.y += vStepDir.y; }
-                            else { vSideDist.z += vDeltaDist.z; vMapPos.z += vStepDir.z; }
+                            if (vSideDist.x < vSideDist.y && vSideDist.x < vSideDist.z) { 
+                                vMask = vec3(1,0,0); vSideDist.x += vDeltaDist.x; vMapPos.x += vStepDir.x; 
+                            }
+                            else if (vSideDist.y < vSideDist.z) { 
+                                vMask = vec3(0,1,0); vSideDist.y += vDeltaDist.y; vMapPos.y += vStepDir.y; 
+                            }
+                            else { 
+                                vMask = vec3(0,0,1); vSideDist.z += vDeltaDist.z; vMapPos.z += vStepDir.z; 
+                            }
                             if ((vMapPos >> 2) != bMapPos) break;
                             if (((vMapPos.x | vMapPos.y | vMapPos.z) & ~BIT_MASK) != 0) break;
                         }
                     } else {
                         int lx = vMapPos.x & 3, ly = vMapPos.y & 3, lz = vMapPos.z & 3;
                         int bitIdx = lx | (ly << 2) | (lz << 4);
-                        if (((bitIdx < 32) ? (maskVal.x & (1u << bitIdx)) : (maskVal.y & (1u << (bitIdx - 32)))) != 0u) {
+                        bool hasVoxel = (bitIdx < 32) ? ((maskVal.x & (1u << bitIdx)) != 0u) : ((maskVal.y & (1u << (bitIdx - 32))) != 0u);
+                        
+                        if (hasVoxel) {
                             int idx = vMapPos.x + VOXEL_RESOLUTION * (vMapPos.y + VOXEL_RESOLUTION * vMapPos.z);
                             uint m = GetVoxelData(chunkSlot, idx);
                             if (m != 0u) {
                                 float tRelVoxel = length(vMask) > 0.5 ? dot(vMask, vSideDist - vDeltaDist) : 0.0;
-                                tHit = tCurrent + (tRelVoxel / VOXELS_PER_METER);
-                                matID = m; normal = -vec3(vStepDir) * vMask;
+                                tHit = tCurrent + tRelVoxel; 
+                                matID = m; 
+                                normal = -vec3(vStepDir) * vMask;
                                 return true;
                             }
                         }
@@ -342,14 +361,17 @@ bool TraceShadowRay(vec3 ro, vec3 rd, float maxDist, inout float tHit, inout uin
     if (abs(safeRd.x) < 1e-6) safeRd.x = (safeRd.x < 0.0) ? -1e-6 : 1e-6;
     if (abs(safeRd.y) < 1e-6) safeRd.y = (safeRd.y < 0.0) ? -1e-6 : 1e-6;
     if (abs(safeRd.z) < 1e-6) safeRd.z = (safeRd.z < 0.0) ? -1e-6 : 1e-6;
+    vec3 invRd = 1.0 / safeRd;
 
     vec3 pStart = ro + safeRd * 0.001;
-    ivec3 cMapPos = ivec3(floor(pStart / float(CHUNK_SIZE)));
-    vec3 cDeltaDist = abs(1.0 / safeRd) * float(CHUNK_SIZE);
+    
+    vec3 rayPosChunk = pStart / float(CHUNK_SIZE);
+    ivec3 cMapPos = ivec3(floor(rayPosChunk));
+    vec3 cDeltaDist = abs(invRd) * float(CHUNK_SIZE);
     ivec3 cStepDir = ivec3(sign(safeRd));
-    vec3 relPos = pStart - (vec3(cMapPos) * float(CHUNK_SIZE));
-    vec3 cSideDist = ((vec3(cStepDir) * 0.5 + 0.5) * float(CHUNK_SIZE) - relPos) / safeRd;
+    vec3 cSideDist = (sign(safeRd) * (vec3(cMapPos) - rayPosChunk) + (sign(safeRd) * 0.5 + 0.5)) * cDeltaDist;
     vec3 cMask = vec3(0);
+    
     float tCurrentRel = 0.0;
     ivec3 bMin = ivec3(uBoundMinX, uBoundMinY, uBoundMinZ);
     ivec3 bMax = ivec3(uBoundMaxX, uBoundMaxY, uBoundMaxZ);
@@ -366,51 +388,84 @@ bool TraceShadowRay(vec3 ro, vec3 rd, float maxDist, inout float tHit, inout uin
             }
 
             #ifdef ENABLE_LOD
-            if (distance(uCamPos, (vec3(cMapPos) + 0.5) * float(CHUNK_SIZE)) > uLodDistance) {
-                tHit = tCurrentRel; matID = 1u; return true;
-            }
+            bool isLodChunk = distance(uCamPos, (vec3(cMapPos) + 0.5) * float(CHUNK_SIZE)) > uLodDistance;
+            #else
+            bool isLodChunk = false;
             #endif
 
             uint maskBaseOffset = chunkSlot * (uint(BLOCKS_PER_AXIS)*uint(BLOCKS_PER_AXIS)*uint(BLOCKS_PER_AXIS));
             vec3 chunkOrigin = vec3(cMapPos) * float(CHUNK_SIZE);
             vec3 pLocal = (pStart + safeRd * tCurrentRel) - chunkOrigin;
             pLocal = clamp(pLocal, 0.0, float(CHUNK_SIZE) - 0.0001);
-            vec3 pVoxel = pLocal * VOXELS_PER_METER;
-            ivec3 vMapPos = ivec3(floor(pVoxel));
 
-            vec3 vDeltaDist = abs(1.0 / safeRd);
-            ivec3 vStepDir = cStepDir;
-            vec3 vSideDist = ((vec3(vStepDir) * 0.5 + 0.5) + vec3(vMapPos) - pVoxel) * vDeltaDist;
-            vec3 vMask = cMask;
-
-            for(int sanity = 0; sanity < 512; sanity++) {
-                if (((vMapPos.x | vMapPos.y | vMapPos.z) & ~BIT_MASK) != 0) break;
-                ivec3 bMapPos = vMapPos >> 2;
-                uvec2 maskVal = packedMasks[maskBaseOffset + uint(bMapPos.x + BLOCKS_PER_AXIS * (bMapPos.y + BLOCKS_PER_AXIS * bMapPos.z))];
-                if (maskVal.x == 0u && maskVal.y == 0u) {
-                    for(int s=0; s<64; s++) {
-                        if (vSideDist.x < vSideDist.y && vSideDist.x < vSideDist.z) { vSideDist.x += vDeltaDist.x; vMapPos.x += vStepDir.x; }
-                        else if (vSideDist.y < vSideDist.z) { vSideDist.y += vDeltaDist.y; vMapPos.y += vStepDir.y; }
-                        else { vSideDist.z += vDeltaDist.z; vMapPos.z += vStepDir.z; }
-                        if ((vMapPos >> 2) != bMapPos) break;
-                        if (((vMapPos.x | vMapPos.y | vMapPos.z) & ~BIT_MASK) != 0) break;
+            if (isLodChunk) {
+                vec3 rayPosBlock = pLocal / float(BLOCK_SIZE);
+                ivec3 blockPos = ivec3(floor(rayPosBlock));
+                blockPos = clamp(blockPos, ivec3(0), ivec3(BLOCKS_PER_AXIS - 1));
+                vec3 bDeltaDist = abs(invRd) * float(BLOCK_SIZE);
+                ivec3 bStepDir = cStepDir;
+                vec3 bSideDist = (sign(safeRd) * (vec3(blockPos) - rayPosBlock) + (sign(safeRd) * 0.5 + 0.5)) * bDeltaDist;
+                
+                for (int bStep = 0; bStep < 64; bStep++) {
+                    if (any(lessThan(blockPos, ivec3(0))) || any(greaterThanEqual(blockPos, ivec3(BLOCKS_PER_AXIS)))) break;
+                    uint bIdx = uint(blockPos.x + BLOCKS_PER_AXIS * (blockPos.y + BLOCKS_PER_AXIS * blockPos.z));
+                    uvec2 maskVal = packedMasks[maskBaseOffset + bIdx];
+                    
+                    if (maskVal.x != 0u || maskVal.y != 0u) {
+                        tHit = tCurrentRel; matID = 1u; return true;
                     }
-                } else {
-                    int lx = vMapPos.x & 3, ly = vMapPos.y & 3, lz = vMapPos.z & 3;
-                    int bitIdx = lx | (ly << 2) | (lz << 4);
-                    if (((bitIdx < 32) ? (maskVal.x & (1u << bitIdx)) : (maskVal.y & (1u << (bitIdx - 32)))) != 0u) {
-                        int idx = vMapPos.x + VOXEL_RESOLUTION * (vMapPos.y + VOXEL_RESOLUTION * vMapPos.z);
-                        uint m = GetVoxelData(chunkSlot, idx);
-                        if (m != 0u) {
-                            float tRelVoxel = length(vMask) > 0.5 ? dot(vMask, vSideDist - vDeltaDist) : 0.0;
-                            tHit = tCurrentRel + (tRelVoxel / VOXELS_PER_METER);
-                            matID = m;
-                            return true;
+                    if (bSideDist.x < bSideDist.y && bSideDist.x < bSideDist.z) { bSideDist.x += bDeltaDist.x; blockPos.x += bStepDir.x; }
+                    else if (bSideDist.y < bSideDist.z) { bSideDist.y += bDeltaDist.y; blockPos.y += bStepDir.y; }
+                    else { bSideDist.z += bDeltaDist.z; blockPos.z += bStepDir.z; }
+                }
+            } else {
+                vec3 rayPosVoxel = pLocal * VOXELS_PER_METER;
+                ivec3 vMapPos = ivec3(floor(rayPosVoxel));
+                vec3 vDeltaDist = abs(invRd) / VOXELS_PER_METER;
+                ivec3 vStepDir = cStepDir;
+                vec3 vSideDist = (sign(safeRd) * (vec3(vMapPos) - rayPosVoxel) + (sign(safeRd) * 0.5 + 0.5)) * vDeltaDist;
+                vec3 vMask = cMask;
+
+                for(int sanity = 0; sanity < 512; sanity++) {
+                    if (((vMapPos.x | vMapPos.y | vMapPos.z) & ~BIT_MASK) != 0) break;
+                    ivec3 bMapPos = vMapPos >> 2;
+                    uint bIdx = uint(bMapPos.x + BLOCKS_PER_AXIS * (bMapPos.y + BLOCKS_PER_AXIS * bMapPos.z));
+                    uvec2 maskVal = packedMasks[maskBaseOffset + bIdx];
+                    
+                    if (maskVal.x == 0u && maskVal.y == 0u) {
+                        for(int s=0; s<64; s++) {
+                            // ИСПРАВЛЕНИЕ: То же самое для теней!
+                            if (vSideDist.x < vSideDist.y && vSideDist.x < vSideDist.z) { 
+                                vMask = vec3(1,0,0); vSideDist.x += vDeltaDist.x; vMapPos.x += vStepDir.x; 
+                            }
+                            else if (vSideDist.y < vSideDist.z) { 
+                                vMask = vec3(0,1,0); vSideDist.y += vDeltaDist.y; vMapPos.y += vStepDir.y; 
+                            }
+                            else { 
+                                vMask = vec3(0,0,1); vSideDist.z += vDeltaDist.z; vMapPos.z += vStepDir.z; 
+                            }
+                            if ((vMapPos >> 2) != bMapPos) break;
+                            if (((vMapPos.x | vMapPos.y | vMapPos.z) & ~BIT_MASK) != 0) break;
                         }
+                    } else {
+                        int lx = vMapPos.x & 3, ly = vMapPos.y & 3, lz = vMapPos.z & 3;
+                        int bitIdx = lx | (ly << 2) | (lz << 4);
+                        bool hasVoxel = (bitIdx < 32) ? ((maskVal.x & (1u << bitIdx)) != 0u) : ((maskVal.y & (1u << (bitIdx - 32))) != 0u);
+                        
+                        if (hasVoxel) {
+                            int idx = vMapPos.x + VOXEL_RESOLUTION * (vMapPos.y + VOXEL_RESOLUTION * vMapPos.z);
+                            uint m = GetVoxelData(chunkSlot, idx);
+                            if (m != 0u) {
+                                float tRelVoxel = length(vMask) > 0.5 ? dot(vMask, vSideDist - vDeltaDist) : 0.0;
+                                tHit = tCurrentRel + tRelVoxel; 
+                                matID = m;
+                                return true;
+                            }
+                        }
+                        if (vSideDist.x < vSideDist.y && vSideDist.x < vSideDist.z) { vMask = vec3(1,0,0); vSideDist.x += vDeltaDist.x; vMapPos.x += vStepDir.x; }
+                        else if (vSideDist.y < vSideDist.z) { vMask = vec3(0,1,0); vSideDist.y += vDeltaDist.y; vMapPos.y += vStepDir.y; }
+                        else { vMask = vec3(0,0,1); vSideDist.z += vDeltaDist.z; vMapPos.z += vStepDir.z; }
                     }
-                    if (vSideDist.x < vSideDist.y && vSideDist.x < vSideDist.z) { vMask = vec3(1,0,0); vSideDist.x += vDeltaDist.x; vMapPos.x += vStepDir.x; }
-                    else if (vSideDist.y < vSideDist.z) { vMask = vec3(0,1,0); vSideDist.y += vDeltaDist.y; vMapPos.y += vStepDir.y; }
-                    else { vMask = vec3(0,0,1); vSideDist.z += vDeltaDist.z; vMapPos.z += vStepDir.z; }
                 }
             }
         }

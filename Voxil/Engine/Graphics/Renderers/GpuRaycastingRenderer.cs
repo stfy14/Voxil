@@ -505,10 +505,18 @@ public class GpuRaycastingRenderer : IDisposable
             shader.SetInt("uBoundMaxX", cx + r); shader.SetInt("uBoundMaxY", WorldManager.WorldHeightChunks); shader.SetInt("uBoundMaxZ", cz + r);
         }
 
-        GL.BindImageTexture(0, _pageTableTexture, 0, true, 0, TextureAccess.ReadOnly, SizedInternalFormat.R32ui);
+        // Биндим PageTable в 6-й текстурный юнит (как указано в common.glsl: layout(binding = 6))
+        GL.ActiveTexture(TextureUnit.Texture6);
+        GL.BindTexture(TextureTarget.Texture3D, _pageTableTexture);
+        shader.SetInt("uPageTable", 6);
+
+        // Биндим ObjectGridHead в 7-й текстурный юнит (layout(binding = 7))
+        GL.ActiveTexture(TextureUnit.Texture7);
+        GL.BindTexture(TextureTarget.Texture3D, _gridHeadTexture);
+        shader.SetInt("uObjectGridHead", 7);
+
         BindAllBuffers();
         GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 5, _maskSsbo);
-        GL.BindImageTexture(1, _gridHeadTexture, 0, true, 0, TextureAccess.ReadOnly, SizedInternalFormat.R32i);
         GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 2, _dynamicObjectsBuffer);
         GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 3, _linkedListSsbo);
         _svoManager.Bind();
@@ -623,10 +631,16 @@ public class GpuRaycastingRenderer : IDisposable
                 shadowShader.SetTexture("uGColor", _gColorTexture, TextureUnit.Texture8);
                 shadowShader.SetTexture("uGData", _gDataTexture, TextureUnit.Texture9);
 
-                GL.BindImageTexture(0, _pageTableTexture, 0, true, 0, TextureAccess.ReadOnly, SizedInternalFormat.R32ui);
+                GL.ActiveTexture(TextureUnit.Texture6);
+                GL.BindTexture(TextureTarget.Texture3D, _pageTableTexture);
+                shadowShader.SetInt("uPageTable", 6);
+
+                GL.ActiveTexture(TextureUnit.Texture7);
+                GL.BindTexture(TextureTarget.Texture3D, _gridHeadTexture);
+                shadowShader.SetInt("uObjectGridHead", 7);
+
                 BindAllBuffers();
                 GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 5, _maskSsbo);
-                GL.BindImageTexture(1, _gridHeadTexture, 0, true, 0, TextureAccess.ReadOnly, SizedInternalFormat.R32i);
                 GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 2, _dynamicObjectsBuffer);
                 GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 3, _linkedListSsbo);
                 _svoManager.Bind();
