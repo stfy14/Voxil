@@ -294,7 +294,7 @@ void main() {
         float deadDist = float(uProbeGridX) * uProbeSpacing;
         for (int py = 0; py < DEPTH_TILE; py++) 
             for (int px = 0; px < DEPTH_TILE; px++) 
-                imageStore(uDepthAtlas, depthOrigin + ivec2(px, py), vec4(deadDist, deadDist * deadDist, 0.0, 1.0));
+                imageStore(uDepthAtlas, depthOrigin + ivec2(px, py), vec4(0.0));
         return;
     }
 
@@ -329,8 +329,8 @@ void main() {
             dist = tHit;
 
             if (dot(rd, hitNorm) > 0.0) {
-                // Луч попал во внутреннюю сторону стены — темнота
                 radiance = vec3(0.0);
+                dist = tHit * 0.2; // ← ДОБАВИТЬ: сокращаем depth на 80%
 
             } else if (IsEmissive(matID)) {
                 // Прямое попадание в источник света — с затуханием по дистанции
@@ -501,9 +501,13 @@ void main() {
 
             float meanDist = 0.0; float meanDist2 = 0.0; float wSum = 0.0;
             for (int ray = 0; ray < uRaysPerProbe && ray < MAX_RAYS; ray++) {
-                float w = max(0.0, dot(pixelDir, rayDirs[ray]));
-                if (w < 0.001) continue;
-                float d = rayDist[ray];
+                float w_cos = max(0.0, dot(pixelDir, rayDirs[ray]));
+                if (w_cos < 0.001) continue;
+                // Sharpened lobe: делает depth boundaries резче → Chebyshev точнее
+                // для воксельных стен с жёсткими границами это особенно важно
+                float cageDiagonal = uProbeSpacing * 1.732;
+                float w = pow(w_cos, 4.0);
+                float d = min(rayDist[ray], cageDiagonal);
                 meanDist  += d * w;
                 meanDist2 += d * d * w;
                 wSum      += w;

@@ -68,8 +68,9 @@ void main() {
 
     #ifdef ENABLE_GI
     float aoForGI = max(ao, 0.15);
-    vec3 giIrradiance = SampleGIProbes(hitPos, normal) * aoForGI;
-    indirect = albedo * giIrradiance;
+    vec3 viewDir = normalize(uCamPos - hitPos);
+    vec3 giIrradiance = SampleGIProbes(hitPos, normal, viewDir);
+    indirect = albedo * giIrradiance * aoForGI;
     #else
     float dayAmbient     = 0.35;
     float nightAmbient   = 0.05;

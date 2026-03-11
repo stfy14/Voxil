@@ -49,10 +49,10 @@ float ChebyshevVisibility(vec2 depthMoments, float dist) {
     variance = max(variance, 0.0001);
     float d    = dist - depthMoments.x;
     float cheb = variance / (variance + d * d);
-    // ИСПРАВЛЕНИЕ: Возводим результат в степень, чтобы сделать затухание
-    // от перекрытых зондов гораздо более резким.
-    float visibility = clamp((cheb - 0.1) / 0.9, 0.0, 1.0);
-    return visibility * visibility * visibility * visibility; // pow(visibility, 4.0)
+    // Убираем hard cut (cheb-0.1)/0.9 — он добивает слабые угловые зонды
+    // pow2 вместо pow4 — менее агрессивное затухание для бинарных воксельных границ
+    float visibility = clamp(cheb, 0.0, 1.0);
+    return visibility * visibility;
 }
 
 vec3 GIFallback(vec3 normal) {
@@ -62,17 +62,17 @@ vec3 GIFallback(vec3 normal) {
 }
 
 float ComputeEdgeFade(vec3 worldPos, int bX, int bY, int bZ, float sp) {
-    vec3 gridCenter = (vec3(float(bX), float(bY), float(bZ)) + vec3(float(uGIProbeX), float(uGIProbeY), float(uGIProbeZ)) * 0.5) * sp;
+    vec3 gridCenter = (vec3(float(bX), float(bY), float(bZ)) + 
+                       vec3(float(uGIProbeX), float(uGIProbeY), float(uGIProbeZ)) * 0.5) * sp;
     vec3 halfExt    = vec3(float(uGIProbeX), float(uGIProbeY), float(uGIProbeZ)) * sp * 0.5;
     vec3 distEdge   = halfExt - abs(worldPos - gridCenter);
+    // Было sp * 2.0 — увеличь зону перехода:
     return clamp(min(min(distEdge.x, distEdge.y), distEdge.z) / (sp * 2.0), 0.0, 1.0);
 }
 
-vec4 SampleProbeLevel(vec3 worldPos, vec3 normal, sampler2D irrAtlas, sampler2D depthAtlas, int bX, int bY, int bZ, float sp) {
-    // ИСПРАВЛЕНИЕ 3: Ограничиваем Normal Bias (смещение), чтобы L2 зонды не пробивали потолок
-    // Воксели у нас размером 1 метр, значит смещение должно быть не больше 0.5м (чтобы не улететь в соседнюю комнату)
-    vec3 samplePos  = worldPos + normal * min(sp * 0.1, 0.45);
-    
+vec4 SampleProbeLevel(vec3 worldPos, vec3 normal, vec3 viewDir, sampler2D irrAtlas, sampler2D depthAtlas, int bX, int bY, int bZ, float sp) {
+    vec3 biasDir = normalize(normal * 0.2 + viewDir * 0.8);
+    vec3 samplePos = worldPos + biasDir * (0.75 * sp * 0.3);
     vec3 gridOrigin = vec3(float(bX), float(bY), float(bZ)) * sp + sp * 0.5;
     vec3 localPos   = clamp((samplePos - gridOrigin) / sp, vec3(0.0), vec3(float(uGIProbeX)-1.0, float(uGIProbeY)-1.0, float(uGIProbeZ)-1.0));
 
@@ -96,11 +96,13 @@ vec4 SampleProbeLevel(vec3 worldPos, vec3 normal, sampler2D irrAtlas, sampler2D 
         int   idx = gi_mod(g.x, uGIProbeX) + uGIProbeX * (gi_mod(g.y, uGIProbeY) + uGIProbeY *  gi_mod(g.z, uGIProbeZ));
 
         vec3 probeWorldPos = vec3(float(g.x), float(g.y), float(g.z)) * sp + sp * 0.5;
-        float w  = ((dx == 0) ? (1.0 - fs.x) : fs.x) * ((dy == 0) ? (1.0 - fs.y) : fs.y) * ((dz == 0) ? (1.0 - fs.z) : fs.z);
-
         vec3  toProbe   = probeWorldPos - samplePos;
         float probeDist = length(toProbe) + 0.0001;
-        w *= max((dot(normal, toProbe / probeDist) + 1.0) * 0.5, 0.001);
+        float backfaceW = max(dot(normal, toProbe / probeDist), 0.0);
+        float w  = ((dx == 0) ? (1.0 - fs.x) : fs.x) * ((dy == 0) ? (1.0 - fs.y) : fs.y) * ((dz == 0) ? (1.0 - fs.z) : fs.z);
+
+        if (backfaceW <= 0.0) continue; // пропускаем зонды строго за спиной
+        w *= backfaceW;
 
         if (w < 0.0001) continue;
 
@@ -109,7 +111,7 @@ vec4 SampleProbeLevel(vec3 worldPos, vec3 normal, sampler2D irrAtlas, sampler2D 
         vec2  depthMoments = texture(depthAtlas, depthUV).rg;
 
         float visibility = ChebyshevVisibility(depthMoments, probeDist);
-        w *= visibility * visibility * visibility;
+        w *= visibility;
 
         if (w < 0.0001) continue;
 
@@ -120,24 +122,24 @@ vec4 SampleProbeLevel(vec3 worldPos, vec3 normal, sampler2D irrAtlas, sampler2D 
     return vec4(irrSum, wsSum);
 }
 
-vec3 SampleGIProbes(vec3 worldPos, vec3 normal) {
+vec3 SampleGIProbes(vec3 worldPos, vec3 normal, vec3 viewDir) {
     vec3 fallback = GIFallback(normal);
 
     // ИСПРАВЛЕНИЕ 4: Если wsSum < 0.001 (т.е. sX.a < 0.001) — это означает, что ВСЕ 8 соседних зондов 
     // полностью заблокированы геометрией (мы глубоко под землей или внутри толстой стены).
     // Вместо использования яркого цвета неба (fallback), мы возвращаем почти полную темноту vec3(0.001).
 
-    vec4  s0    = SampleProbeLevel(worldPos, normal, uGIIrrAtlas, uGIDepthAtlas, uGIGridBaseX, uGIGridBaseY, uGIGridBaseZ, uGIProbeSpacing);
-    float fade0 = ComputeEdgeFade(worldPos, uGIGridBaseX, uGIGridBaseY, uGIGridBaseZ, uGIProbeSpacing);
-    vec3 irr0 = (s0.a > 0.001) ? s0.rgb / s0.a : fallback * 0.1;
-
-    vec4  s1    = SampleProbeLevel(worldPos, normal, uGIIrrAtlasL1, uGIDepthAtlasL1, uGIGridBaseX_L1, uGIGridBaseY_L1, uGIGridBaseZ_L1, uGIProbeSpacingL1);
-    float fade1 = ComputeEdgeFade(worldPos, uGIGridBaseX_L1, uGIGridBaseY_L1, uGIGridBaseZ_L1, uGIProbeSpacingL1);
-    vec3 irr1 = (s1.a > 0.001) ? s1.rgb / s1.a : fallback * 0.1;
-
-    vec4  s2    = SampleProbeLevel(worldPos, normal, uGIIrrAtlasL2, uGIDepthAtlasL2, uGIGridBaseX_L2, uGIGridBaseY_L2, uGIGridBaseZ_L2, uGIProbeSpacingL2);
+    vec4  s2    = SampleProbeLevel(worldPos, normal, viewDir, uGIIrrAtlasL2, uGIDepthAtlasL2, uGIGridBaseX_L2, uGIGridBaseY_L2, uGIGridBaseZ_L2, uGIProbeSpacingL2);
     float fade2 = ComputeEdgeFade(worldPos, uGIGridBaseX_L2, uGIGridBaseY_L2, uGIGridBaseZ_L2, uGIProbeSpacingL2);
-    vec3 irr2 = (s2.a > 0.001) ? s2.rgb / s2.a : fallback * 0.1;
+    vec3 irr2 = (s2.a > 0.08) ? s2.rgb / s2.a : fallback;
+
+    vec4  s1    = SampleProbeLevel(worldPos, normal, viewDir, uGIIrrAtlasL1, uGIDepthAtlasL1, uGIGridBaseX_L1, uGIGridBaseY_L1, uGIGridBaseZ_L1, uGIProbeSpacingL1);
+    float fade1 = ComputeEdgeFade(worldPos, uGIGridBaseX_L1, uGIGridBaseY_L1, uGIGridBaseZ_L1, uGIProbeSpacingL1);
+    vec3 irr1 = (s1.a > 0.08) ? s1.rgb / s1.a : fallback * 0.3;
+
+    vec4  s0    = SampleProbeLevel(worldPos, normal, viewDir, uGIIrrAtlas, uGIDepthAtlas, uGIGridBaseX, uGIGridBaseY, uGIGridBaseZ, uGIProbeSpacing);
+    float fade0 = ComputeEdgeFade(worldPos, uGIGridBaseX, uGIGridBaseY, uGIGridBaseZ, uGIProbeSpacing);
+    vec3 irr0 = (s0.a > 0.08) ? s0.rgb / s0.a : fallback * 0.15;
 
     // Каскады смешиваются от крупного к мелкому по краям сетки
     vec3 result = mix(fallback, irr2, fade2);
