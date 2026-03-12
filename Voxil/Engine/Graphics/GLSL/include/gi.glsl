@@ -39,11 +39,12 @@ vec2 ProbeAtlasUV(int probeIdx, vec3 dir, int tileSize, int atlasW, int atlasH) 
 }
 
 float ChebyshevVisibility(vec2 depthMoments, float dist, float spacing) {
-    float depthBias = clamp(spacing * 0.05, 0.05, 0.2); 
+    float depthBias = clamp(spacing * 0.15, 0.1, 0.5); 
     if (dist <= depthMoments.x + depthBias) return 1.0;
     
     float variance = depthMoments.y - (depthMoments.x * depthMoments.x);
-    variance = max(variance, 0.001); 
+    // Увеличиваем минимальную дисперсию (это сгладит резкие переходы света на стене)
+    variance = max(variance, 0.02 * spacing);
     
     float d    = dist - depthMoments.x;
     float cheb = variance / (variance + d * d);
@@ -70,18 +71,20 @@ vec3 GIFallback(vec3 normal) {
 
 float ComputeEdgeFade(vec3 worldPos, int bX, int bY, int bZ, float sp) {
     vec3 gridCenter = (vec3(float(bX), float(bY), float(bZ)) + 
-                       vec3(float(uGIProbeX), float(uGIProbeY), float(uGIProbeZ)) * 0.5) * sp;
+                       vec3(float(uGIProbeX), float(uGIProbeY), float(uGIProbeZ)) * 0.5) * sp + vec3(0.5 / VOXELS_PER_METER);
     vec3 halfExt    = vec3(float(uGIProbeX), float(uGIProbeY), float(uGIProbeZ)) * sp * 0.5;
     vec3 distEdge   = halfExt - abs(worldPos - gridCenter);
     return clamp(min(min(distEdge.x, distEdge.y), distEdge.z) / (sp * 2.0), 0.0, 1.0);
 }
 
 vec4 SampleProbeLevel(vec3 worldPos, vec3 normal, vec3 viewDir, sampler2D irrAtlas, sampler2D depthAtlas, int bX, int bY, int bZ, float sp) {
-    float normalBias = clamp(sp * 0.15, 0.05, 0.3);
-    vec3 biasDir = normalize(normal * 0.8 + viewDir * 0.2);
+    // Увеличиваем отступ от геометрии, чтобы лучи не врезались сами в себя
+    float normalBias = clamp(sp * 0.3, 0.1, 0.8);
+    // Делаем упор на нормаль поверхности
+    vec3 biasDir = normalize(normal * 0.9 + viewDir * 0.1);
     vec3 samplePos = worldPos + biasDir * normalBias;
 
-    vec3 gridOrigin = vec3(float(bX), float(bY), float(bZ)) * sp + sp * 0.5;
+    vec3 gridOrigin = vec3(float(bX), float(bY), float(bZ)) * sp + sp * 0.5 + vec3(0.5 / VOXELS_PER_METER);
     vec3 localPos   = clamp((samplePos - gridOrigin) / sp, vec3(0.0), vec3(float(uGIProbeX)-1.0, float(uGIProbeY)-1.0, float(uGIProbeZ)-1.0));
 
     ivec3 p0 = ivec3(floor(localPos));
@@ -112,15 +115,17 @@ vec4 SampleProbeLevel(vec3 worldPos, vec3 normal, vec3 viewDir, sampler2D irrAtl
         ivec3 g   = ivec3(bX, bY, bZ) + p;
         int   idx = gi_mod(g.x, uGIProbeX) + uGIProbeX * (gi_mod(g.y, uGIProbeY) + uGIProbeY *  gi_mod(g.z, uGIProbeZ));
 
-        vec3 probeWorldPos = vec3(float(g.x), float(g.y), float(g.z)) * sp + sp * 0.5;
+        vec3 probeWorldPos = vec3(float(g.x), float(g.y), float(g.z)) * sp + sp * 0.5 + vec3(0.5 / VOXELS_PER_METER);
         vec3  toProbe   = probeWorldPos - samplePos;
         float probeDist = length(toProbe) + 0.0001;
         vec3  dirToProbe = toProbe / probeDist;
 
-        float backfaceW = (dot(normal, dirToProbe) + 0.3) / 1.3;
+        // Делаем затухание зондов, находящихся позади поверхности, более плавным
+        float backfaceW = (dot(normal, dirToProbe) + 0.2) / 1.2;
         backfaceW = clamp(backfaceW, 0.0, 1.0);
         
-        float w = trilinear * backfaceW;
+        // Квадратичное падение убирает влияние зондов сквозь стены
+        float w = trilinear * (backfaceW * backfaceW);
         
         // СУПЕР ОПТИМИЗАЦИЯ 2: Если луч смотрит в стену, НЕ лезем в память за текстурой глубины!
         if (w < 0.001) continue;
