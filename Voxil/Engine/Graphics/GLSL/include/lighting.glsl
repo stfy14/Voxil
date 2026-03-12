@@ -10,11 +10,14 @@ bool IsSolidForAO(ivec3 pos) {
     if (any(lessThan(pos, boundMin)) || any(greaterThanEqual(pos, boundMax))) return false;
 
     ivec3 chunkCoord = pos >> BIT_SHIFT;
-    // ИСПРАВЛЕНИЕ: texelFetch вместо imageLoad
     uint chunkSlot = texelFetch(uPageTable, chunkCoord & (PAGE_TABLE_SIZE - 1), 0).r;
     if (chunkSlot == 0xFFFFFFFFu) return false;
 
-    if ((chunkSlot & 0x80000000u) != 0u) return true;
+    // ИСПРАВЛЕНИЕ: Тоже проверяем материал, чтобы пустой чанк воздуха не затенял нам углы!
+    if ((chunkSlot & 0x80000000u) != 0u) {
+        uint mat = chunkSlot & 0x7FFFFFFFu;
+        return (mat != 0u && mat != 4u);
+    }
 
     #ifdef ENABLE_LOD
     vec3 chunkCenter = (vec3(chunkCoord) + 0.5) * float(CHUNK_SIZE);
@@ -92,8 +95,6 @@ float CalculateAO(vec3 hitPos, vec3 normal) {
     float ao = pow(0.5, finalOcc);
     return clamp(mix(1.0, ao, AO_STRENGTH), 0.0, 1.0);
 }
-
-// ... (остальной код файла без изменений) ...
 
 bool TraceAnyShadow(vec3 origin, vec3 dir, float maxDist, out float hitDist) {
     float tStatic = 0.0; uint matStatic = 0u;

@@ -9,28 +9,29 @@ public class GIProbeSystem : IDisposable
     private int _debugVbo;
     private int _frameIndex = 0;
 
-    // Оптимизированная сетка: покрывает ту же площадь, но требует в 5 раз меньше памяти!
-    public const float PROBE_SPACING_L0 = 2.0f;
-    public const int PROBE_X = 16, PROBE_Y = 12, PROBE_Z = 16;
-    public const int PROBE_COUNT = PROBE_X * PROBE_Y * PROBE_Z; // Всего 3072 зонда!
+    // 1 ЗОНД НА КАЖДЫЙ ВОКСЕЛЬ! (1.0 метр)
+    public const float PROBE_SPACING_L0 = 1.0f;
+    public const int PROBE_X = 20, PROBE_Y = 16, PROBE_Z = 20;
+    public const int PROBE_COUNT = PROBE_X * PROBE_Y * PROBE_Z; // 6400 зондов
 
-    public const float PROBE_SPACING_L1 = 6.0f;
-    public const float PROBE_SPACING_L2 = 18.0f;
+    public const float PROBE_SPACING_L1 = 4.0f;
+    public const float PROBE_SPACING_L2 = 16.0f;
 
     // Максимальное качество лучей
     public const int RAYS_PER_PROBE_L0 = 64;
     public const int RAYS_PER_PROBE_L1 = 32;
     public const int RAYS_PER_PROBE_L2 = 16;
 
-    // При 512 обновлениях за кадр вся сетка L0 (3072 зонда) обновится за 6 кадров!
-    // Это 10-20 полных обновлений света в секунду!
-    public const int PROBES_PER_FRAME_L0 = 512;
-    public const int PROBES_PER_FRAME_L1 = 256;
-    public const int PROBES_PER_FRAME_L2 = 128;
+    // Обновляем по 1024 зонда за кадр (полный цикл ~6 кадров)
+    public const int PROBES_PER_FRAME_L0 = 1024;
+    public const int PROBES_PER_FRAME_L1 = 512;
+    public const int PROBES_PER_FRAME_L2 = 256;
 
+    // --- АЛИАСЫ ДЛЯ СОВМЕСТИМОСТИ С UI И ТЕСТАМИ ---
     public const float PROBE_SPACING = PROBE_SPACING_L0;
     public const int RAYS_PER_PROBE = RAYS_PER_PROBE_L0;
     public const int PROBES_PER_FRAME = PROBES_PER_FRAME_L0;
+    // ------------------------------------------------
 
     public const int IRR_TILE = 8;
     public const int DEPTH_TILE = 16;
@@ -143,18 +144,42 @@ public class GIProbeSystem : IDisposable
         
         uniform mat4 uViewProj;
         uniform float uCubeSize;
+        
+        uniform int uGIGridBaseX, uGIGridBaseY, uGIGridBaseZ;
+        uniform float uProbeSpacing;
+        uniform int uProbeGridX, uProbeGridY, uProbeGridZ;
+        uniform float uVoxelsPerMeter;
+
         out vec3 vColor;
         
+        int true_mod(int a, int b) { int m = a % b; return m < 0 ? m + b : m; }
+
         void main() {
             ProbeData p = probes[gl_InstanceID];
-            if (p.pos.w < 0.5) { 
+            
+            // Вычисляем ИДЕАЛЬНУЮ ЛОГИЧЕСКУЮ позицию зонда
+            int wx = gl_InstanceID % uProbeGridX;
+            int wy = (gl_InstanceID / uProbeGridX) % uProbeGridY;
+            int wz = gl_InstanceID / (uProbeGridX * uProbeGridY);
+
+            int gx = uGIGridBaseX + true_mod(wx - true_mod(uGIGridBaseX, uProbeGridX), uProbeGridX);
+            int gy = uGIGridBaseY + true_mod(wy - true_mod(uGIGridBaseY, uProbeGridY), uProbeGridY);
+            int gz = uGIGridBaseZ + true_mod(wz - true_mod(uGIGridBaseZ, uProbeGridZ), uProbeGridZ);
+
+            vec3 expectedPos = vec3(gx, gy, gz) * uProbeSpacing + vec3(uProbeSpacing * 0.5);
+            expectedPos = floor(expectedPos * uVoxelsPerMeter) / uVoxelsPerMeter + vec3(0.5 / uVoxelsPerMeter);
+
+            bool isLagging = distance(p.pos.xyz, expectedPos) > (uProbeSpacing * 0.25);
+
+            if (p.pos.w < 0.5 && !isLagging) { 
                 gl_Position = vec4(10000.0, 10000.0, 10000.0, 1.0); 
                 vColor = vec3(0.0);
             } else {
                 vec3 localPos = aPos * uCubeSize;
-                vec3 worldPos = p.pos.xyz + localPos;
+                vec3 worldPos = expectedPos + localPos; 
                 gl_Position = uViewProj * vec4(worldPos, 1.0);
-                vColor = p.color.rgb; 
+                
+                vColor = isLagging ? vec3(0.1, 0.1, 0.1) : p.color.rgb; 
             }
         }";
 
@@ -323,7 +348,6 @@ public class GIProbeSystem : IDisposable
         _updateShader.SetVector3("uCamPos", camPos);
         _updateShader.SetFloat("uLodDistance", 100000.0f);
 
-        // ИСПРАВЛЕНИЕ: Теперь мы запускаем updateCount ГРУПП. Каждая группа = 1 зонд (внутри 64 потока)
         GL.DispatchCompute(updateCount, 1, 1);
         GL.MemoryBarrier(MemoryBarrierFlags.ShaderImageAccessBarrierBit | MemoryBarrierFlags.ShaderStorageBarrierBit | MemoryBarrierFlags.TextureFetchBarrierBit);
     }
@@ -365,23 +389,58 @@ public class GIProbeSystem : IDisposable
 
         _debugShader.Use();
         _debugShader.SetMatrix4("uViewProj", cam.View * cam.Projection);
+        _debugShader.SetFloat("uVoxelsPerMeter", Constants.VoxelsPerMeter);
         GL.BindVertexArray(_debugVao);
 
         int lod = GameSettings.GIDebugLOD;
 
-        void DrawLevel(int ssbo, float size)
+        void DrawLevel(int ssbo, float size, LevelData level, float spacing)
         {
             GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 16, ssbo);
             _debugShader.SetFloat("uCubeSize", size);
+            _debugShader.SetInt("uGIGridBaseX", level.GridBaseX);
+            _debugShader.SetInt("uGIGridBaseY", level.GridBaseY);
+            _debugShader.SetInt("uGIGridBaseZ", level.GridBaseZ);
+            _debugShader.SetFloat("uProbeSpacing", spacing);
+            _debugShader.SetInt("uProbeGridX", PROBE_X);
+            _debugShader.SetInt("uProbeGridY", PROBE_Y);
+            _debugShader.SetInt("uProbeGridZ", PROBE_Z);
             GL.DrawArraysInstanced(PrimitiveType.Triangles, 0, 36, PROBE_COUNT);
         }
 
-        if (lod == 0 || lod == -1) DrawLevel(ProbePositionSsbo, 0.075f);
-        if (lod == 1 || lod == -1) DrawLevel(ProbePositionSsboL1, 0.3f);
-        if (lod == 2 || lod == -1) DrawLevel(ProbePositionSsboL2, 1.2f);
+        if (lod == 0 || lod == -1) DrawLevel(ProbePositionSsbo, 0.075f, _l0, PROBE_SPACING_L0);
+        if (lod == 1 || lod == -1) DrawLevel(ProbePositionSsboL1, 0.3f, _l1, PROBE_SPACING_L1);
+        if (lod == 2 || lod == -1) DrawLevel(ProbePositionSsboL2, 1.2f, _l2, PROBE_SPACING_L2);
 
         GL.BindVertexArray(0);
         GL.Enable(EnableCap.DepthTest);
+    }
+
+    public void DrawDebugBounds(LineRenderer lr)
+    {
+        if (lr == null) return;
+
+        // Желтый куб для L0
+        DrawLevelBounds(lr, _l0, PROBE_SPACING_L0, PROBE_X, PROBE_Y, PROBE_Z, new Vector3(0.9f, 0.8f, 0.2f));
+        // Голубой куб для L1
+        DrawLevelBounds(lr, _l1, PROBE_SPACING_L1, PROBE_X, PROBE_Y, PROBE_Z, new Vector3(0.2f, 0.8f, 0.9f));
+        // Фиолетовый куб для L2
+        DrawLevelBounds(lr, _l2, PROBE_SPACING_L2, PROBE_X, PROBE_Y, PROBE_Z, new Vector3(0.8f, 0.2f, 0.9f));
+    }
+
+    private void DrawLevelBounds(LineRenderer lr, LevelData level, float spacing, int countX, int countY, int countZ, Vector3 color)
+    {
+        // Если сетка еще ни разу не обновлялась
+        if (level.GridBaseX == int.MinValue) return;
+
+        // Нижний левый угол сетки (в мировых координатах)
+        Vector3 min = new Vector3(level.GridBaseX, level.GridBaseY, level.GridBaseZ) * spacing;
+
+        // Верхний правый угол
+        Vector3 max = min + new Vector3(countX, countY, countZ) * spacing;
+
+        // Рисуем Bounding Box
+        lr.DrawBox(min, max, color);
     }
 
     public void Dispose()

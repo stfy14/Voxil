@@ -1,4 +1,4 @@
-﻿// --- Game/UI/Windows/VisualDebugWindow.cs ---
+﻿// --- START OF FILE VisualDebugWindow.cs ---
 using ImGuiNET;
 
 public class VisualDebugWindow : IUIWindow
@@ -11,7 +11,7 @@ public class VisualDebugWindow : IUIWindow
     public void Draw()
     {
         if (!IsVisible) return;
-        ImGui.SetNextWindowSize(new System.Numerics.Vector2(380, 0), ImGuiCond.FirstUseEver); // Чуть шире
+        ImGui.SetNextWindowSize(new System.Numerics.Vector2(380, 0), ImGuiCond.FirstUseEver);
 
         if (ImGui.Begin("Visual Debug", ref _isVisible))
         {
@@ -60,8 +60,7 @@ public class VisualDebugWindow : IUIWindow
                         GameSettings.GIDebugLOD = lodIdx == 3 ? -1 : lodIdx;
                     ImGui.Spacing();
 
-                    // ОБНОВЛЕННЫЕ ДАННЫЕ
-                    ImGui.TextColored(new System.Numerics.Vector4(0.9f, 0.8f, 0.2f, 1f),  "■");
+                    ImGui.TextColored(new System.Numerics.Vector4(0.9f, 0.8f, 0.2f, 1f), "■");
                     ImGui.SameLine(); ImGui.TextDisabled($"L0: {GIProbeSystem.RAYS_PER_PROBE_L0} rays, {GIProbeSystem.PROBES_PER_FRAME_L0}/frame");
 
                     ImGui.TextColored(new System.Numerics.Vector4(0.2f, 0.8f, 0.9f, 1f), "■");
@@ -70,6 +69,13 @@ public class VisualDebugWindow : IUIWindow
                     ImGui.TextColored(new System.Numerics.Vector4(0.8f, 0.2f, 0.9f, 1f), "■");
                     ImGui.SameLine(); ImGui.TextDisabled($"L2: {GIProbeSystem.RAYS_PER_PROBE_L2} rays, {GIProbeSystem.PROBES_PER_FRAME_L2}/frame");
                 }
+
+                // --- НОВАЯ ГАЛОЧКА ДЛЯ ГРАНИЦ СЕТОК ---
+                ImGui.Spacing();
+                bool showBounds = GameSettings.ShowGIProbeGridBounds;
+                if (ImGui.Checkbox("Show Grid Bounds (Cascades)", ref showBounds))
+                    GameSettings.ShowGIProbeGridBounds = showBounds;
+                // --------------------------------------
 
                 ImGui.Spacing();
                 int probeCount = GIProbeSystem.PROBE_COUNT;
