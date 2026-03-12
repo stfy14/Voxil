@@ -7,6 +7,7 @@ using System.Collections.Generic;
 public class GIProbeSystem : IDisposable
 {
     private int _debugVbo;
+    private int _frameIndex = 0;
 
     // Оптимизированная сетка: покрывает ту же площадь, но требует в 5 раз меньше памяти!
     public const float PROBE_SPACING_L0 = 2.0f;
@@ -224,10 +225,12 @@ public class GIProbeSystem : IDisposable
                        int pageTableTex, int gridHeadTex)
     {
         if (!IsValid) return;
+        _frameIndex++;
 
         UpdateLevel(_l0, ProbePositionSsbo, IrrTexL0, DepthTexL0, cameraPosition, PROBE_SPACING_L0, RAYS_PER_PROBE_L0, PROBES_PER_FRAME_L0, sunDir, time, boundMinX, boundMinY, boundMinZ, boundMaxX, boundMaxY, boundMaxZ, maxRaySteps / 2, gridOrigin, gridStep, gridSize, objectCount, pointLightCount, pageTableTex, gridHeadTex);
         UpdateLevel(_l1, ProbePositionSsboL1, IrrTexL1, DepthTexL1, cameraPosition, PROBE_SPACING_L1, RAYS_PER_PROBE_L1, PROBES_PER_FRAME_L1, sunDir, time, boundMinX, boundMinY, boundMinZ, boundMaxX, boundMaxY, boundMaxZ, maxRaySteps / 4, gridOrigin, gridStep, gridSize, objectCount, pointLightCount, pageTableTex, gridHeadTex);
         UpdateLevel(_l2, ProbePositionSsboL2, IrrTexL2, DepthTexL2, cameraPosition, PROBE_SPACING_L2, RAYS_PER_PROBE_L2, PROBES_PER_FRAME_L2, sunDir, time, boundMinX, boundMinY, boundMinZ, boundMaxX, boundMaxY, boundMaxZ, maxRaySteps / 8, gridOrigin, gridStep, gridSize, objectCount, pointLightCount, pageTableTex, gridHeadTex);
+        Bind();
     }
 
     private void UpdateLevel(LevelData level, int posSSBO, int irrTex, int depthTex, Vector3 camPos, float spacing, int raysPerProbe, int probesThisFrame, Vector3 sunDir, float time, int bMinX, int bMinY, int bMinZ, int bMaxX, int bMaxY, int bMaxZ, int maxRaySteps, Vector3 gridOrigin, float gridStep, int gridSize, int objectCount, int pointLightCount, int pageTableTex, int gridHeadTex)
@@ -297,6 +300,7 @@ public class GIProbeSystem : IDisposable
         _updateShader.SetInt("uProbesThisFrame", updateCount);
         _updateShader.SetInt("uRaysPerProbe", raysPerProbe);
         _updateShader.SetFloat("uTime", time);
+        _updateShader.SetInt("uFrameIndex", _frameIndex);
         _updateShader.SetVector3("uSunDir", sunDir);
         _updateShader.SetFloat("uProbeSpacing", spacing);
         _updateShader.SetInt("uProbeGridX", PROBE_X);

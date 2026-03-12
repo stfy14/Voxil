@@ -31,7 +31,7 @@ uniform int   uProbesThisFrame, uRaysPerProbe;
 uniform float uProbeSpacing;
 uniform int   uProbeGridX, uProbeGridY, uProbeGridZ;
 shared bool s_justWokeUp;
-shared vec3 s_oldPos; // ← сохраняем ДО перезаписи
+uniform int uFrameIndex;
 
 int true_mod(int a, int b) { int m = a % b; return m < 0 ? m + b : m; }
 float Hash(float a, float b) { vec2 v = vec2(a, b); return fract(sin(dot(v, vec2(127.1, 311.7))) * 43758.5453); }
@@ -192,7 +192,11 @@ void main() {
     bool justWokeUp = s_justWokeUp; // теперь все 64 потока читают правильное значение
 
     float maxRayDist = max(float(uProbeGridX) * uProbeSpacing * 0.75, 48.0);
-    mat3 probeRot = GetRandomRotation(Hash(float(wx + wy * 7 + wz * 13), uTime), Hash(uTime, float(wz + wx * 5)));
+
+    float rotSeed = float(uFrameIndex / 8 + probeIdx * 1000);
+    mat3 probeRot = GetRandomRotation(
+                    Hash(float(wx + wy * 7 + wz * 13), rotSeed),
+                    Hash(rotSeed, float(wz + wx * 5)));
 
     // ======================================================================
     // 1. ТРАССИРОВКА ЛУЧЕЙ (ПАРАЛЛЕЛЬНО)
@@ -287,7 +291,7 @@ void main() {
         if (!justWokeUp) {
             prevIrr = imageLoad(uIrrAtlas, irrOrigin + ivec2(px, py)).rgb;
             float diff = abs(dot(newIrr, vec3(0.3,0.59,0.11)) - dot(prevIrr, vec3(0.3,0.59,0.11)));
-            blend = mix(0.05, 0.40, clamp(diff * 4.0, 0.0, 1.0));
+            blend = mix(0.03, 0.12, clamp(diff * 3.0, 0.0, 1.0));
         }
         imageStore(uIrrAtlas, irrOrigin + ivec2(px, py), vec4(mix(prevIrr, newIrr, blend), 1.0));
 
@@ -315,7 +319,7 @@ void main() {
             }
         }
         vec2 newDepth = (wSum > 0.0) ? vec2(meanDist/wSum, meanDist2/wSum) : vec2(maxRayDist, maxRayDist*maxRayDist);
-        float blend = justWokeUp ? 1.0 : 0.10;
+        float blend = justWokeUp ? 1.0 : 0.05;
         vec2 prevDepth = justWokeUp ? vec2(maxRayDist, maxRayDist*maxRayDist) : imageLoad(uDepthAtlas, depthOrigin + ivec2(px, py)).rg;
         imageStore(uDepthAtlas, depthOrigin + ivec2(px, py), vec4(mix(prevDepth, newDepth, blend), 0.0, 1.0));
     }
