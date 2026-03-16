@@ -17,6 +17,8 @@ public class GameScene : IScene
     private readonly Crosshair _crosshair;
     private readonly TestManager _testManager;
 
+    private readonly EditorGridRenderer _gridRenderer;
+
     public GameScene(
         WorldManager worldManager,
         PhysicsWorld physicsWorld,
@@ -41,6 +43,8 @@ public class GameScene : IScene
         _physicsDebugger = physicsDebugger;
         _crosshair = crosshair;
         _testManager = testManager;
+
+        _gridRenderer = new EditorGridRenderer();
     }
 
     public void OnEnter()
@@ -70,20 +74,25 @@ public class GameScene : IScene
 
     public void Render()
     {
-        _renderer.Render(CameraData.From(_camera));
+        var camData = CameraData.From(_camera);
+        _renderer.Render(camData);
 
-        // Эта штука может вызвать _lineRenderer.Render(...) если рисуются коллайдеры
+        // --- ЗАПУСКАЕМ ДЕБАГ ПАСС (Тут доступен Z-Buffer от гор!) ---
+        _renderer.BeginDebugPass();
+
         _physicsDebugger.Draw(_physicsWorld, _lineRenderer, _camera);
 
-        // --- НОВОЕ: Добавляем рамки сеток GI в очередь отрисовки ---
         if (GameSettings.EnableGI && GameSettings.ShowGIProbeGridBounds && _renderer.GISystem != null)
         {
-            _renderer.GISystem.DrawDebugBounds(_lineRenderer);
+            _renderer.GISystem.DrawDebugGridBounds(_gridRenderer, camData);
         }
 
-        // Финальный проход отрисовки линий (лучи взрывов, дебаг-линии и рамки GI)
         _lineRenderer.Render(_camera);
 
+        _renderer.EndDebugPass();
+        // -------------------------------------------------------------
+
+        // Прицел рисуем прямо на экран
         _crosshair.Render();
     }
 

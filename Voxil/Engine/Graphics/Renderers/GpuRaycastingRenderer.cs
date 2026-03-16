@@ -1,4 +1,6 @@
-﻿using OpenTK.Graphics.OpenGL4;
+﻿// --- START OF FILE GpuRaycastingRenderer.cs ---
+
+using OpenTK.Graphics.OpenGL4;
 using OpenTK.Mathematics;
 using System;
 using System.Collections.Concurrent;
@@ -82,22 +84,26 @@ public class GpuRaycastingRenderer : IDisposable
     private int _renderWidth;
     private int _renderHeight;
 
-    private int _gColorTexture;     
-    private int _gDataTexture;      
+    private int _gColorTexture;
+    private int _gDataTexture;
 
     // --- SHADOWS ---
     private int _shadowFbo;
-    private int _shadowTexture;             // Rg16f (Sun Shadow, AO)
-    private int _shadowPointLightTexture;   // Rgba16f (Point Light RGB)
+    private int _shadowTexture;
+    private int _shadowPointLightTexture;
     private int _shadowWidth;
     private int _shadowHeight;
 
     private int _shadowFullFbo;
-    private int _shadowFullTexture;             // Rg16f
-    private int _shadowPointLightFullTexture;   // Rgba16f
+    private int _shadowFullTexture;
+    private int _shadowPointLightFullTexture;
 
     private int _compositeFbo;
-    private int _mainColorTexture;  
+    private int _mainColorTexture;
+
+    // --- НОВОЕ: БУФЕР ДЛЯ DEBUG РЕНДЕРА ---
+    private int _debugFbo;
+    private int _debugColorTexture;
 
     private Shader _taaShader;
     private int[] _historyFbo = new int[2];
@@ -123,13 +129,11 @@ public class GpuRaycastingRenderer : IDisposable
     private GIProbeSystem _giSystem;
     private int _pointLightSsbo;
     private const int POINT_LIGHT_BINDING = 18;
-    private int _lastPointLightCount = 0;
-
-    [StructLayout(LayoutKind.Sequential)]
+    private int _lastPointLightCount = 0; [StructLayout(LayoutKind.Sequential)]
     private struct GpuPointLight
     {
-        public Vector4 PosRadius;       
-        public Vector4 ColorIntensity;  
+        public Vector4 PosRadius;
+        public Vector4 ColorIntensity;
     }
     private readonly GpuPointLight[] _pointLightCache = new GpuPointLight[32];
 
@@ -137,16 +141,20 @@ public class GpuRaycastingRenderer : IDisposable
 
     public event Action OnShaderReloaded
     {
-        add    => _shaderSystem.OnShaderReloaded += value;
+        add => _shaderSystem.OnShaderReloaded += value;
         remove => _shaderSystem.OnShaderReloaded -= value;
-    }[StructLayout(LayoutKind.Sequential)]
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
     struct GpuVoxelEdit
     {
         public uint ChunkSlot;
         public uint VoxelIndex;
         public uint NewMaterial;
         public uint Padding;
-    }[StructLayout(LayoutKind.Sequential)]
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
     struct GpuDynamicObject
     {
         public Matrix4 Model;
@@ -293,7 +301,6 @@ public class GpuRaycastingRenderer : IDisposable
         if (GameSettings.EnableGI && _shaderSystem.GIProbeUpdateShader != null)
         {
             _giSystem = new GIProbeSystem(_shaderSystem.GIProbeUpdateShader);
-            Console.WriteLine("[Renderer] GI probe system initialized.");
         }
     }
 
@@ -344,13 +351,13 @@ public class GpuRaycastingRenderer : IDisposable
         GL.DrawBuffers(2, new DrawBuffersEnum[] { DrawBuffersEnum.ColorAttachment0, DrawBuffersEnum.ColorAttachment1 });
 
         // --- SHADOW DOWNSCALE BUFFERS ---
-        _shadowWidth  = Math.Max(1, _renderWidth  / GameSettings.ShadowDownscale);
+        _shadowWidth = Math.Max(1, _renderWidth / GameSettings.ShadowDownscale);
         _shadowHeight = Math.Max(1, _renderHeight / GameSettings.ShadowDownscale);
 
         if (_shadowFbo != 0) GL.DeleteFramebuffer(_shadowFbo);
         _shadowFbo = GL.GenFramebuffer();
         GL.BindFramebuffer(FramebufferTarget.Framebuffer, _shadowFbo);
-        
+
         if (_shadowTexture != 0) GL.DeleteTexture(_shadowTexture);
         _shadowTexture = GL.GenTexture();
         GL.BindTexture(TextureTarget.Texture2D, _shadowTexture);
@@ -377,7 +384,7 @@ public class GpuRaycastingRenderer : IDisposable
         if (_shadowFullFbo != 0) GL.DeleteFramebuffer(_shadowFullFbo);
         _shadowFullFbo = GL.GenFramebuffer();
         GL.BindFramebuffer(FramebufferTarget.Framebuffer, _shadowFullFbo);
-        
+
         if (_shadowFullTexture != 0) GL.DeleteTexture(_shadowFullTexture);
         _shadowFullTexture = GL.GenTexture();
         GL.BindTexture(TextureTarget.Texture2D, _shadowFullTexture);
@@ -432,6 +439,22 @@ public class GpuRaycastingRenderer : IDisposable
             GL.ClearColor(0, 0, 0, 0);
             GL.Clear(ClearBufferMask.ColorBufferBit);
         }
+
+        // --- БУФЕР ДЛЯ ДЕБАГА ---
+        if (_debugColorTexture != 0) GL.DeleteTexture(_debugColorTexture);
+        _debugColorTexture = GL.GenTexture();
+        GL.BindTexture(TextureTarget.Texture2D, _debugColorTexture);
+        GL.TexImage2D(TextureTarget.Texture2D, 0, PixelInternalFormat.Rgba16f, _renderWidth, _renderHeight, 0, PixelFormat.Rgba, PixelType.Float, IntPtr.Zero);
+        GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Linear);
+        GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Linear);
+
+        if (_debugFbo != 0) GL.DeleteFramebuffer(_debugFbo);
+        _debugFbo = GL.GenFramebuffer();
+        GL.BindFramebuffer(FramebufferTarget.Framebuffer, _debugFbo);
+        GL.FramebufferTexture2D(FramebufferTarget.Framebuffer, FramebufferAttachment.ColorAttachment0, TextureTarget.Texture2D, _debugColorTexture, 0);
+        // ПРИВЯЗЫВАЕМ ГЛУБИНУ ОТ РЕЙКАСТЕРА К ДЕБАГ ФБО!
+        GL.FramebufferTexture2D(FramebufferTarget.Framebuffer, FramebufferAttachment.DepthAttachment, TextureTarget.Texture2D, _mainDepthTexture, 0);
+
 
         GL.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
         GL.Viewport(0, 0, _windowWidth, _windowHeight);
@@ -505,12 +528,10 @@ public class GpuRaycastingRenderer : IDisposable
             shader.SetInt("uBoundMaxX", cx + r); shader.SetInt("uBoundMaxY", WorldManager.WorldHeightChunks); shader.SetInt("uBoundMaxZ", cz + r);
         }
 
-        // Биндим PageTable в 6-й текстурный юнит (как указано в common.glsl: layout(binding = 6))
         GL.ActiveTexture(TextureUnit.Texture6);
         GL.BindTexture(TextureTarget.Texture3D, _pageTableTexture);
         shader.SetInt("uPageTable", 6);
 
-        // Биндим ObjectGridHead в 7-й текстурный юнит (layout(binding = 7))
         GL.ActiveTexture(TextureUnit.Texture7);
         GL.BindTexture(TextureTarget.Texture3D, _gridHeadTexture);
         shader.SetInt("uObjectGridHead", 7);
@@ -545,7 +566,6 @@ public class GpuRaycastingRenderer : IDisposable
             GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 3, _linkedListSsbo);
             _svoManager.Bind();
 
-            // ИСПРАВЛЕНИЕ: Даем GI-системе доступ к Point Lights (чтобы свет заходил за углы!)
             GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, POINT_LIGHT_BINDING, _pointLightSsbo);
 
             int r = GameSettings.RenderDistance + 2;
@@ -553,13 +573,12 @@ public class GpuRaycastingRenderer : IDisposable
             int cz = (int)Math.Floor(cam.Position.Z / Constants.ChunkSizeWorld);
             int maxSteps = (int)(viewRange * 8) + 512;
 
-            // Передаем _lastPointLightCount !
             _giSystem.Update(cam.Position, sunDir, _totalTime,
                             cx - r, 0, cz - r,
                             cx + r, WorldManager.WorldHeightChunks, cz + r,
                             maxSteps,
                             _lastGridOrigin, _gridCellSize, OBJ_GRID_SIZE, objCount, _lastPointLightCount,
-                            _pageTableTexture, _gridHeadTexture); // <--- ВОТ ОНИ!
+                            _pageTableTexture, _gridHeadTexture);
 
             _shaderSystem.Use();
             shader = _shaderSystem.RaycastShader;
@@ -649,16 +668,13 @@ public class GpuRaycastingRenderer : IDisposable
                 shadowShader.SetFloat("uGridStep", _gridCellSize);
                 shadowShader.SetInt("uGridSize", OBJ_GRID_SIZE);
 
-                // Передаем буфер света в ShadowShader!
                 GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, POINT_LIGHT_BINDING, _pointLightSsbo);
                 shadowShader.SetInt("uPointLightCount", _lastPointLightCount);
 
-                // ---> ДОБАВИТЬ ЭТОТ БЛОК <---
                 if (_giSystem != null && GameSettings.EnableGI)
                 {
                     _giSystem.SetSamplingUniforms(shadowShader);
                 }
-                // -----------------------------
 
                 GL.DrawArrays(PrimitiveType.TriangleStrip, 0, 4);
             }
@@ -667,7 +683,6 @@ public class GpuRaycastingRenderer : IDisposable
         {
             GL.BindFramebuffer(FramebufferTarget.Framebuffer, _shadowFbo);
             GL.Viewport(0, 0, _shadowWidth, _shadowHeight);
-            // Правильно очищаем оба аттачмента в Editor
             GL.ClearBuffer(ClearBuffer.Color, 0, new float[] { 1.0f, 1.0f, 0.0f, 0.0f });
             GL.ClearBuffer(ClearBuffer.Color, 1, new float[] { 0.0f, 0.0f, 0.0f, 0.0f });
         }
@@ -680,7 +695,7 @@ public class GpuRaycastingRenderer : IDisposable
         upsampleShader.Use();
         upsampleShader.SetInt("uShadowDownscale", GameSettings.ShadowDownscale);
         upsampleShader.SetTexture("uShadowHalfRes", _shadowTexture, TextureUnit.Texture0);
-        upsampleShader.SetTexture("uPointLightHalfRes", _shadowPointLightTexture, TextureUnit.Texture1); // Апсемплим свет!
+        upsampleShader.SetTexture("uPointLightHalfRes", _shadowPointLightTexture, TextureUnit.Texture1);
         upsampleShader.SetTexture("uGData", _gDataTexture, TextureUnit.Texture2);
         GL.DrawArrays(PrimitiveType.TriangleStrip, 0, 4);
 
@@ -697,21 +712,17 @@ public class GpuRaycastingRenderer : IDisposable
         compositeShader.SetVector3("uMoonDir", moonDir);
         compositeShader.SetFloat("uTime", _totalTime);
         compositeShader.SetFloat("uRenderDistance", viewRange);
-        
+
         compositeShader.SetTexture("uGColor", _gColorTexture, TextureUnit.Texture0);
         compositeShader.SetTexture("uGData", _gDataTexture, TextureUnit.Texture1);
         compositeShader.SetTexture("uShadowFull", _shadowFullTexture, TextureUnit.Texture2);
-        compositeShader.SetTexture("uPointLightFull", _shadowPointLightFullTexture, TextureUnit.Texture3); // Читаем апсемпленный свет
+        compositeShader.SetTexture("uPointLightFull", _shadowPointLightFullTexture, TextureUnit.Texture3);
 
         GL.DrawArrays(PrimitiveType.TriangleStrip, 0, 4);
 
-        // НОВОЕ: Отрисовка солидных цветных кубиков GI поверх кадра
         if (_giSystem != null && GameSettings.EnableGI && GameSettings.ShowGIProbes)
         {
-            // Переключаемся в FBO вывода (composite или _history, куда мы рисуем)
             _giSystem.DrawSolidProbes(cam);
-
-            // ---> ИСПРАВЛЕНИЕ: ВОЗВРАЩАЕМ VAO НА МЕСТО <---
             GL.BindVertexArray(_quadVao);
         }
 
@@ -740,7 +751,6 @@ public class GpuRaycastingRenderer : IDisposable
             GL.BindVertexArray(_quadVao);
 
             GL.DrawArrays(PrimitiveType.TriangleStrip, 0, 4);
-            GL.BindFramebuffer(FramebufferTarget.ReadFramebuffer, _historyFbo[writeIndex]);
         }
         else
         {
@@ -751,18 +761,15 @@ public class GpuRaycastingRenderer : IDisposable
             GL.BindFramebuffer(FramebufferTarget.DrawFramebuffer, _historyFbo[1 - _historyWriteIndex]);
             GL.BlitFramebuffer(0, 0, _renderWidth, _renderHeight, 0, 0, _renderWidth, _renderHeight,
                 ClearBufferMask.ColorBufferBit, BlitFramebufferFilter.Nearest);
-            GL.BindFramebuffer(FramebufferTarget.ReadFramebuffer, _compositeFbo);
             if (GameSettings.EnableTAA) _resetTaaHistory = false;
         }
 
-        GL.BindFramebuffer(FramebufferTarget.DrawFramebuffer, 0);
-        GL.Viewport(0, 0, _windowWidth, _windowHeight);
-        GL.BlitFramebuffer(0, 0, _renderWidth, _renderHeight, 0, 0, _windowWidth, _windowHeight,
+        // КОПИРУЕМ ФИНАЛЬНУЮ КАРТИНКУ В БУФЕР ДЛЯ ДЕБАГА (И НЕ ТРОГАЕМ ЕГО ГЛУБИНУ)
+        int finalSrcFbo = (useTaa && !_resetTaaHistory) ? _historyFbo[_historyWriteIndex] : _compositeFbo;
+        GL.BindFramebuffer(FramebufferTarget.ReadFramebuffer, finalSrcFbo);
+        GL.BindFramebuffer(FramebufferTarget.DrawFramebuffer, _debugFbo);
+        GL.BlitFramebuffer(0, 0, _renderWidth, _renderHeight, 0, 0, _renderWidth, _renderHeight,
             ClearBufferMask.ColorBufferBit, BlitFramebufferFilter.Nearest);
-
-        GL.BindFramebuffer(FramebufferTarget.ReadFramebuffer, _mainFbo);
-        GL.BlitFramebuffer(0, 0, _renderWidth, _renderHeight, 0, 0, _windowWidth, _windowHeight,
-            ClearBufferMask.DepthBufferBit, BlitFramebufferFilter.Nearest);
 
         GL.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
         GL.BindVertexArray(0);
@@ -774,6 +781,28 @@ public class GpuRaycastingRenderer : IDisposable
         _historyWriteIndex = 1 - _historyWriteIndex;
     }
 
+    // --- НОВОЕ: МЕТОДЫ ДЛЯ DEBUG РЕНДЕРА (С ИДЕАЛЬНЫМ Z-BUFFER) ---
+    public void BeginDebugPass()
+    {
+        // Биндим FBO с привязанным Depth Buffer от рейкастера!
+        GL.BindFramebuffer(FramebufferTarget.Framebuffer, _debugFbo);
+        GL.Viewport(0, 0, _renderWidth, _renderHeight);
+        // Мы НЕ очищаем буферы, мы рисуем поверх уже готовой картинки.
+    }
+
+    public void EndDebugPass()
+    {
+        // Копируем картинку с линиями из _debugFbo на реальный экран (0)
+        GL.BindFramebuffer(FramebufferTarget.ReadFramebuffer, _debugFbo);
+        GL.BindFramebuffer(FramebufferTarget.DrawFramebuffer, 0);
+        GL.Viewport(0, 0, _windowWidth, _windowHeight);
+
+        GL.BlitFramebuffer(0, 0, _renderWidth, _renderHeight, 0, 0, _windowWidth, _windowHeight,
+            ClearBufferMask.ColorBufferBit, BlitFramebufferFilter.Nearest);
+
+        GL.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
+    }
+
     private void UpdatePointLights()
     {
         if (_pointLightSsbo == 0) return;
@@ -782,14 +811,12 @@ public class GpuRaycastingRenderer : IDisposable
         int count = 0;
         float alpha = _worldService.PhysicsWorld.PhysicsAlpha;
 
-        // Вспомогательная локальная функция
         void AddLightFromObject(VoxelObject vo, bool isViewModel)
         {
             if (count >= 32) return;
             if (!MaterialRegistry.IsEmissive(vo.Material)) return;
             if (vo.VoxelCoordinates.Count == 0) return;
 
-            // Для ViewModel берем позицию жестко из камеры, для остальных - интерполируем от физики
             var pos = isViewModel ? vo.Position : Vector3.Lerp(vo.PrevPosition, vo.Position, alpha);
             var (r, g, b) = MaterialRegistry.GetColor(vo.Material);
 
@@ -800,17 +827,8 @@ public class GpuRaycastingRenderer : IDisposable
             };
         }
 
-        // 1. Динамические объекты в мире
-        foreach (var vo in objects)
-        {
-            AddLightFromObject(vo, false);
-        }
-
-        // 2. ИСПРАВЛЕНИЕ: Предмет в руках игрока теперь тоже светит!
-        if (_currentViewModel != null)
-        {
-            AddLightFromObject(_currentViewModel, true);
-        }
+        foreach (var vo in objects) AddLightFromObject(vo, false);
+        if (_currentViewModel != null) AddLightFromObject(_currentViewModel, true);
 
         _lastPointLightCount = count;
 
@@ -901,7 +919,6 @@ public class GpuRaycastingRenderer : IDisposable
                 });
             }
 
-            // --- НОВОЕ: Оповещаем GI систему об изменении вокселя ---
             if (_giSystem != null && GameSettings.EnableGI)
             {
                 Vector3 worldPos = new Vector3(
@@ -1196,17 +1213,21 @@ public class GpuRaycastingRenderer : IDisposable
         if (_pageTableTexture != 0) { GL.DeleteTexture(_pageTableTexture); _pageTableTexture = 0; }
         if (_gColorTexture != 0) { GL.DeleteTexture(_gColorTexture); _gColorTexture = 0; }
         if (_gDataTexture != 0) { GL.DeleteTexture(_gDataTexture); _gDataTexture = 0; }
-        
+
         if (_shadowFbo != 0) { GL.DeleteFramebuffer(_shadowFbo); _shadowFbo = 0; }
         if (_shadowTexture != 0) { GL.DeleteTexture(_shadowTexture); _shadowTexture = 0; }
         if (_shadowPointLightTexture != 0) { GL.DeleteTexture(_shadowPointLightTexture); _shadowPointLightTexture = 0; }
-        
+
         if (_shadowFullFbo != 0) { GL.DeleteFramebuffer(_shadowFullFbo); _shadowFullFbo = 0; }
         if (_shadowFullTexture != 0) { GL.DeleteTexture(_shadowFullTexture); _shadowFullTexture = 0; }
         if (_shadowPointLightFullTexture != 0) { GL.DeleteTexture(_shadowPointLightFullTexture); _shadowPointLightFullTexture = 0; }
-        
+
         if (_compositeFbo != 0) { GL.DeleteFramebuffer(_compositeFbo); _compositeFbo = 0; }
         if (_mainColorTexture != 0) { GL.DeleteTexture(_mainColorTexture); _mainColorTexture = 0; }
+
+        if (_debugFbo != 0) { GL.DeleteFramebuffer(_debugFbo); _debugFbo = 0; }
+        if (_debugColorTexture != 0) { GL.DeleteTexture(_debugColorTexture); _debugColorTexture = 0; }
+
         _giSystem?.Dispose();
         _giSystem = null;
         if (_pointLightSsbo != 0) { GL.DeleteBuffer(_pointLightSsbo); _pointLightSsbo = 0; }

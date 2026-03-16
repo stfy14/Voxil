@@ -416,31 +416,33 @@ public class GIProbeSystem : IDisposable
         GL.Enable(EnableCap.DepthTest);
     }
 
-    public void DrawDebugBounds(LineRenderer lr)
+    public void DrawDebugGridBounds(EditorGridRenderer gridRenderer, CameraData cam)
     {
-        if (lr == null) return;
+        if (gridRenderer == null) return;
 
-        // Желтый куб для L0
-        DrawLevelBounds(lr, _l0, PROBE_SPACING_L0, PROBE_X, PROBE_Y, PROBE_Z, new Vector3(0.9f, 0.8f, 0.2f));
-        // Голубой куб для L1
-        DrawLevelBounds(lr, _l1, PROBE_SPACING_L1, PROBE_X, PROBE_Y, PROBE_Z, new Vector3(0.2f, 0.8f, 0.9f));
-        // Фиолетовый куб для L2
-        DrawLevelBounds(lr, _l2, PROBE_SPACING_L2, PROBE_X, PROBE_Y, PROBE_Z, new Vector3(0.8f, 0.2f, 0.9f));
+        Vector3 gridCells = new Vector3(PROBE_X, PROBE_Y, PROBE_Z);
+        int lod = GameSettings.GIGridBoundsLOD;
+        float alpha = 0.8f; // Непрозрачность 80%, как ты и просил!
+
+        if (lod == 0 || lod == 3)
+            DrawLevelGrid(gridRenderer, cam, _l0, PROBE_SPACING_L0, gridCells, new Vector4(0.9f, 0.8f, 0.2f, alpha));
+
+        if (lod == 1 || lod == 3)
+            DrawLevelGrid(gridRenderer, cam, _l1, PROBE_SPACING_L1, gridCells, new Vector4(0.2f, 0.8f, 0.9f, alpha));
+
+        if (lod == 2 || lod == 3)
+            DrawLevelGrid(gridRenderer, cam, _l2, PROBE_SPACING_L2, gridCells, new Vector4(0.8f, 0.2f, 0.9f, alpha));
     }
 
-    private void DrawLevelBounds(LineRenderer lr, LevelData level, float spacing, int countX, int countY, int countZ, Vector3 color)
+    private void DrawLevelGrid(EditorGridRenderer gridRenderer, CameraData cam, LevelData level, float spacing, Vector3 gridCells, Vector4 color)
     {
-        // Если сетка еще ни разу не обновлялась
         if (level.GridBaseX == int.MinValue) return;
 
-        // Нижний левый угол сетки (в мировых координатах)
         Vector3 min = new Vector3(level.GridBaseX, level.GridBaseY, level.GridBaseZ) * spacing;
+        Vector3 size = gridCells * spacing;
+        Vector3 center = min + size * 0.5f;
 
-        // Верхний правый угол
-        Vector3 max = min + new Vector3(countX, countY, countZ) * spacing;
-
-        // Рисуем Bounding Box
-        lr.DrawBox(min, max, color);
+        gridRenderer.Render(cam, gridCells, spacing, color, center);
     }
 
     public void Dispose()

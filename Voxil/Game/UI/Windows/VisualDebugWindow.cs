@@ -42,12 +42,12 @@ public class VisualDebugWindow : IUIWindow
             if (GameSettings.EnableGI)
             {
                 bool showProbes = GameSettings.ShowGIProbes;
-                if (ImGui.Checkbox("Visualize Probe Grid", ref showProbes))
+                if (ImGui.Checkbox("Visualize Probe Entities", ref showProbes))
                     GameSettings.ShowGIProbes = showProbes;
 
                 if (showProbes)
                 {
-                    ImGui.SameLine(); ImGui.TextDisabled("(цвет = GI, серый = мертвый)");
+                    ImGui.SameLine(); ImGui.TextDisabled("(кубики)");
                     bool xray = GameSettings.ShowGIProbesXRay;
                     if (ImGui.Checkbox("X-Ray Mode (сквозь стены)", ref xray))
                         GameSettings.ShowGIProbesXRay = xray;
@@ -56,26 +56,36 @@ public class VisualDebugWindow : IUIWindow
                     string[] lodNames = { "L0 — Near (1м)", "L1 — Mid (4м)", "L2 — Far (16м)", "Все уровни" };
                     int lodIdx = GameSettings.GIDebugLOD == -1 ? 3 : GameSettings.GIDebugLOD;
                     ImGui.SetNextItemWidth(200);
-                    if (ImGui.Combo("LOD уровень", ref lodIdx, lodNames, lodNames.Length))
+                    if (ImGui.Combo("Зонды - LOD", ref lodIdx, lodNames, lodNames.Length))
                         GameSettings.GIDebugLOD = lodIdx == 3 ? -1 : lodIdx;
                     ImGui.Spacing();
-
-                    ImGui.TextColored(new System.Numerics.Vector4(0.9f, 0.8f, 0.2f, 1f), "■");
-                    ImGui.SameLine(); ImGui.TextDisabled($"L0: {GIProbeSystem.RAYS_PER_PROBE_L0} rays, {GIProbeSystem.PROBES_PER_FRAME_L0}/frame");
-
-                    ImGui.TextColored(new System.Numerics.Vector4(0.2f, 0.8f, 0.9f, 1f), "■");
-                    ImGui.SameLine(); ImGui.TextDisabled($"L1: {GIProbeSystem.RAYS_PER_PROBE_L1} rays, {GIProbeSystem.PROBES_PER_FRAME_L1}/frame");
-
-                    ImGui.TextColored(new System.Numerics.Vector4(0.8f, 0.2f, 0.9f, 1f), "■");
-                    ImGui.SameLine(); ImGui.TextDisabled($"L2: {GIProbeSystem.RAYS_PER_PROBE_L2} rays, {GIProbeSystem.PROBES_PER_FRAME_L2}/frame");
                 }
 
-                // --- НОВАЯ ГАЛОЧКА ДЛЯ ГРАНИЦ СЕТОК ---
+                // --- НОВЫЙ БЛОК: Сетка каскадов ---
                 ImGui.Spacing();
                 bool showBounds = GameSettings.ShowGIProbeGridBounds;
-                if (ImGui.Checkbox("Show Grid Bounds (Cascades)", ref showBounds))
+                if (ImGui.Checkbox("Visualize GPU Memory Grid", ref showBounds))
                     GameSettings.ShowGIProbeGridBounds = showBounds;
-                // --------------------------------------
+
+                if (showBounds)
+                {
+                    string[] gridLodNames = { "L0 Grid (1m cells)", "L1 Grid (4m cells)", "L2 Grid (16m cells)", "Все сетки" };
+                    int gridLodIdx = GameSettings.GIGridBoundsLOD;
+                    ImGui.SetNextItemWidth(200);
+                    if (ImGui.Combo("Сетка - LOD", ref gridLodIdx, gridLodNames, gridLodNames.Length))
+                        GameSettings.GIGridBoundsLOD = gridLodIdx;
+                }
+                // ----------------------------------
+
+                ImGui.Spacing();
+                ImGui.TextColored(new System.Numerics.Vector4(0.9f, 0.8f, 0.2f, 1f), "■");
+                ImGui.SameLine(); ImGui.TextDisabled($"L0: {GIProbeSystem.RAYS_PER_PROBE_L0} rays, {GIProbeSystem.PROBES_PER_FRAME_L0}/frame");
+
+                ImGui.TextColored(new System.Numerics.Vector4(0.2f, 0.8f, 0.9f, 1f), "■");
+                ImGui.SameLine(); ImGui.TextDisabled($"L1: {GIProbeSystem.RAYS_PER_PROBE_L1} rays, {GIProbeSystem.PROBES_PER_FRAME_L1}/frame");
+
+                ImGui.TextColored(new System.Numerics.Vector4(0.8f, 0.2f, 0.9f, 1f), "■");
+                ImGui.SameLine(); ImGui.TextDisabled($"L2: {GIProbeSystem.RAYS_PER_PROBE_L2} rays, {GIProbeSystem.PROBES_PER_FRAME_L2}/frame");
 
                 ImGui.Spacing();
                 int probeCount = GIProbeSystem.PROBE_COUNT;
