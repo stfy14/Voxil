@@ -193,8 +193,8 @@ void main() {
     vec3 idealPos = vec3(gx, gy, gz) * uProbeSpacing + vec3(uProbeSpacing * 0.5);
     idealPos = floor(idealPos * VOXELS_PER_METER) / VOXELS_PER_METER + vec3(0.5 / VOXELS_PER_METER);
 
-    vec3 targetPos = RelocateProbe(idealPos);
-    bool isSolid = IsSolidAt(targetPos); // true только если relocation не помог
+    vec3 targetPos = idealPos; 
+    bool isSolid = IsSolidAt(targetPos);
 
     ivec2 irrOrigin   = IrrTileOrigin(probeIdx);
     ivec2 depthOrigin = DepthTileOrigin(probeIdx);
@@ -310,14 +310,16 @@ void main() {
         }
         vec3 newIrr = (wSum > 0.0) ? irrSum / wSum : vec3(0.0);
 
-        float blend = justWokeUp ? 0.5 : 0.10;
-        vec3 prevIrr = vec3(0.0);
-        if (!justWokeUp) {
-            prevIrr = imageLoad(uIrrAtlas, irrOrigin + ivec2(px, py)).rgb;
+        vec3 finalIrr;
+        if (justWokeUp) {
+            finalIrr = newIrr; // Полная перезапись без истории!
+        } else {
+            vec3 prevIrr = imageLoad(uIrrAtlas, irrOrigin + ivec2(px, py)).rgb;
             float diff = abs(dot(newIrr, vec3(0.3,0.59,0.11)) - dot(prevIrr, vec3(0.3,0.59,0.11)));
-            blend = mix(0.03, 0.12, clamp(diff * 3.0, 0.0, 1.0));
+            float blend = mix(0.03, 0.12, clamp(diff * 3.0, 0.0, 1.0));
+            finalIrr = mix(prevIrr, newIrr, blend);
         }
-        imageStore(uIrrAtlas, irrOrigin + ivec2(px, py), vec4(mix(prevIrr, newIrr, blend), 1.0));
+        imageStore(uIrrAtlas, irrOrigin + ivec2(px, py), vec4(finalIrr, 1.0));
 
         if (tid == 27) { probes[probeIdx].colorAndState = vec4(newIrr, 1.0); }
     }

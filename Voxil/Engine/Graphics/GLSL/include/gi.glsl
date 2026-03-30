@@ -48,13 +48,16 @@ float ChebyshevVisibility(vec2 depthMoments, float dist) {
     if (dist <= depthMoments.x) return 1.0;
     
     float variance = depthMoments.y - (depthMoments.x * depthMoments.x);
-    variance = max(variance, 0.05); // Защита от shadow acne
+    // БЫЛО: variance = max(variance, 0.05);
+    // СТАЛО: Для вокселей нужно чуть больше допуска, так как лучи зонда бьют в плоскую стену
+    variance = max(variance, 0.15); 
     
     float d = dist - depthMoments.x;
     float cheb = variance / (variance + d * d);
     
-    // Снижение утечек света (Light Leak Reduction), стандартное значение 0.2
-    cheb = max(0.0, cheb - 0.2) / 0.8;
+    // БЫЛО: cheb = max(0.0, cheb - 0.2) / 0.8;
+    // СТАЛО: Агрессивнее давим утечки света (Light Leaks) через 1-блочные стены
+    cheb = max(0.0, cheb - 0.3) / 0.7; 
     
     return clamp(cheb, 0.0, 1.0);
 }
@@ -85,9 +88,7 @@ vec4 SampleProbeLevel(vec3 worldPos, vec3 normal, vec3 viewDir,
     sampler2D irrAtlas, sampler2D depthAtlas,
     int bX, int bY, int bZ, float sp, int level)
 {
-    // Классический RTXGI Surface Bias (смещение от поверхности, чтобы не затенять саму себя)
-    vec3 biasDir = normalize(normal * 0.8 + viewDir * 0.2);
-    vec3 samplePos = worldPos + biasDir * (sp * 0.25);
+    vec3 samplePos = worldPos + normal * 0.55;
 
     vec3 gridOrigin = vec3(float(bX), float(bY), float(bZ)) * sp + sp * 0.5;
     vec3 localPos   = (samplePos - gridOrigin) / sp;
@@ -137,6 +138,17 @@ vec4 SampleProbeLevel(vec3 worldPos, vec3 normal, vec3 viewDir,
         
         if (storedState < 0.5) continue; // Зонд внутри стены (выключаем его вес)
 
+        // === ДОБАВИТЬ ЭТОТ КОД ===
+        // Проверяем, не является ли этот зонд "призраком" (еще не обновлен)
+        // Вычисляем, где этот зонд ДОЛЖЕН находиться математически:
+        vec3 expectedPos = gridOrigin + vec3(p) * sp;
+        
+        // Если реальная позиция в памяти отличается от ожидаемой больше чем на 10 см,
+        // значит тороидальная сетка сдвинулась, а этот зонд стоит в очереди на апдейт.
+        // Игнорируем его мусорные данные!
+        if (distance(probeWorldPos, expectedPos) > 0.1) continue; 
+        // ==========================
+
         // 1. Базовый вес (Трилинейная интерполяция)
         vec3 trilinear = mix(1.0 - f, f, vec3(dx, dy, dz));
         float weight = trilinear.x * trilinear.y * trilinear.z;
@@ -145,6 +157,7 @@ vec4 SampleProbeLevel(vec3 worldPos, vec3 normal, vec3 viewDir,
 
         vec3  toProbe    = probeWorldPos - samplePos;
         float probeDist  = length(toProbe);
+        if (probeDist > sp * 1.5) continue;
         vec3  dirToProbe = toProbe / max(probeDist, 0.0001);
 
         // 2. Отсечение задних граней (Backface weighting) - свет не проходит сквозь куб
