@@ -44,18 +44,17 @@ vec2 ProbeAtlasUV(int probeIdx, vec3 dir, int tileSize, int atlasW, int atlasH) 
     return (tileOrigin + octUV * float(tileSize)) / vec2(float(atlasW), float(atlasH));
 }
 
-float ChebyshevVisibility(vec2 depthMoments, float dist, float spacing) {
-    float depthBias = clamp(spacing * 0.15, 0.1, 0.5); 
-    if (dist <= depthMoments.x + depthBias) return 1.0;
+float ChebyshevVisibility(vec2 depthMoments, float dist) {
+    if (dist <= depthMoments.x) return 1.0;
     
     float variance = depthMoments.y - (depthMoments.x * depthMoments.x);
-    variance = max(variance, 0.02 * spacing);
+    variance = max(variance, 0.05); // Защита от shadow acne
     
-    float d    = dist - depthMoments.x;
+    float d = dist - depthMoments.x;
     float cheb = variance / (variance + d * d);
     
-    float lightLeakReduction = 0.35; 
-    cheb = max(0.0, cheb - lightLeakReduction) / (1.0 - lightLeakReduction);
+    // Снижение утечек света (Light Leak Reduction), стандартное значение 0.2
+    cheb = max(0.0, cheb - 0.2) / 0.8;
     
     return clamp(cheb, 0.0, 1.0);
 }
@@ -86,88 +85,91 @@ vec4 SampleProbeLevel(vec3 worldPos, vec3 normal, vec3 viewDir,
     sampler2D irrAtlas, sampler2D depthAtlas,
     int bX, int bY, int bZ, float sp, int level)
 {
-    float normalBias = clamp(sp * 0.15, 0.05, 0.3);
+    // Классический RTXGI Surface Bias (смещение от поверхности, чтобы не затенять саму себя)
     vec3 biasDir = normalize(normal * 0.8 + viewDir * 0.2);
-    vec3 samplePos = worldPos + biasDir * normalBias;
+    vec3 samplePos = worldPos + biasDir * (sp * 0.25);
 
     vec3 gridOrigin = vec3(float(bX), float(bY), float(bZ)) * sp + sp * 0.5;
-    vec3 localPos   = clamp((samplePos - gridOrigin) / sp,
-                             vec3(0.0),
-                             vec3(float(uGIProbeX)-1.0, float(uGIProbeY)-1.0, float(uGIProbeZ)-1.0));
+    vec3 localPos   = (samplePos - gridOrigin) / sp;
 
     ivec3 p0 = ivec3(floor(localPos));
     vec3  f  = fract(localPos);
-    vec3  fs = f * f * (3.0 - 2.0 * f);
 
     int irrAtlasW   = uGIProbeX * (uIrrTile   + 2);
     int irrAtlasH   = uGIProbeY * uGIProbeZ * (uIrrTile   + 2);
     int depthAtlasW = uGIProbeX * (uDepthTile + 2);
     int depthAtlasH = uGIProbeY * uGIProbeZ * (uDepthTile + 2);
 
-    vec3  irrSum    = vec3(0.0); float wsSum  = 0.0;
-    vec3  backupIrr = vec3(0.0); float backupWs = 0.0;
+    vec3  irrSum = vec3(0.0); 
+    float wsSum  = 0.0;
 
-    for (int dz = 0; dz <= 1; dz++)
-    for (int dy = 0; dy <= 1; dy++)
-    for (int dx = 0; dx <= 1; dx++)
+    // Цикл от 0 до 7 - это то же самое, что тройной цикл, но работает быстрее на GPU
+    for (int i = 0; i < 8; i++)
     {
-        ivec3 p = clamp(p0 + ivec3(dx, dy, dz),
-                        ivec3(0),
-                        ivec3(uGIProbeX-1, uGIProbeY-1, uGIProbeZ-1));
+        int dx = i & 1;
+        int dy = (i >> 1) & 1;
+        int dz = (i >> 2) & 1;
+
+        ivec3 p = p0 + ivec3(dx, dy, dz);
+
+        // Пропускаем зонды вне сетки
+        if (any(lessThan(p, ivec3(0))) || any(greaterThanEqual(p, ivec3(uGIProbeX, uGIProbeY, uGIProbeZ)))) continue;
+
         ivec3 g   = ivec3(bX, bY, bZ) + p;
         int   idx = gi_mod(g.x, uGIProbeX)
                   + uGIProbeX * (gi_mod(g.y, uGIProbeY)
                   + uGIProbeY *  gi_mod(g.z, uGIProbeZ));
 
         float storedState;
-        if      (level == 0) storedState = giProbesL0[idx].pos.w;
-        else if (level == 1) storedState = giProbesL1[idx].pos.w;
-        else                 storedState = giProbesL2[idx].pos.w;
-        if (storedState < 0.5) continue;
+        vec3 probeWorldPos; 
+        
+        // Читаем позицию и статус напрямую из буфера
+        if (level == 0) {
+            storedState = giProbesL0[idx].pos.w;
+            probeWorldPos = giProbesL0[idx].pos.xyz;
+        } else if (level == 1) {
+            storedState = giProbesL1[idx].pos.w;
+            probeWorldPos = giProbesL1[idx].pos.xyz;
+        } else {
+            storedState = giProbesL2[idx].pos.w;
+            probeWorldPos = giProbesL2[idx].pos.xyz;
+        }
+        
+        if (storedState < 0.5) continue; // Зонд внутри стены (выключаем его вес)
 
-        float trilinear = ((dx == 0) ? (1.0 - fs.x) : fs.x)
-                        * ((dy == 0) ? (1.0 - fs.y) : fs.y)
-                        * ((dz == 0) ? (1.0 - fs.z) : fs.z);
-        if (trilinear < 0.001) continue;
+        // 1. Базовый вес (Трилинейная интерполяция)
+        vec3 trilinear = mix(1.0 - f, f, vec3(dx, dy, dz));
+        float weight = trilinear.x * trilinear.y * trilinear.z;
 
-        // Снапаем так же как при апдейте
-        vec3 probeWorldPos = vec3(float(g.x), float(g.y), float(g.z)) * sp + sp * 0.5;
-        probeWorldPos = floor(probeWorldPos * VOXELS_PER_METER) / VOXELS_PER_METER + vec3(0.5 / VOXELS_PER_METER);
+        if (weight < 0.001) continue;
 
         vec3  toProbe    = probeWorldPos - samplePos;
-        float probeDist  = length(toProbe) + 0.0001;
-        vec3  dirToProbe = toProbe / probeDist;
+        float probeDist  = length(toProbe);
+        vec3  dirToProbe = toProbe / max(probeDist, 0.0001);
 
-        vec3 fromProbeDir  = -dirToProbe;
-        vec2 depthMoments  = texture(depthAtlas,
-                             ProbeAtlasUV(idx, fromProbeDir, uDepthTile,
-                                          depthAtlasW, depthAtlasH)).rg;
+        // 2. Отсечение задних граней (Backface weighting) - свет не проходит сквозь куб
+        float backfaceW = (dot(normal, dirToProbe) + 1.0) * 0.5;
+        weight *= backfaceW;
+        
+        if (weight < 0.001) continue;
 
-        bool isValidProbe = (depthMoments.x > 0.001);
-        if (isValidProbe) {
-            if (depthMoments.x >= probeDist * 0.5) {
-                vec2 irrUV = ProbeAtlasUV(idx, normal, uIrrTile, irrAtlasW, irrAtlasH);
-                backupIrr += texture(irrAtlas, irrUV).rgb * trilinear;
-                backupWs  += trilinear;
-            }
-        }
+        vec2 depthMoments = texture(depthAtlas, ProbeAtlasUV(idx, -dirToProbe, uDepthTile, depthAtlasW, depthAtlasH)).rg;
 
-        float backfaceW = (dot(normal, dirToProbe) + 0.3) / 1.3;
-        backfaceW = clamp(backfaceW, 0.0, 1.0);
+        if (depthMoments.x < 0.001) continue; // Зонд свежий и еще не запекся (выключаем его вес)
 
-        float w = trilinear * backfaceW; 
-        if (w < 0.001) continue;
+        // 3. Чебышёв (Видимость)
+        float visibility = ChebyshevVisibility(depthMoments, probeDist);
+        weight *= visibility; 
+        
+        if (weight < 0.001) continue;
 
-        float visibility = ChebyshevVisibility(depthMoments, probeDist, sp);
-        w *= (visibility * visibility);
-        if (w < 0.001) continue;
-
+        // Если зонд прошел все проверки - берем его свет
         vec2 irrUV = ProbeAtlasUV(idx, normal, uIrrTile, irrAtlasW, irrAtlasH);
-        irrSum += texture(irrAtlas, irrUV).rgb * w;
-        wsSum  += w;
+        irrSum += texture(irrAtlas, irrUV).rgb * weight;
+        wsSum  += weight;
     }
 
-    if (wsSum < 0.001) return vec4(backupIrr, backupWs);
+    // Никаких if'ов. Если wsSum == 0, функция вернет vec4(0.0), и включится следующий каскад.
     return vec4(irrSum, wsSum);
 }
 
