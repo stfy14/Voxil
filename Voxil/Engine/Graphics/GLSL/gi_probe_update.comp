@@ -312,7 +312,7 @@ void main() {
 
         vec3 finalIrr;
         if (justWokeUp) {
-            finalIrr = newIrr; // Полная перезапись без истории!
+            finalIrr = newIrr; // 100% новый свет, никакой черной истории!
         } else {
             vec3 prevIrr = imageLoad(uIrrAtlas, irrOrigin + ivec2(px, py)).rgb;
             float diff = abs(dot(newIrr, vec3(0.3,0.59,0.11)) - dot(prevIrr, vec3(0.3,0.59,0.11)));
