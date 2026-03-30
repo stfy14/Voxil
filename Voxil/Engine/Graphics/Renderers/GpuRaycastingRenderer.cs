@@ -469,7 +469,7 @@ public class GpuRaycastingRenderer : IDisposable
         _frameIndex++;
         int index = (int)(_frameIndex % 8);
         Vector2 halton = _haltonSequence[index];
-        Vector2 jitter = (halton - new Vector2(0.5f)) * 0.1f;
+        Vector2 jitter = (halton - new Vector2(0.5f));
 
         Matrix4 view = cam.View;
         Matrix4 cleanProj = cam.Projection;

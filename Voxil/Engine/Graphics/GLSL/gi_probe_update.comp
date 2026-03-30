@@ -30,6 +30,7 @@ uniform float uProbeSpacing;
 uniform int   uProbeGridX, uProbeGridY, uProbeGridZ;
 shared bool s_justWokeUp;
 uniform int uFrameIndex;
+uniform float uRelocationRadius;
 
 int true_mod(int a, int b) { int m = a % b; return m < 0 ? m + b : m; }
 float Hash(float a, float b) { vec2 v = vec2(a, b); return fract(sin(dot(v, vec2(127.1, 311.7))) * 43758.5453); }
@@ -116,6 +117,37 @@ bool IsSolidAt(vec3 worldPos) {
     return (m != 0u && m != 4u);
 }
 
+vec3 RelocateProbe(vec3 pos) {
+    if (!IsSolidAt(pos)) return pos;
+    
+    // Ищем ближайший воздушный воксель по сфере нарастающего радиуса
+    float voxelStep = 1.0 / VOXELS_PER_METER;
+    float maxRadius = uRelocationRadius * voxelStep;
+    
+    // 26 направлений куба + диагонали
+    vec3 dirs[26];
+    int dc = 0;
+    for (int x = -1; x <= 1; x++)
+    for (int y = -1; y <= 1; y++)
+    for (int z = -1; z <= 1; z++) {
+        if (x == 0 && y == 0 && z == 0) continue;
+        dirs[dc++] = normalize(vec3(x, y, z));
+    }
+    
+    for (float r = voxelStep; r <= maxRadius; r += voxelStep) {
+        for (int i = 0; i < 26; i++) {
+            vec3 candidate = pos + dirs[i] * r;
+            if (!IsSolidAt(candidate)) {
+                // Небольшой отступ от поверхности
+                return candidate + dirs[i] * (voxelStep * 0.5);
+            }
+        }
+    }
+    
+    // Не нашли — возвращаем оригинал, зонд будет помечен как неактивный
+    return pos;
+}
+
 bool TraceGIRay(vec3 ro, vec3 rd, float maxDist, out float tHit, out uint matID, out vec3 hitNormal) {
     return TraceStaticRay(ro, rd, maxDist, 0.0, tHit, matID, hitNormal); 
 }
@@ -158,13 +190,14 @@ void main() {
     int gy = uGIGridBaseY + true_mod(wy - true_mod(uGIGridBaseY, uProbeGridY), uProbeGridY);
     int gz = uGIGridBaseZ + true_mod(wz - true_mod(uGIGridBaseZ, uProbeGridZ), uProbeGridZ);
 
-    vec3 targetPos = vec3(gx, gy, gz) * uProbeSpacing + vec3(uProbeSpacing * 0.5);
-    targetPos = floor(targetPos * VOXELS_PER_METER) / VOXELS_PER_METER + vec3(0.5 / VOXELS_PER_METER);
+    vec3 idealPos = vec3(gx, gy, gz) * uProbeSpacing + vec3(uProbeSpacing * 0.5);
+    idealPos = floor(idealPos * VOXELS_PER_METER) / VOXELS_PER_METER + vec3(0.5 / VOXELS_PER_METER);
+
+    vec3 targetPos = RelocateProbe(idealPos);
+    bool isSolid = IsSolidAt(targetPos); // true только если relocation не помог
 
     ivec2 irrOrigin   = IrrTileOrigin(probeIdx);
     ivec2 depthOrigin = DepthTileOrigin(probeIdx);
-
-    bool isSolid = IsSolidAt(targetPos);
 
     if (isSolid) {
         if (tid == 0) {

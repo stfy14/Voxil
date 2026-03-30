@@ -328,6 +328,13 @@ public class GIProbeSystem : IDisposable
         _updateShader.SetInt("uFrameIndex", _frameIndex);
         _updateShader.SetVector3("uSunDir", sunDir);
         _updateShader.SetFloat("uProbeSpacing", spacing);
+        float relocRadius = spacing switch
+        {
+            <= 1.0f => 2.0f,   // L0: 2 вокселя
+            <= 4.0f => 4.0f,   // L1: 4 вокселя  
+            _ => 8.0f    // L2: 8 вокселей
+        };
+        _updateShader.SetFloat("uRelocationRadius", relocRadius);
         _updateShader.SetInt("uProbeGridX", PROBE_X);
         _updateShader.SetInt("uProbeGridY", PROBE_Y);
         _updateShader.SetInt("uProbeGridZ", PROBE_Z);
