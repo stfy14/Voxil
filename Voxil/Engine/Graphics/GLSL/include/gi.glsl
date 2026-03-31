@@ -94,8 +94,9 @@ vec4 SampleProbeLevel(vec3 worldPos, vec3 normal, vec3 viewDir,
     sampler2D irrAtlas, sampler2D depthAtlas,
     int bX, int bY, int bZ, float sp, int level)
 {
-    // 1. Увеличиваем Normal Bias. Для 1м сетки он будет 30см. Это убьет черные пятна (Acne).
-    vec3 bias = normal * (sp * 0.3) + viewDir * (sp * 0.1);
+    // ИСПРАВЛЕНИЕ 1: Полностью убираем сдвиг по направлению взгляда (View-Bias).
+    // Оставляем только надежный и чуть увеличенный сдвиг по нормали (Normal-Bias).
+    vec3 bias = normal * (sp * 0.35); 
     vec3 samplePos = worldPos + bias;
 
     vec3 gridOrigin = vec3(float(bX), float(bY), float(bZ)) * sp + vec3(sp * 0.5);
@@ -103,9 +104,7 @@ vec4 SampleProbeLevel(vec3 worldPos, vec3 normal, vec3 viewDir,
     
     ivec3 baseCoord = ivec3(floor(localPos));
     vec3 f = fract(localPos);
-    
-    // 2. ВАЖНО: Возвращаем кубическое сглаживание! Оно уберет ромбовидные тени (Scalloping)
-    f = f * f * (3.0 - 2.0 * f);
+    f = f * f * (3.0 - 2.0 * f); // Smoothstep для гладких теней
 
     vec3 irrSum = vec3(0.0);
     float wsSum = 0.0;
@@ -141,7 +140,6 @@ vec4 SampleProbeLevel(vec3 worldPos, vec3 normal, vec3 viewDir,
         float distToProbe = length(toProbe);
         vec3 dirToProbe = toProbe / max(distToProbe, 0.001);
 
-        // 3. Более мягкое отсечение задних граней. Убрали возведение в квадрат.
         float backface = max(0.01, (dot(normal, dirToProbe) + 1.0) * 0.5);
         weight *= backface; 
 
@@ -149,10 +147,9 @@ vec4 SampleProbeLevel(vec3 worldPos, vec3 normal, vec3 viewDir,
         vec2 moments = texture(depthAtlas, depthUV).rg;
 
         float variance = abs(moments.y - (moments.x * moments.x));
-        variance = max(variance, sp * sp * 0.05); // Чуть увеличили запас дисперсии
+        variance = max(variance, sp * sp * 0.05); 
 
         float visibility = 1.0;
-        // Искусственно "приближаем" зонд, чтобы исключить микро-погрешности на стыках геометрии
         float chebyDist = distToProbe - (sp * 0.1); 
         if (chebyDist > moments.x) {
             float d = chebyDist - moments.x;
@@ -183,12 +180,16 @@ vec3 SampleGIProbes(vec3 worldPos, vec3 normal, vec3 viewDir) {
     vec4 s1 = SampleProbeLevel(worldPos, normal, viewDir, uGIIrrAtlasL1, uGIDepthAtlasL1, uGIGridBaseX_L1, uGIGridBaseY_L1, uGIGridBaseZ_L1, uGIProbeSpacingL1, 1);
     vec4 s2 = SampleProbeLevel(worldPos, normal, viewDir, uGIIrrAtlasL2, uGIDepthAtlasL2, uGIGridBaseX_L2, uGIGridBaseY_L2, uGIGridBaseZ_L2, uGIProbeSpacingL2, 2);
 
-    vec3 result = fallback;
-    
-    // Если зонд видит хоть немного (вес > 0.2), доверяем ему на 100%, чтобы не было черных дыр
-    if (s2.a > 0.001) result = mix(result, s2.rgb, smoothstep(0.0, 0.2, s2.a));
-    if (s1.a > 0.001) result = mix(result, s1.rgb, smoothstep(0.0, 0.2, s1.a) * fade1);
-    if (s0.a > 0.001) result = mix(result, s0.rgb, smoothstep(0.0, 0.2, s0.a) * fade0);
+    // ИСПРАВЛЕНИЕ 2: Новая, более стабильная и предсказуемая логика смешивания каскадов.
+    // 1. Определяем "чистый" цвет для каждого каскада. Если зондов нет, берем цвет из более грубого каскада.
+    vec3 irr2 = (s2.a > 0.01) ? s2.rgb : fallback;
+    vec3 irr1 = (s1.a > 0.01) ? s1.rgb : irr2;
+    vec3 irr0 = (s0.a > 0.01) ? s0.rgb : irr1;
+
+    // 2. Смешиваем "чистые" цвета на границах их сеток (фейдах).
+    vec3 result = irr2;
+    result = mix(result, irr1, fade1);
+    result = mix(result, irr0, fade0);
 
     return result;
 }
