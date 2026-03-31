@@ -57,7 +57,9 @@ public class GIProbeSystem : IDisposable
     public int IrrTexL2 { get; private set; }
     public int DepthTexL2 { get; private set; }
 
-    private int _updateListSsbo;
+    private int _updateListSsboL0;
+    private int _updateListSsboL1;
+    private int _updateListSsboL2;
     private int[] _updateBufferCPU = new int[PROBES_PER_FRAME_L0];
 
     private class LevelData
@@ -98,9 +100,17 @@ public class GIProbeSystem : IDisposable
         ProbePositionSsboL1 = CreatePositionBuffer();
         ProbePositionSsboL2 = CreatePositionBuffer();
 
-        _updateListSsbo = GL.GenBuffer();
-        GL.BindBuffer(BufferTarget.ShaderStorageBuffer, _updateListSsbo);
+        _updateListSsboL0 = GL.GenBuffer();
+        GL.BindBuffer(BufferTarget.ShaderStorageBuffer, _updateListSsboL0);
         GL.BufferData(BufferTarget.ShaderStorageBuffer, PROBES_PER_FRAME_L0 * sizeof(int), IntPtr.Zero, BufferUsageHint.DynamicDraw);
+
+        _updateListSsboL1 = GL.GenBuffer();
+        GL.BindBuffer(BufferTarget.ShaderStorageBuffer, _updateListSsboL1);
+        GL.BufferData(BufferTarget.ShaderStorageBuffer, PROBES_PER_FRAME_L1 * sizeof(int), IntPtr.Zero, BufferUsageHint.DynamicDraw);
+
+        _updateListSsboL2 = GL.GenBuffer();
+        GL.BindBuffer(BufferTarget.ShaderStorageBuffer, _updateListSsboL2);
+        GL.BufferData(BufferTarget.ShaderStorageBuffer, PROBES_PER_FRAME_L2 * sizeof(int), IntPtr.Zero, BufferUsageHint.DynamicDraw);
     }
 
     private static int CreatePositionBuffer()
@@ -119,10 +129,9 @@ public class GIProbeSystem : IDisposable
         GL.BindBuffer(BufferTarget.ShaderStorageBuffer, ssbo);
         foreach (var (idx, pos) in probes)
         {
-            // Пишем НОВУЮ pos.xyz, но state=0 (неактивен до обновления compute)
             int offset = idx * 32;
             GL.BufferSubData(BufferTarget.ShaderStorageBuffer, new IntPtr(offset),
-                4 * sizeof(float), new float[] { pos.X, pos.Y, pos.Z, 0f });
+                4 * sizeof(float), new float[] { pos.X, pos.Y, pos.Z, 1f }); // ← 1f вместо 0f
         }
     }
 
@@ -183,20 +192,14 @@ public class GIProbeSystem : IDisposable
             int gz = uGIGridBaseZ + true_mod(wz - true_mod(uGIGridBaseZ, uProbeGridZ), uProbeGridZ);
 
             vec3 expectedPos = vec3(gx, gy, gz) * uProbeSpacing + vec3(uProbeSpacing * 0.5);
-            expectedPos = floor(expectedPos * uVoxelsPerMeter) / uVoxelsPerMeter + vec3(0.5 / uVoxelsPerMeter);
 
-            bool isLagging = distance(p.pos.xyz, expectedPos) > (uProbeSpacing * 0.25);
+            bool isLagging = distance(p.pos.xyz, expectedPos) > (uProbeSpacing * 0.75);
 
-            if (p.pos.w < 0.5 && !isLagging) { 
-                gl_Position = vec4(10000.0, 10000.0, 10000.0, 1.0); 
-                vColor = vec3(0.0);
-            } else {
-                vec3 localPos = aPos * uCubeSize;
-                vec3 worldPos = expectedPos + localPos; 
-                gl_Position = uViewProj * vec4(worldPos, 1.0);
+            vec3 localPos = aPos * uCubeSize;
+            vec3 worldPos = p.pos.xyz + localPos;
+            gl_Position = uViewProj * vec4(worldPos, 1.0);
                 
-                vColor = isLagging ? vec3(0.1, 0.1, 0.1) : p.color.rgb; 
-            }
+            vColor = isLagging ? vec3(0.1, 0.1, 0.1) : p.color.rgb; 
         }";
 
         string frag = @"
@@ -268,13 +271,13 @@ public class GIProbeSystem : IDisposable
         if (!IsValid) return;
         _frameIndex++;
 
-        UpdateLevel(_l0, ProbePositionSsbo, IrrTexL0, DepthTexL0, cameraPosition, PROBE_SPACING_L0, RAYS_PER_PROBE_L0, PROBES_PER_FRAME_L0, sunDir, time, boundMinX, boundMinY, boundMinZ, boundMaxX, boundMaxY, boundMaxZ, maxRaySteps / 2, gridOrigin, gridStep, gridSize, objectCount, pointLightCount, pageTableTex, gridHeadTex);
-        UpdateLevel(_l1, ProbePositionSsboL1, IrrTexL1, DepthTexL1, cameraPosition, PROBE_SPACING_L1, RAYS_PER_PROBE_L1, PROBES_PER_FRAME_L1, sunDir, time, boundMinX, boundMinY, boundMinZ, boundMaxX, boundMaxY, boundMaxZ, maxRaySteps / 4, gridOrigin, gridStep, gridSize, objectCount, pointLightCount, pageTableTex, gridHeadTex);
-        UpdateLevel(_l2, ProbePositionSsboL2, IrrTexL2, DepthTexL2, cameraPosition, PROBE_SPACING_L2, RAYS_PER_PROBE_L2, PROBES_PER_FRAME_L2, sunDir, time, boundMinX, boundMinY, boundMinZ, boundMaxX, boundMaxY, boundMaxZ, maxRaySteps / 8, gridOrigin, gridStep, gridSize, objectCount, pointLightCount, pageTableTex, gridHeadTex);
+        UpdateLevel(_l0, ProbePositionSsbo, IrrTexL0, DepthTexL0, cameraPosition, PROBE_SPACING_L0, RAYS_PER_PROBE_L0, PROBES_PER_FRAME_L0, sunDir, time, boundMinX, boundMinY, boundMinZ, boundMaxX, boundMaxY, boundMaxZ, maxRaySteps / 2, gridOrigin, gridStep, gridSize, objectCount, pointLightCount, pageTableTex, gridHeadTex, _updateListSsboL0);
+        UpdateLevel(_l1, ProbePositionSsboL1, IrrTexL1, DepthTexL1, cameraPosition, PROBE_SPACING_L1, RAYS_PER_PROBE_L1, PROBES_PER_FRAME_L1, sunDir, time, boundMinX, boundMinY, boundMinZ, boundMaxX, boundMaxY, boundMaxZ, maxRaySteps / 4, gridOrigin, gridStep, gridSize, objectCount, pointLightCount, pageTableTex, gridHeadTex, _updateListSsboL1);
+        UpdateLevel(_l2, ProbePositionSsboL2, IrrTexL2, DepthTexL2, cameraPosition, PROBE_SPACING_L2, RAYS_PER_PROBE_L2, PROBES_PER_FRAME_L2, sunDir, time, boundMinX, boundMinY, boundMinZ, boundMaxX, boundMaxY, boundMaxZ, maxRaySteps / 8, gridOrigin, gridStep, gridSize, objectCount, pointLightCount, pageTableTex, gridHeadTex, _updateListSsboL2);
         Bind();
     }
 
-    private void UpdateLevel(LevelData level, int posSSBO, int irrTex, int depthTex, Vector3 camPos, float spacing, int raysPerProbe, int probesThisFrame, Vector3 sunDir, float time, int bMinX, int bMinY, int bMinZ, int bMaxX, int bMaxY, int bMaxZ, int maxRaySteps, Vector3 gridOrigin, float gridStep, int gridSize, int objectCount, int pointLightCount, int pageTableTex, int gridHeadTex)
+    private void UpdateLevel(LevelData level, int posSSBO, int irrTex, int depthTex, Vector3 camPos, float spacing, int raysPerProbe, int probesThisFrame, Vector3 sunDir, float time, int bMinX, int bMinY, int bMinZ, int bMaxX, int bMaxY, int bMaxZ, int maxRaySteps, Vector3 gridOrigin, float gridStep, int gridSize, int objectCount, int pointLightCount, int pageTableTex, int gridHeadTex, int updateListSsbo)
     {
         int bx = (int)Math.Floor(camPos.X / spacing - PROBE_X * 0.5f);
         int by = (int)Math.Floor(camPos.Y / spacing - PROBE_Y * 0.5f);
@@ -282,7 +285,10 @@ public class GIProbeSystem : IDisposable
 
         if (bx != level.GridBaseX || by != level.GridBaseY || bz != level.GridBaseZ)
         {
+            Console.WriteLine($"SCROLL: old=({level.GridBaseX},{level.GridBaseY},{level.GridBaseZ}) new=({bx},{by},{bz}) cam={camPos}");
             level.GridBaseX = bx; level.GridBaseY = by; level.GridBaseZ = bz;
+            if (spacing == PROBE_SPACING_L0)
+                Console.WriteLine($"bx={bx} by={by} bz={bz} | camX={camPos.X:F2} camZ={camPos.Z:F2} | coverage X=[{bx},{bx + PROBE_X - 1}] Z=[{bz},{bz + PROBE_Z - 1}]");
             for (int i = 0; i < PROBE_COUNT; i++)
             {
                 int wx = i % PROBE_X; int wy = (i / PROBE_X) % PROBE_Y; int wz = i / (PROBE_X * PROBE_Y);
@@ -320,9 +326,9 @@ public class GIProbeSystem : IDisposable
 
         if (updateCount == 0) return;
 
-        GL.BindBuffer(BufferTarget.ShaderStorageBuffer, _updateListSsbo);
+        GL.BindBuffer(BufferTarget.ShaderStorageBuffer, updateListSsbo);
         GL.BufferSubData(BufferTarget.ShaderStorageBuffer, IntPtr.Zero, updateCount * sizeof(int), _updateBufferCPU);
-        GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 22, _updateListSsbo);
+        GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 22, updateListSsbo);
 
         GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 16, posSSBO);
         GL.BindImageTexture(2, irrTex, 0, false, 0, TextureAccess.ReadWrite, SizedInternalFormat.R11fG11fB10f);
@@ -378,7 +384,10 @@ public class GIProbeSystem : IDisposable
         _updateShader.SetFloat("uLodDistance", 100000.0f);
 
         GL.DispatchCompute(updateCount, 1, 1);
-        GL.MemoryBarrier(MemoryBarrierFlags.ShaderImageAccessBarrierBit | MemoryBarrierFlags.ShaderStorageBarrierBit | MemoryBarrierFlags.TextureFetchBarrierBit);
+        GL.MemoryBarrier(MemoryBarrierFlags.ShaderImageAccessBarrierBit |
+                 MemoryBarrierFlags.ShaderStorageBarrierBit |
+                 MemoryBarrierFlags.TextureFetchBarrierBit |
+                 MemoryBarrierFlags.AllBarrierBits); // ← добавь AllBarrierBits
     }
 
     public void Bind()
@@ -482,7 +491,9 @@ public class GIProbeSystem : IDisposable
         if (ProbePositionSsbo != 0) GL.DeleteBuffer(ProbePositionSsbo);
         if (ProbePositionSsboL1 != 0) GL.DeleteBuffer(ProbePositionSsboL1);
         if (ProbePositionSsboL2 != 0) GL.DeleteBuffer(ProbePositionSsboL2);
-        if (_updateListSsbo != 0) GL.DeleteBuffer(_updateListSsbo);
+        if (_updateListSsboL0 != 0) GL.DeleteBuffer(_updateListSsboL0);
+        if (_updateListSsboL1 != 0) GL.DeleteBuffer(_updateListSsboL1);
+        if (_updateListSsboL2 != 0) GL.DeleteBuffer(_updateListSsboL2);
 
         if (IrrTexL0 != 0) GL.DeleteTexture(IrrTexL0); if (DepthTexL0 != 0) GL.DeleteTexture(DepthTexL0);
         if (IrrTexL1 != 0) GL.DeleteTexture(IrrTexL1); if (DepthTexL1 != 0) GL.DeleteTexture(DepthTexL1);

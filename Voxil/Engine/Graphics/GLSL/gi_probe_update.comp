@@ -199,14 +199,16 @@ void main() {
             imageStore(uDepthAtlas, depthOrigin + ivec2(px, py), vec4(0.0));
         }
         if (tid == 0) {
-            probes[probeIdx].pos = vec4(targetPos, 0.0); // state = 0 (выключен)
+            // Не трогаем pos — оставляем то, что CPU записал
+            // probes[probeIdx].pos = vec4(targetPos, 1.0);
         }
         return; 
     }
-
-    if (tid == 0) {
-        probes[probeIdx].pos = vec4(targetPos, 1.0); // state = 1 (активен)
-    }
+        if (tid == 0) {
+            // Только выключаем state, позицию не трогаем
+            vec3 currentPos = probes[probeIdx].pos.xyz;
+            probes[probeIdx].pos = vec4(currentPos, 0.0);
+        }
 
     float maxRayDist = max(float(uProbeGridX) * uProbeSpacing * 0.75, 48.0);
     float rotSeed = float(uFrameIndex / 8 + probeIdx * 1000);

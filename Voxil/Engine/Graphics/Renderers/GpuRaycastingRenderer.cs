@@ -583,6 +583,11 @@ public class GpuRaycastingRenderer : IDisposable
             _shaderSystem.Use();
             shader = _shaderSystem.RaycastShader;
             GL.BindVertexArray(_quadVao);
+            // ← ДОБАВИТЬ:
+            if (_giSystem != null && GameSettings.EnableGI)
+            {
+                _giSystem.SetSamplingUniforms(shader);
+            }
         }
 
         if (GameSettings.BeamOptimization && !_isEditorMode)
