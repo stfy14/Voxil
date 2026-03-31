@@ -153,12 +153,27 @@ bool TraceGIRay(vec3 ro, vec3 rd, float maxDist, out float tHit, out uint matID,
 }
 
 vec3 GetBounceGI(vec3 pos, vec3 norm) {
-    ivec3 p = ivec3(round((pos / uProbeSpacing) - 0.5));
-    int wx = true_mod(p.x, uProbeGridX); int wy = true_mod(p.y, uProbeGridY); int wz = true_mod(p.z, uProbeGridZ);
-    ivec2 tileOrigin = ivec2(wx * IRR_PAD + 1, (wy + wz * uProbeGridY) * IRR_PAD + 1);
+    // 1. Конвертируем мировую позицию в абсолютную целочисленную координату сетки.
+    ivec3 g = ivec3(floor(pos / uProbeSpacing));
+
+    // 2. "Заворачиваем" эту абсолютную координату, чтобы получить слот в нашем физическом массиве (20x16x20).
+    int wx = true_mod(g.x, uProbeGridX);
+    int wy = true_mod(g.y, uProbeGridY);
+    int wz = true_mod(g.z, uProbeGridZ);
+    
+    // 3. Вычисляем 1D-индекс для доступа к атласу.
+    int probeIdx = wx + wy * uProbeGridX + wz * uProbeGridX * uProbeGridY;
+
+    // 4. Сэмплируем атлас с правильным индексом.
+    ivec2 tileOrigin = IrrTileOrigin(probeIdx);
     vec2 octUV = OctEncode(norm);
     vec2 pixelXY = vec2(tileOrigin) + octUV * float(IRR_TILE);
-    return textureLod(uBounceIrrAtlas, pixelXY / vec2(float(uProbeGridX * IRR_PAD), float(uProbeGridY * uProbeGridZ * IRR_PAD)), 0.0).rgb;
+    
+    // Пересчитываем размеры атласа, как это делает C#
+    float atlasW = float(uProbeGridX * IRR_PAD);
+    float atlasH = float(uProbeGridY * uProbeGridZ * IRR_PAD);
+    
+    return textureLod(uBounceIrrAtlas, pixelXY / vec2(atlasW, atlasH), 0.0).rgb;
 }
 
 vec3 SkyColor(vec3 rayDir) {
