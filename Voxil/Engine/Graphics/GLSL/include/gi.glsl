@@ -134,7 +134,7 @@ vec4 SampleProbeLevel(vec3 worldPos, vec3 normal, vec3 viewDir,
         if (storedState < 0.5) continue;
 
         vec3 expectedGridPos = vec3(g) * sp + vec3(sp * 0.5);
-        if (distance(probePos, expectedGridPos) > sp * 2.0) continue;
+        if (distance(probePos, expectedGridPos) > sp * 0.55) continue;
 
         vec3 toProbe = probePos - samplePos; 
         float distToProbe = length(toProbe);

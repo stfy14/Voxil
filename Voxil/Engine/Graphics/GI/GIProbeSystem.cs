@@ -8,6 +8,7 @@ public class GIProbeSystem : IDisposable
 {
     private int _debugVbo;
     private int _frameIndex = 0;
+    private readonly List<(int idx, Vector3 pos)> _invalidatedProbes = new();
 
     // 1 ЗОНД НА КАЖДЫЙ ВОКСЕЛЬ! (1.0 метр)
     public const float PROBE_SPACING_L0 = 1.0f;
@@ -24,8 +25,8 @@ public class GIProbeSystem : IDisposable
 
     // Обновляем по 1024 зонда за кадр (полный цикл ~6 кадров)
     public const int PROBES_PER_FRAME_L0 = 1024;
-    public const int PROBES_PER_FRAME_L1 = 512;
-    public const int PROBES_PER_FRAME_L2 = 256;
+    public const int PROBES_PER_FRAME_L1 = 1024; // было 512
+    public const int PROBES_PER_FRAME_L2 = 512;  // было 256
 
     // --- АЛИАСЫ ДЛЯ СОВМЕСТИМОСТИ С UI И ТЕСТАМИ ---
     public const float PROBE_SPACING = PROBE_SPACING_L0;
@@ -37,6 +38,8 @@ public class GIProbeSystem : IDisposable
     public const int DEPTH_TILE = 16;
     private const int IRR_PAD = IRR_TILE + 2;
     private const int DEPTH_PAD = DEPTH_TILE + 2;
+
+    private static readonly float[] _zeroState = { 0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f };
 
     public static int IrrAtlasW => PROBE_X * IRR_PAD;
     public static int IrrAtlasH => PROBE_Y * PROBE_Z * IRR_PAD;
@@ -108,6 +111,19 @@ public class GIProbeSystem : IDisposable
         GL.BindBuffer(BufferTarget.ShaderStorageBuffer, ssbo);
         GL.BufferData(BufferTarget.ShaderStorageBuffer, empty.Length * sizeof(float), empty, BufferUsageHint.DynamicDraw);
         return ssbo;
+    }
+
+    private void InvalidateProbesInSSBO(int ssbo, List<(int idx, Vector3 pos)> probes)
+    {
+        if (probes.Count == 0) return;
+        GL.BindBuffer(BufferTarget.ShaderStorageBuffer, ssbo);
+        foreach (var (idx, pos) in probes)
+        {
+            // Пишем НОВУЮ pos.xyz, но state=0 (неактивен до обновления compute)
+            int offset = idx * 32;
+            GL.BufferSubData(BufferTarget.ShaderStorageBuffer, new IntPtr(offset),
+                4 * sizeof(float), new float[] { pos.X, pos.Y, pos.Z, 0f });
+        }
     }
 
     private void InitTextures()
@@ -277,10 +293,16 @@ public class GIProbeSystem : IDisposable
                 if (level.CachedGridCoords[i] != expectedCoord)
                 {
                     level.CachedGridCoords[i] = expectedCoord;
+                    Vector3 newPos = new Vector3(gx, gy, gz) * spacing + new Vector3(spacing * 0.5f);
+                    _invalidatedProbes.Add((i, newPos)); // <-- теперь кортеж
                     if (!level.IsInPriority[i]) { level.IsInPriority[i] = true; level.PriorityQueue.Enqueue(i); }
                 }
             }
         }
+
+        // После цикла — один SubData вместо 6400:
+        InvalidateProbesInSSBO(posSSBO, _invalidatedProbes);
+        _invalidatedProbes.Clear();
 
         int updateCount = 0;
         while (updateCount < probesThisFrame && level.PriorityQueue.Count > 0)
