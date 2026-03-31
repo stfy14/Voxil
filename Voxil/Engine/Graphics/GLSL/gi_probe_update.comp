@@ -182,6 +182,7 @@ void main() {
     if (groupIdx >= uint(uProbesThisFrame)) return;
     int probeIdx = uUpdateIndices[groupIdx];
 
+    // Вычисляем координаты в сетке
     int wx = probeIdx % uProbeGridX;
     int wy = (probeIdx / uProbeGridX) % uProbeGridY;
     int wz = probeIdx / (uProbeGridX * uProbeGridY);
@@ -190,47 +191,41 @@ void main() {
     int gy = uGIGridBaseY + true_mod(wy - true_mod(uGIGridBaseY, uProbeGridY), uProbeGridY);
     int gz = uGIGridBaseZ + true_mod(wz - true_mod(uGIGridBaseZ, uProbeGridZ), uProbeGridZ);
 
+    // БАЗА: Строгая позиция сетки, никакой релокации.
     vec3 idealPos = vec3(gx, gy, gz) * uProbeSpacing + vec3(uProbeSpacing * 0.5);
-    idealPos = floor(idealPos * VOXELS_PER_METER) / VOXELS_PER_METER + vec3(0.5 / VOXELS_PER_METER);
-
-    vec3 targetPos = idealPos; 
-    bool isSolid = IsSolidAt(targetPos);
+    vec3 targetPos = floor(idealPos * VOXELS_PER_METER) / VOXELS_PER_METER + vec3(0.5 / VOXELS_PER_METER);
 
     ivec2 irrOrigin   = IrrTileOrigin(probeIdx);
     ivec2 depthOrigin = DepthTileOrigin(probeIdx);
 
-    if (isSolid) {
-        if (tid == 0) {
-            probes[probeIdx].pos = vec4(targetPos, 0.0);
-            probes[probeIdx].colorAndState = vec4(0.0);
-        }
+    // 1. Если зонд в стене - выключаем его (пишем 0 во все пиксели атласа)
+    if (IsSolidAt(targetPos)) {
         if (tid < 64) {
             int px = int(tid % 8); int py = int(tid / 8);
             imageStore(uIrrAtlas, irrOrigin + ivec2(px, py), vec4(0.0));
         }
         for(int i=0; i<4; i++) {
-            int px = int((tid * 4 + i) % 16); int py = int((tid * 4 + i) / 16);
+            int pidx = int(tid * 4 + i);
+            int px = pidx % 16; int py = pidx / 16;
             imageStore(uDepthAtlas, depthOrigin + ivec2(px, py), vec4(0.0));
+        }
+        if (tid == 0) {
+            probes[probeIdx].pos = vec4(targetPos, 0.0); // state = 0 (выключен)
         }
         return; 
     }
 
     if (tid == 0) {
-        vec3  oldPos   = probes[probeIdx].pos.xyz;
-        float oldState = probes[probeIdx].pos.w;
-        s_justWokeUp = (oldState < 0.5) || (distance(oldPos, targetPos) > uProbeSpacing * 0.5);
-        probes[probeIdx].pos = vec4(targetPos, 1.0);
+        probes[probeIdx].pos = vec4(targetPos, 1.0); // state = 1 (активен)
     }
-    barrier(); 
-    bool justWokeUp = s_justWokeUp;
 
     float maxRayDist = max(float(uProbeGridX) * uProbeSpacing * 0.75, 48.0);
-
     float rotSeed = float(uFrameIndex / 8 + probeIdx * 1000);
     mat3 probeRot = GetRandomRotation(
                     Hash(float(wx + wy * 7 + wz * 13), rotSeed),
                     Hash(rotSeed, float(wz + wx * 5)));
 
+    // 2. Трассировка лучей
     if (tid < uRaysPerProbe) {
         vec3 rd = probeRot * SphericalFibonacci(int(tid), uRaysPerProbe);
         s_rayDirs[tid] = rd;
@@ -242,13 +237,14 @@ void main() {
         if (TraceGIRay(targetPos, rd, maxRayDist, tHit, matID, hitNorm)) {
             dist = tHit;
             if (dot(rd, hitNorm) > 0.0) {
-                dist = tHit * 0.2; 
+                dist = tHit * 0.2; // Сильно штрафуем дистанцию при попадании в заднюю грань
             } else if (IsEmissive(matID)) {
-                radiance = GetVoxelAlbedo(matID) * 20.0 / max(tHit * tHit, 1.0);
+                radiance = GetVoxelAlbedo(matID) * 5.0; 
             } else {
                 vec3 hitPos = targetPos + rd * tHit;
                 vec3 shadowStart = hitPos + hitNorm * 0.05;
                 
+                // Твой код прямого освещения (Солнце)
                 float sunIntensity = clamp(uSunDir.y * 5.0, 0.0, 1.0);
                 vec3 directLight = vec3(0.0);
                 if (sunIntensity > 0.01) {
@@ -264,6 +260,7 @@ void main() {
                     }
                 }
 
+                // Твой код точечных источников
                 vec3 pointLightLight = vec3(0.0);
                 for (int pl = 0; pl < uPointLightCount && pl < 32; pl++) {
                     vec3 lPos = pointLights[pl].posRadius.xyz; float lRad = pointLights[pl].posRadius.w;
@@ -274,17 +271,19 @@ void main() {
                     if (plNDotL > 0.0) pointLightLight += pointLights[pl].colorIntensity.rgb * plNDotL * (pointLights[pl].colorIntensity.a / max(plDistSq, 1.0)) * pow(max(0.0, 1.0 - plDist / lRad), 4.0);
                 }
 
-                vec3 bounce = GetBounceGI(shadowStart, hitNorm) * 0.3;
+                // Отраженный свет (Bounce) и эмбиент
+                vec3 bounce = GetBounceGI(shadowStart, hitNorm); 
                 float sunsetAmb = clamp(1.0 - abs(uSunDir.y) * 5.0, 0.0, 1.0); 
                 float nightAmb = clamp(-uSunDir.y * 2.0, 0.0, 1.0);
                 vec3 ambLight = vec3(0.05, 0.07, 0.12) * nightAmb + vec3(0.3, 0.15, 0.05) * sunsetAmb;
                 
-                radiance = GetVoxelAlbedo(matID) * (directLight + pointLightLight + bounce + ambLight * max(0.1, dot(hitNorm, vec3(0,1,0)) * 0.5 + 0.5));
+                radiance = GetVoxelAlbedo(matID) * (directLight + pointLightLight + bounce);
             }
         } else {
             radiance = SkyColor(rd);
         }
 
+        // Защита от "светлячков" (Fireflies)
         float lum = dot(radiance, vec3(0.2126, 0.7152, 0.0722));
         if (lum > 15.0) radiance *= 15.0 / lum;
 
@@ -298,6 +297,7 @@ void main() {
 
     barrier();
 
+    // 3. Обновление цвета зонда (Irradiance) 8x8 пикселей
     if (tid < 64) {
         int px = int(tid % 8); int py = int(tid / 8);
         vec2 uv = (vec2(px, py) + 0.5) / 8.0;
@@ -310,20 +310,19 @@ void main() {
         }
         vec3 newIrr = (wSum > 0.0) ? irrSum / wSum : vec3(0.0);
 
-        vec3 finalIrr;
-        if (justWokeUp) {
-            finalIrr = newIrr; // 100% новый свет, никакой черной истории!
-        } else {
-            vec3 prevIrr = imageLoad(uIrrAtlas, irrOrigin + ivec2(px, py)).rgb;
-            float diff = abs(dot(newIrr, vec3(0.3,0.59,0.11)) - dot(prevIrr, vec3(0.3,0.59,0.11)));
-            float blend = mix(0.03, 0.12, clamp(diff * 3.0, 0.0, 1.0));
-            finalIrr = mix(prevIrr, newIrr, blend);
-        }
+        vec3 prevIrr = imageLoad(uIrrAtlas, irrOrigin + ivec2(px, py)).rgb;
+        
+        // БАЗА: Простой бленд. Если раньше был черный зонд (0.0), моментально применяем новый свет
+        float blend = 0.05; 
+        if (dot(prevIrr, vec3(1.0)) < 0.001) blend = 1.0; 
+        
+        vec3 finalIrr = mix(prevIrr, newIrr, blend);
         imageStore(uIrrAtlas, irrOrigin + ivec2(px, py), vec4(finalIrr, 1.0));
 
         if (tid == 27) { probes[probeIdx].colorAndState = vec4(newIrr, 1.0); }
     }
 
+    // 4. Обновление глубины зонда (Depth) 16x16 пикселей
     for(int i=0; i<4; i++) {
         int pidx = int(tid * 4 + i);
         int px = pidx % 16; int py = pidx / 16;
@@ -334,20 +333,30 @@ void main() {
         for (int ray = 0; ray < uRaysPerProbe; ray++) {
             float w_cos = max(0.0, dot(pixelDir, s_rayDirs[ray]));
             if (w_cos > 0.001) {
-                float w = pow(w_cos, 4.0);
-                float d = min(s_rayDist[ray], uProbeSpacing * 1.732);
+                // ИСПРАВЛЕНИЕ 1: Степень 2 вместо 4 делает глубину более плавной и стабильной
+                float w = pow(w_cos, 2.0); 
+                
+                // ИСПРАВЛЕНИЕ 2: Увеличиваем лимит. 3.0 гарантирует, что зонд "дотянется" до противоположного угла ячейки
+                float d = min(s_rayDist[ray], uProbeSpacing * 3.0); 
+                
                 meanDist += d * w; meanDist2 += d * d * w; wSum += w;
             }
         }
         vec2 newDepth = (wSum > 0.0) ? vec2(meanDist/wSum, meanDist2/wSum) : vec2(maxRayDist, maxRayDist*maxRayDist);
-        float blend = justWokeUp ? 1.0 : 0.05;
-        vec2 prevDepth = justWokeUp ? vec2(maxRayDist, maxRayDist*maxRayDist) : imageLoad(uDepthAtlas, depthOrigin + ivec2(px, py)).rg;
+        
+        vec2 prevDepth = imageLoad(uDepthAtlas, depthOrigin + ivec2(px, py)).rg;
+        
+        float blend = 0.10;
+        if (prevDepth.x < 0.001) blend = 1.0;
+
         imageStore(uDepthAtlas, depthOrigin + ivec2(px, py), vec4(mix(prevDepth, newDepth, blend), 0.0, 1.0));
     }
 
     memoryBarrierImage();
     barrier();
 
+    // 5. Заполнение "границ" тайла (Padding/Borders) для билинейной фильтрации
+    // Irradiance padding (8x8 -> 10x10)
     if (tid < 8) { 
         int px = int(tid);
         imageStore(uIrrAtlas, irrOrigin + ivec2(px, -1), imageLoad(uIrrAtlas, irrOrigin + ivec2(7 - px, 0)));
@@ -361,6 +370,8 @@ void main() {
         imageStore(uIrrAtlas, irrOrigin + ivec2(-1, 8),  imageLoad(uIrrAtlas, irrOrigin + ivec2(0, 7)));
         imageStore(uIrrAtlas, irrOrigin + ivec2(8, 8),   imageLoad(uIrrAtlas, irrOrigin + ivec2(7, 7)));
     }
+
+    // Depth padding (16x16 -> 18x18)
     if (tid >= 10 && tid < 26) { 
         int px = int(tid - 10);
         imageStore(uDepthAtlas, depthOrigin + ivec2(px, -1), imageLoad(uDepthAtlas, depthOrigin + ivec2(15 - px, 0)));
