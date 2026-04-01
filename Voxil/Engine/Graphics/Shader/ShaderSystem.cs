@@ -9,7 +9,7 @@ public class ShaderSystem : IDisposable
     public Shader ShadowUpsampleShader  { get; private set; }
     public Shader CompositeShader       { get; private set; }
     public Shader EditUpdaterShader     { get; private set; }
-    public Shader GIProbeUpdateShader   { get; private set; } // ← НОВЫЙ
+    public Shader VctClipmapBuildShader { get; private set; }
 
     public event Action OnShaderReloaded;
 
@@ -20,7 +20,7 @@ public class ShaderSystem : IDisposable
         ShadowUpsampleShader?.Dispose();
         CompositeShader?.Dispose();
         EditUpdaterShader?.Dispose();
-        GIProbeUpdateShader?.Dispose();
+        VctClipmapBuildShader?.Dispose();
 
         var defines = ShaderDefines.GetRuntimeDefines(banksCount, chunksPerBank);
         Shader.GlobalBanksInjection = ShaderDefines.GenerateBanksCode(banksCount);
@@ -45,8 +45,8 @@ public class ShaderSystem : IDisposable
             // Compute-шейдеру достаточно базового списка, так как там уже есть ENABLE_GI
             if (GameSettings.EnableGI)
             {
-                GIProbeUpdateShader = new Shader(ShaderPaths.GIProbeUpdate, defines);
-                Console.WriteLine("[ShaderSystem] GI probe update shader compiled.");
+                VctClipmapBuildShader = new Shader(ShaderPaths.VctClipmapBuild, defines);
+                Console.WriteLine("[ShaderSystem] VCT Clipmap Builder compiled.");
             }
 
             OnShaderReloaded?.Invoke();
@@ -66,6 +66,6 @@ public class ShaderSystem : IDisposable
         ShadowUpsampleShader?.Dispose();
         CompositeShader?.Dispose();
         EditUpdaterShader?.Dispose();
-        GIProbeUpdateShader?.Dispose();
+        VctClipmapBuildShader?.Dispose();
     }
 }

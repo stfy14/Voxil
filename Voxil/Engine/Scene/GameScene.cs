@@ -82,11 +82,6 @@ public class GameScene : IScene
 
         _physicsDebugger.Draw(_physicsWorld, _lineRenderer, _camera);
 
-        if (GameSettings.EnableGI && GameSettings.ShowGIProbeGridBounds && _renderer.GISystem != null)
-        {
-            _renderer.GISystem.DrawDebugGridBounds(_gridRenderer, camData);
-        }
-
         _lineRenderer.Render(_camera);
 
         _renderer.EndDebugPass();

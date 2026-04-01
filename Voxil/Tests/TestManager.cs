@@ -37,10 +37,6 @@ public class TestManager
         if (input.IsKeyPressed(Keys.F5))
             RunAutomatedBreakTest();
 
-        // === F6: Тест GI системы ===
-        if (input.IsKeyPressed(Keys.F6))
-            RunGITest();
-
         // === F7: Спавн GlowBall прямо перед камерой (быстрый тест освещения) ===
         if (input.IsKeyPressed(Keys.F7))
             SpawnGlowBallTest();
@@ -76,40 +72,6 @@ public class TestManager
                 LogGIStatus();
             }
         }
-    }
-
-    // =========================================================
-    // GI ТЕСТ
-    // =========================================================
-    private void RunGITest()
-    {
-        Console.WriteLine("\n=== [GI TEST] Starting... ===");
-        Console.WriteLine($"GI Enabled: {GameSettings.EnableGI}");
-
-        if (!GameSettings.EnableGI)
-        {
-            Console.WriteLine("[GI Test] GI is disabled. Enable it in Game Settings → Global Illumination.");
-            return;
-        }
-
-        Console.WriteLine($"Probe grid: {GIProbeSystem.PROBE_X}x{GIProbeSystem.PROBE_Y}x{GIProbeSystem.PROBE_Z} = {GIProbeSystem.PROBE_COUNT} probes");
-        Console.WriteLine($"Probe spacing: {GIProbeSystem.PROBE_SPACING}m");
-        Console.WriteLine($"Rays per probe: {GIProbeSystem.RAYS_PER_PROBE}");
-        Console.WriteLine($"Probes per frame: {GIProbeSystem.PROBES_PER_FRAME} (full cycle: {GIProbeSystem.PROBE_COUNT / GIProbeSystem.PROBES_PER_FRAME} frames)");
-
-        // Count active glow sources immediately
-        var glowObjects = _objectService.GetAllVoxelObjects()
-            .Where(o => (o.Material == MaterialType.Glow || o.VoxelMaterials.Values.Any(m => m == (uint)MaterialType.Glow))
-                        && o.VoxelCoordinates.Count > 0)
-            .ToList();
-        Console.WriteLine($"Active Glow sources (point lights): {glowObjects.Count}");
-        foreach (var go in glowObjects)
-            Console.WriteLine($"  → GlowBall at {go.Position:F1}");
-
-        // Delayed result log after probes have had time to update
-        _giTestRunning = true;
-        _giTestTimer   = 3.0f;
-        Console.WriteLine("[GI Test] Waiting 3s for probe update cycle...");
     }
 
     private void LogGIStatus()

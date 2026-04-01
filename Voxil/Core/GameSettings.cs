@@ -26,10 +26,6 @@ public static class GameSettings
 
     // === GLOBAL ILLUMINATION ===
     public static bool EnableGI = true;
-    public static bool ShowGIProbes = false;
-    public static bool ShowGIProbesXRay = false;
-    public static bool ShowGIProbeGridBounds = false; // Вкл/выкл 3D сетки каскадов
-    public static int GIGridBoundsLOD = 3;            // 3 = Все, 0 = L0, 1 = L1, 2 = L2
 
     // === ОПТИМИЗАЦИЯ ===
     public static bool BeamOptimization = true;
@@ -51,6 +47,4 @@ public static class GameSettings
     public static bool ShowDynamicCollisions = false;
     public static bool ShowExplosionRays = false;
     public static bool ShowExplosionRadius = false;
-    public static int GIDebugLOD = 0;
-    public static bool EnableGIProbeTraceDebug = false;
 }

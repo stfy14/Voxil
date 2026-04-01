@@ -1,3 +1,4 @@
+// --- START OF FILE shadow.frag.txt ---
 #version 450 core
 
 layout(location = 0) out vec2 outShadowAo;
@@ -10,7 +11,7 @@ in vec2 uv;
 #include "include/lighting.glsl"
 
 #ifdef ENABLE_GI
-#include "include/gi.glsl"
+#include "include/vct.glsl"
 #endif
 
 uniform sampler2D uGColor;
@@ -79,10 +80,8 @@ void main() {
         pointLightColor = EvaluatePointLights(hitPos, normal);
     }
 
-    // ВПЛЕТАЕМ GI ПРЯМО В POINT LIGHTS
     #ifdef ENABLE_GI
-    vec3 viewDir = normalize(uCamPos - hitPos);
-    vec3 giIrradiance = SampleGIProbes(hitPos, normal, viewDir);
+    vec3 giIrradiance = SampleGIVCT(hitPos, normal);
     pointLightColor += giIrradiance * max(ao, 0.15);
     #endif
 

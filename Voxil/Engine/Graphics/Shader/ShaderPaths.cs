@@ -11,7 +11,7 @@
     public static readonly string ShadowFrag = $"{Root}/shadow.frag";
     public static readonly string ShadowUpsampleFrag = $"{Root}/shadow_upsample.frag";
     public static readonly string CompositeFrag = $"{Root}/composite.frag";
-    public static readonly string GIProbeUpdate = $"{Root}/gi_probe_update.comp";
+    public static readonly string VctClipmapBuild = $"{Root}/vct_clipmap_build.comp";
 
     public static class Textures
     {

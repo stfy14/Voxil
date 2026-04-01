@@ -77,6 +77,12 @@
     <None Update="Engine\Graphics\GLSL\include\gi.glsl">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </None>
+    <None Update="Engine\Graphics\GLSL\include\vct.glsl">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </None>
+    <None Update="Engine\Graphics\GLSL\vct_clipmap_build.comp">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </None>
   </ItemGroup>
 
   <ItemGroup>
