@@ -141,8 +141,9 @@ public class Game : GameWindow
             _worldManager, _physicsWorld, _renderer,
             _player, _entityManager, _camera, _input,
             _lineRenderer, _physicsDebugger, _crosshair, _testManager);
-        
-        _editorScene = new EditorScene(_renderer, (float)ClientSize.X / ClientSize.Y, ClientSize.X, ClientSize.Y);
+
+        // ИСПРАВЛЕНИЕ: Передаем `this` (ссылку на GameWindow) в конструктор EditorScene
+        _editorScene = new EditorScene(this, _renderer);
         _editorScene.OnExitRequested += SwitchToGame;
 
         _sceneManager.Register(_gameScene);
@@ -221,7 +222,6 @@ public class Game : GameWindow
 
         _input.Update(KeyboardState, MouseState);
 
-        // 1. Сообщаем UI, должен ли он перехватывать мышь
         bool uiTakesInput = inEditor || _isUIMode;
         _uiManager.Update(this, deltaTime, uiTakesInput);
 
@@ -233,20 +233,17 @@ public class Game : GameWindow
         }
 
         // --- Игровая сцена ---
-        UpdateTime(deltaTime);
         if (HandleReallocation()) return;
         UpdateCursorMode();
 
         if (!_isUIMode)
         {
+            // ИСПРАВЛЕНИЕ ВРЕМЕНИ: Перемещаем UpdateTime сюда
+            UpdateTime(deltaTime);
             _sceneManager.Update(deltaTime, _input);
         }
         else
         {
-            // 2. ИСПРАВЛЕНИЕ ГЕНЕРАЦИИ: 
-            // Даже если игра на "паузе" в меню, мы разрешаем менеджеру мира 
-            // забирать сгенерированные чанки, а рендеру - отправлять их в видеокарту!
-            // Физика при этом стоит на паузе, так как она внутри _sceneManager.Update.
             _worldManager.Update(deltaTime);
             _renderer.UpdateChunkData(deltaTime);
         }

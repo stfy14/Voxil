@@ -1,10 +1,11 @@
 ﻿// --- START OF FILE EditorScene.cs ---
 
+using ImGuiNET;
 using OpenTK.Mathematics;
+using OpenTK.Windowing.Desktop;
 using OpenTK.Windowing.GraphicsLibraryFramework;
 using System;
 using System.Collections.Generic;
-using ImGuiNET;
 
 public class EditorScene : IScene
 {
@@ -14,6 +15,7 @@ public class EditorScene : IScene
     private readonly EditorGridRenderer _gridRenderer;
     private int _screenWidth;
     private int _screenHeight;
+    private readonly GameWindow _gameWindow;
 
     private int _gridSize = 16;
     private float _voxelSize = 1.0f;
@@ -31,20 +33,35 @@ public class EditorScene : IScene
 
     public event Action OnExitRequested;
 
-    public EditorScene(GpuRaycastingRenderer renderer, float aspectRatio, int screenWidth, int screenHeight)
+    public EditorScene(GameWindow gameWindow, GpuRaycastingRenderer renderer)
     {
+        _gameWindow = gameWindow; // Сохраняем ссылку на окно
         _renderer = renderer;
-        _screenWidth = screenWidth;
-        _screenHeight = screenHeight;
+
+        // Размеры и аспект теперь будут установлены в OnEnter()
+        _screenWidth = _gameWindow.ClientSize.X;
+        _screenHeight = _gameWindow.ClientSize.Y;
+
         _camera = new OrbitalCamera();
-        _camera.AspectRatio = aspectRatio;
         _gridRenderer = new EditorGridRenderer();
     }
 
     public void OnEnter()
     {
         Console.WriteLine("[EditorScene] Entered.");
-        CreateNewModel(_gridSize, _voxelSize);
+
+        // ИСПРАВЛЕНИЕ РЕЙКАСТА: Принудительно обновляем размеры при входе в сцену!
+        OnResize(_gameWindow.ClientSize.X, _gameWindow.ClientSize.Y);
+
+        // Если модель еще не создана, создаем ее
+        if (_model == null)
+        {
+            CreateNewModel(_gridSize, _voxelSize);
+        }
+        else // Если модель уже есть, просто передаем ее рендереру
+        {
+            _renderer.SetEditorModel(_model);
+        }
     }
 
     public void OnExit()
