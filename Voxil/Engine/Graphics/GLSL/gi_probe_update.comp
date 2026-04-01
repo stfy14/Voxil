@@ -209,7 +209,10 @@ void main() {
         if (tid == 0) {
             probes[probeIdx].pos = vec4(targetPos, 0.0); // state = 0.0
         }
+
+        memoryBarrierShared();
         barrier();
+
         if (tid < 64) {
             int px = int(tid % 8); int py = int(tid / 8);
             imageStore(uIrrAtlas, irrOrigin + ivec2(px, py), vec4(0.0));
@@ -321,6 +324,7 @@ void main() {
         s_rayDist[tid] = maxRayDist;
     }
 
+    memoryBarrierShared();
     barrier();
 
     if (tid < 64) {
@@ -391,9 +395,11 @@ void main() {
         imageStore(uDepthAtlas, depthOrigin + ivec2(px, py), vec4(mix(prevDepth, newDepth, blend), 0.0, 1.0));
     }
 
+    memoryBarrierShared(); // <-- Барьер для shared памяти
     memoryBarrierImage();
     barrier();
 
+    // 1. Копируем ГРАНИ (Edges) для Irradiance
     if (tid < 8) { 
         int px = int(tid);
         imageStore(uIrrAtlas, irrOrigin + ivec2(px, -1), imageLoad(uIrrAtlas, irrOrigin + ivec2(7 - px, 0)));
@@ -401,13 +407,15 @@ void main() {
         imageStore(uIrrAtlas, irrOrigin + ivec2(-1, px), imageLoad(uIrrAtlas, irrOrigin + ivec2(0, 7 - px)));
         imageStore(uIrrAtlas, irrOrigin + ivec2(8, px),  imageLoad(uIrrAtlas, irrOrigin + ivec2(7, 7 - px)));
     }
+    // 2. Копируем УГЛЫ (Corners) для Irradiance - КРЕСТ НА КРЕСТ!
     if (tid == 8) { 
-        imageStore(uIrrAtlas, irrOrigin + ivec2(-1, -1), imageLoad(uIrrAtlas, irrOrigin + ivec2(0, 0)));
-        imageStore(uIrrAtlas, irrOrigin + ivec2(8, -1),  imageLoad(uIrrAtlas, irrOrigin + ivec2(7, 0)));
-        imageStore(uIrrAtlas, irrOrigin + ivec2(-1, 8),  imageLoad(uIrrAtlas, irrOrigin + ivec2(0, 7)));
-        imageStore(uIrrAtlas, irrOrigin + ivec2(8, 8),   imageLoad(uIrrAtlas, irrOrigin + ivec2(7, 7)));
+        imageStore(uIrrAtlas, irrOrigin + ivec2(-1, -1), imageLoad(uIrrAtlas, irrOrigin + ivec2(7, 7))); // Топ-Левый <- Бот-Райт
+        imageStore(uIrrAtlas, irrOrigin + ivec2(8, -1),  imageLoad(uIrrAtlas, irrOrigin + ivec2(0, 7))); // Топ-Райт <- Бот-Левый
+        imageStore(uIrrAtlas, irrOrigin + ivec2(-1, 8),  imageLoad(uIrrAtlas, irrOrigin + ivec2(7, 0))); // Бот-Левый <- Топ-Райт
+        imageStore(uIrrAtlas, irrOrigin + ivec2(8, 8),   imageLoad(uIrrAtlas, irrOrigin + ivec2(0, 0))); // Бот-Райт <- Топ-Левый
     }
 
+    // 3. Копируем ГРАНИ (Edges) для Depth
     if (tid >= 10 && tid < 26) { 
         int px = int(tid - 10);
         imageStore(uDepthAtlas, depthOrigin + ivec2(px, -1), imageLoad(uDepthAtlas, depthOrigin + ivec2(15 - px, 0)));
@@ -415,10 +423,11 @@ void main() {
         imageStore(uDepthAtlas, depthOrigin + ivec2(-1, px), imageLoad(uDepthAtlas, depthOrigin + ivec2(0, 15 - px)));
         imageStore(uDepthAtlas, depthOrigin + ivec2(16, px), imageLoad(uDepthAtlas, depthOrigin + ivec2(15, 15 - px)));
     }
+    // 4. Копируем УГЛЫ (Corners) для Depth - КРЕСТ НА КРЕСТ!
     if (tid == 26) { 
-        imageStore(uDepthAtlas, depthOrigin + ivec2(-1, -1), imageLoad(uDepthAtlas, depthOrigin + ivec2(0, 0)));
-        imageStore(uDepthAtlas, depthOrigin + ivec2(16, -1), imageLoad(uDepthAtlas, depthOrigin + ivec2(15, 0)));
-        imageStore(uDepthAtlas, depthOrigin + ivec2(-1, 16), imageLoad(uDepthAtlas, depthOrigin + ivec2(0, 15)));
-        imageStore(uDepthAtlas, depthOrigin + ivec2(16, 16), imageLoad(uDepthAtlas, depthOrigin + ivec2(15, 15)));
+        imageStore(uDepthAtlas, depthOrigin + ivec2(-1, -1), imageLoad(uDepthAtlas, depthOrigin + ivec2(15, 15)));
+        imageStore(uDepthAtlas, depthOrigin + ivec2(16, -1), imageLoad(uDepthAtlas, depthOrigin + ivec2(0, 15)));
+        imageStore(uDepthAtlas, depthOrigin + ivec2(-1, 16), imageLoad(uDepthAtlas, depthOrigin + ivec2(15, 0)));
+        imageStore(uDepthAtlas, depthOrigin + ivec2(16, 16), imageLoad(uDepthAtlas, depthOrigin + ivec2(0, 0)));
     }
 }

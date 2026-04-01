@@ -127,25 +127,17 @@ public class GIProbeSystem : IDisposable
     {
         //if (probes.Count == 0) return;
 
+        //// Маленький хак: шлем данные в SSBO кусками
         //GL.BindBuffer(BufferTarget.ShaderStorageBuffer, ssbo);
 
-        //// Напрямую маппим буфер, чтобы драйвер не захлебывался от сотен команд
-        //IntPtr ptr = GL.MapBuffer(BufferTarget.ShaderStorageBuffer, BufferAccess.ReadWrite);
-        //if (ptr != IntPtr.Zero)
+        //// Структура зонда в шейдере 32 байта (vec4 pos, vec4 color)
+        //// Изменяем только vec4 pos (16 байт)
+        //float[] data = new float[4];
+        //foreach (var (idx, pos) in probes)
         //{
-        //    unsafe
-        //    {
-        //        float* data = (float*)ptr;
-        //        foreach (var (idx, pos) in probes)
-        //        {
-        //            int offset = idx * 8; // 8 float-ов на каждый зонд (vec4 pos + vec4 color)
-        //            data[offset] = pos.X;
-        //            data[offset + 1] = pos.Y;
-        //            data[offset + 2] = pos.Z;
-        //            data[offset + 3] = 2f; // State = 2 (Relocating)
-        //        }
-        //    }
-        //    GL.UnmapBuffer(BufferTarget.ShaderStorageBuffer);
+        //    data[0] = pos.X; data[1] = pos.Y; data[2] = pos.Z; data[3] = 2f; // State = 2 (Relocating)
+        //    IntPtr offset = (IntPtr)(idx * 32); // Смещение в байтах до зонда
+        //    GL.BufferSubData(BufferTarget.ShaderStorageBuffer, offset, 16, data);
         //}
     }
 
@@ -176,69 +168,71 @@ public class GIProbeSystem : IDisposable
     {
         string vert = @"
     #version 450 core
-    layout(location = 0) in vec3 aPos;
+layout(location = 0) in vec3 aPos;
 
-    struct ProbeData { vec4 pos; vec4 color; };
-    layout(std430, binding = 16) buffer ProbeBuffer { ProbeData probes[]; };
+struct ProbeData { vec4 pos; vec4 color; };
+layout(std430, binding = 16) buffer ProbeBuffer { ProbeData probes[]; };
+
+uniform mat4 uViewProj;
+uniform float uCubeSize;
+
+uniform int uGIGridBaseX, uGIGridBaseY, uGIGridBaseZ;
+uniform float uProbeSpacing;
+uniform int uProbeGridX, uProbeGridY, uProbeGridZ;
+
+out vec3 vColor;
+
+int safe_wrap(int index, int baseCoord, int size) {
+    int diff = index - baseCoord;
+    int m = diff % size;
+    if (m < 0) m += size;
+    return baseCoord + m;
+}
+
+void main() {
+    ProbeData p = probes[gl_InstanceID];
     
-    uniform mat4 uViewProj;
-    uniform float uCubeSize;
-    
-    uniform int uGIGridBaseX, uGIGridBaseY, uGIGridBaseZ;
-    uniform float uProbeSpacing;
-    uniform int uProbeGridX, uProbeGridY, uProbeGridZ;
+    int wx = gl_InstanceID % uProbeGridX;
+    int wy = (gl_InstanceID / uProbeGridX) % uProbeGridY;
+    int wz = gl_InstanceID / (uProbeGridX * uProbeGridY);
 
-    out vec3 vColor;
-    
-    // Бронебойный модуль для отрицательных чисел
-    int safe_wrap(int index, int baseCoord, int size) {
-        int diff = index - baseCoord;
-        int m = diff % size;
-        if (m < 0) m += size;
-        return baseCoord + m;
-    }
+    int gx = safe_wrap(wx, uGIGridBaseX, uProbeGridX);
+    int gy = safe_wrap(wy, uGIGridBaseY, uProbeGridY);
+    int gz = safe_wrap(wz, uGIGridBaseZ, uProbeGridZ);
 
-    // Хак против оптимизаций NVIDIA: гарантированно ловит NaN
-    bool is_nan(float val) {
-        return !(val <= 0.0 || val >= 0.0);
-    }
+    // Где зонд ДОЛЖЕН быть:
+    vec3 expectedPos = vec3(gx, gy, gz) * uProbeSpacing + vec3(uProbeSpacing * 0.5);
+    // Где зонд РЕАЛЬНО находится в памяти:
+    vec3 actualPos = p.pos.xyz;
+    float state = p.pos.w;
 
-    void main() {
-        ProbeData p = probes[gl_InstanceID];
+    // Анализируем состояние
+    if (actualPos.y < -1000.0) {
+        // Еще ни разу не обновился (рисуем на ожидаемом месте, чтобы увидеть)
+        actualPos = expectedPos;
+        vColor = vec3(1.0, 0.0, 0.0); // КРАСНЫЙ
+    } 
+    else {
+        float dist = distance(actualPos, expectedPos);
         
-        int wx = gl_InstanceID % uProbeGridX;
-        int wy = (gl_InstanceID / uProbeGridX) % uProbeGridY;
-        int wz = gl_InstanceID / (uProbeGridX * uProbeGridY);
-
-        // Никаких вложенных модулей!
-        int gx = safe_wrap(wx, uGIGridBaseX, uProbeGridX);
-        int gy = safe_wrap(wy, uGIGridBaseY, uProbeGridY);
-        int gz = safe_wrap(wz, uGIGridBaseZ, uProbeGridZ);
-
-        vec3 expectedPos = vec3(gx, gy, gz) * uProbeSpacing + vec3(uProbeSpacing * 0.5);
-
-        // Ищем заразу
-        bool nanDetected = is_nan(p.pos.x) || is_nan(p.color.r) || is_nan(p.color.g) || is_nan(p.color.b);
-
-        if (nanDetected) {
-            vColor = vec3(1.0, 0.5, 0.0); // ОРАНЖЕВЫЙ: Тут был NaN!
+        if (dist > uProbeSpacing * 0.6) {
+            // ЗОНД ПОТЕРЯН! Сетка уехала, а он остался на старом месте
+            vColor = vec3(1.0, 0.0, 1.0); // ФИОЛЕТОВЫЙ (Lag / Lost)
         } 
-        else if (p.pos.y < -9000.0) {
-            vColor = vec3(1.0, 1.0, 0.0); // ЖЕЛТЫЙ: Не инициализирован
-        } 
-        else if (p.pos.w > 1.5) {
-            vColor = vec3(0.0, 0.8, 1.0); // ГОЛУБОЙ: Релокация
-        } 
-        else if (p.pos.w < 0.5) {
-            vColor = vec3(1.0, 0.0, 0.0); // КРАСНЫЙ: В стене
+        else if (state < 0.5) {
+            // Зонд внутри стены (выключен)
+            vColor = vec3(0.1, 0.1, 0.1); // ТЕМНО-СЕРЫЙ
         } 
         else {
-            vColor = p.color.rgb; // НОРМАЛЬНЫЙ
+            // Всё отлично, рисуем его реальный цвет
+            vColor = p.color.rgb;
         }
+    }
 
-        vec3 localPos = aPos * uCubeSize;
-        gl_Position = uViewProj * vec4(expectedPos + localPos, 1.0);
-    }";
+    // Рисуем на РЕАЛЬНОЙ позиции из памяти!
+    vec3 localPos = aPos * uCubeSize;
+    gl_Position = uViewProj * vec4(actualPos + localPos, 1.0);
+}";
 
         string frag = @"
     #version 450 core
@@ -343,10 +337,7 @@ public class GIProbeSystem : IDisposable
 
         if (bx != level.GridBaseX || by != level.GridBaseY || bz != level.GridBaseZ)
         {
-            Console.WriteLine($"SCROLL: old=({level.GridBaseX},{level.GridBaseY},{level.GridBaseZ}) new=({bx},{by},{bz}) cam={camPos}");
             level.GridBaseX = bx; level.GridBaseY = by; level.GridBaseZ = bz;
-            if (spacing == PROBE_SPACING_L0)
-                Console.WriteLine($"bx={bx} by={by} bz={bz} | camX={camPos.X:F2} camZ={camPos.Z:F2} | coverage X=[{bx},{bx + PROBE_X - 1}] Z=[{bz},{bz + PROBE_Z - 1}]");
             for (int i = 0; i < PROBE_COUNT; i++)
             {
                 int wx = i % PROBE_X; int wy = (i / PROBE_X) % PROBE_Y; int wz = i / (PROBE_X * PROBE_Y);
@@ -358,33 +349,52 @@ public class GIProbeSystem : IDisposable
                 if (level.CachedGridCoords[i] != expectedCoord)
                 {
                     level.CachedGridCoords[i] = expectedCoord;
-                    Vector3 newPos = new Vector3(gx, gy, gz) * spacing + new Vector3(spacing * 0.5f);
-                    _invalidatedProbes.Add((i, newPos)); // <-- теперь кортеж
-                    if (!level.IsInPriority[i]) { level.IsInPriority[i] = true; level.PriorityQueue.Enqueue(i); }
+                    // Кладем в приоритетную очередь только если его там еще нет
+                    if (!level.IsInPriority[i])
+                    {
+                        level.IsInPriority[i] = true;
+                        level.PriorityQueue.Enqueue(i);
+                    }
                 }
             }
         }
 
-        // После цикла — один SubData вместо 6400:
-        InvalidateProbesInSSBO(posSSBO, _invalidatedProbes);
-        _invalidatedProbes.Clear();
-
+        // --- ФИКС: ЗАЩИТА ОТ ДУБЛИКАТОВ ---
+        bool[] scheduledThisFrame = new bool[PROBE_COUNT];
         int updateCount = 0;
+
+        // 1. Сначала обрабатываем Приоритетную очередь (те, что только что переехали)
         while (updateCount < probesThisFrame && level.PriorityQueue.Count > 0)
         {
-            int idx = level.PriorityQueue.Dequeue(); level.IsInPriority[idx] = false;
-            _updateBufferCPU[updateCount++] = idx;
+            int idx = level.PriorityQueue.Dequeue();
+            level.IsInPriority[idx] = false; // Зонд больше не в очереди
+
+            if (!scheduledThisFrame[idx])
+            {
+                _updateBufferCPU[updateCount++] = idx;
+                scheduledThisFrame[idx] = true;
+            }
         }
 
+        // 2. Добиваем остаток с помощью Round-Robin (фоновое обновление старых зондов)
         while (updateCount < probesThisFrame)
         {
             int idx = level.RoundRobinCursor;
             level.RoundRobinCursor = (level.RoundRobinCursor + 1) % PROBE_COUNT;
-            if (!level.IsInPriority[idx]) _updateBufferCPU[updateCount++] = idx;
+
+            // Берем зонд ТОЛЬКО если:
+            // - Он уже не запланирован на этот кадр (защита от двойного обновления)
+            // - Он не ждет своей очереди в PriorityQueue (иначе собьем приоритет)
+            if (!scheduledThisFrame[idx] && !level.IsInPriority[idx])
+            {
+                _updateBufferCPU[updateCount++] = idx;
+                scheduledThisFrame[idx] = true;
+            }
         }
 
         if (updateCount == 0) return;
 
+        // --- ОТПРАВКА ДАННЫХ В GPU ---
         GL.BindBuffer(BufferTarget.ShaderStorageBuffer, updateListSsbo);
         GL.BufferSubData(BufferTarget.ShaderStorageBuffer, IntPtr.Zero, updateCount * sizeof(int), _updateBufferCPU);
         GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 22, updateListSsbo);
@@ -397,6 +407,7 @@ public class GIProbeSystem : IDisposable
         GL.BindTexture(TextureTarget.Texture2D, irrTex);
 
         _updateShader.Use();
+
         GL.ActiveTexture(TextureUnit.Texture6);
         GL.BindTexture(TextureTarget.Texture3D, pageTableTex);
         _updateShader.SetInt("uPageTable", 6);
@@ -442,11 +453,11 @@ public class GIProbeSystem : IDisposable
         _updateShader.SetVector3("uCamPos", camPos);
         _updateShader.SetFloat("uLodDistance", 100000.0f);
 
+        // ВАЖНО: Убедись, что барьер стоит правильно в конце:
         GL.DispatchCompute(updateCount, 1, 1);
         GL.MemoryBarrier(MemoryBarrierFlags.ShaderImageAccessBarrierBit |
                  MemoryBarrierFlags.ShaderStorageBarrierBit |
-                 MemoryBarrierFlags.TextureFetchBarrierBit |
-                 MemoryBarrierFlags.AllBarrierBits); // ← добавь AllBarrierBits
+                 MemoryBarrierFlags.TextureFetchBarrierBit);
     }
 
     public void Bind()
