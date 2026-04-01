@@ -173,8 +173,8 @@ vec3 SampleGIProbes(vec3 worldPos, vec3 normal, vec3 viewDir) {
     vec3 fallback = GIFallback(normal);
 
     float distToCam = length(worldPos - uCamPos);
-    float fade0 = clamp((uGIProbeX * uGIProbeSpacing * 0.45 - distToCam) / (uGIProbeSpacing * 1.5), 0.0, 1.0);
-    float fade1 = clamp((uGIProbeX * uGIProbeSpacingL1 * 0.45 - distToCam) / (uGIProbeSpacingL1 * 1.5), 0.0, 1.0);
+    float fade0 = clamp((float(uGIProbeX) * uGIProbeSpacing * 0.35 - distToCam) / (uGIProbeSpacing * 2.0), 0.0, 1.0);
+    float fade1 = clamp((float(uGIProbeX) * uGIProbeSpacingL1 * 0.35 - distToCam) / (uGIProbeSpacingL1 * 2.0), 0.0, 1.0);
 
     vec4 s0 = SampleProbeLevel(worldPos, normal, viewDir, uGIIrrAtlas, uGIDepthAtlas, uGIGridBaseX, uGIGridBaseY, uGIGridBaseZ, uGIProbeSpacing, 0);
     vec4 s1 = SampleProbeLevel(worldPos, normal, viewDir, uGIIrrAtlasL1, uGIDepthAtlasL1, uGIGridBaseX_L1, uGIGridBaseY_L1, uGIGridBaseZ_L1, uGIProbeSpacingL1, 1);

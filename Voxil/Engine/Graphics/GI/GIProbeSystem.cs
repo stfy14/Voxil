@@ -125,14 +125,28 @@ public class GIProbeSystem : IDisposable
 
     private void InvalidateProbesInSSBO(int ssbo, List<(int idx, Vector3 pos)> probes)
     {
-        if (probes.Count == 0) return;
-        GL.BindBuffer(BufferTarget.ShaderStorageBuffer, ssbo);
-        foreach (var (idx, pos) in probes)
-        {
-            int offset = idx * 32;
-            GL.BufferSubData(BufferTarget.ShaderStorageBuffer, new IntPtr(offset),
-                4 * sizeof(float), new float[] { pos.X, pos.Y, pos.Z, 1f }); // ← 1f вместо 0f
-        }
+        //if (probes.Count == 0) return;
+
+        //GL.BindBuffer(BufferTarget.ShaderStorageBuffer, ssbo);
+
+        //// Напрямую маппим буфер, чтобы драйвер не захлебывался от сотен команд
+        //IntPtr ptr = GL.MapBuffer(BufferTarget.ShaderStorageBuffer, BufferAccess.ReadWrite);
+        //if (ptr != IntPtr.Zero)
+        //{
+        //    unsafe
+        //    {
+        //        float* data = (float*)ptr;
+        //        foreach (var (idx, pos) in probes)
+        //        {
+        //            int offset = idx * 8; // 8 float-ов на каждый зонд (vec4 pos + vec4 color)
+        //            data[offset] = pos.X;
+        //            data[offset + 1] = pos.Y;
+        //            data[offset + 2] = pos.Z;
+        //            data[offset + 3] = 2f; // State = 2 (Relocating)
+        //        }
+        //    }
+        //    GL.UnmapBuffer(BufferTarget.ShaderStorageBuffer);
+        //}
     }
 
     private void InitTextures()
@@ -161,60 +175,96 @@ public class GIProbeSystem : IDisposable
     private void InitDebugRenderer()
     {
         string vert = @"
-        #version 450 core
-        layout(location = 0) in vec3 aPos;
+    #version 450 core
+    layout(location = 0) in vec3 aPos;
 
-        struct ProbeData { vec4 pos; vec4 color; };
-        layout(std430, binding = 16) buffer ProbeBuffer { ProbeData probes[]; };
+    struct ProbeData { vec4 pos; vec4 color; };
+    layout(std430, binding = 16) buffer ProbeBuffer { ProbeData probes[]; };
+    
+    uniform mat4 uViewProj;
+    uniform float uCubeSize;
+    
+    uniform int uGIGridBaseX, uGIGridBaseY, uGIGridBaseZ;
+    uniform float uProbeSpacing;
+    uniform int uProbeGridX, uProbeGridY, uProbeGridZ;
+
+    out vec3 vColor;
+    
+    // Бронебойный модуль для отрицательных чисел
+    int safe_wrap(int index, int baseCoord, int size) {
+        int diff = index - baseCoord;
+        int m = diff % size;
+        if (m < 0) m += size;
+        return baseCoord + m;
+    }
+
+    // Хак против оптимизаций NVIDIA: гарантированно ловит NaN
+    bool is_nan(float val) {
+        return !(val <= 0.0 || val >= 0.0);
+    }
+
+    void main() {
+        ProbeData p = probes[gl_InstanceID];
         
-        uniform mat4 uViewProj;
-        uniform float uCubeSize;
-        
-        uniform int uGIGridBaseX, uGIGridBaseY, uGIGridBaseZ;
-        uniform float uProbeSpacing;
-        uniform int uProbeGridX, uProbeGridY, uProbeGridZ;
-        uniform float uVoxelsPerMeter;
+        int wx = gl_InstanceID % uProbeGridX;
+        int wy = (gl_InstanceID / uProbeGridX) % uProbeGridY;
+        int wz = gl_InstanceID / (uProbeGridX * uProbeGridY);
 
-        out vec3 vColor;
-        
-        int true_mod(int a, int b) { int m = a % b; return m < 0 ? m + b : m; }
+        // Никаких вложенных модулей!
+        int gx = safe_wrap(wx, uGIGridBaseX, uProbeGridX);
+        int gy = safe_wrap(wy, uGIGridBaseY, uProbeGridY);
+        int gz = safe_wrap(wz, uGIGridBaseZ, uProbeGridZ);
 
-        void main() {
-            ProbeData p = probes[gl_InstanceID];
-            
-            // Вычисляем ИДЕАЛЬНУЮ ЛОГИЧЕСКУЮ позицию зонда
-            int wx = gl_InstanceID % uProbeGridX;
-            int wy = (gl_InstanceID / uProbeGridX) % uProbeGridY;
-            int wz = gl_InstanceID / (uProbeGridX * uProbeGridY);
+        vec3 expectedPos = vec3(gx, gy, gz) * uProbeSpacing + vec3(uProbeSpacing * 0.5);
 
-            int gx = uGIGridBaseX + true_mod(wx - true_mod(uGIGridBaseX, uProbeGridX), uProbeGridX);
-            int gy = uGIGridBaseY + true_mod(wy - true_mod(uGIGridBaseY, uProbeGridY), uProbeGridY);
-            int gz = uGIGridBaseZ + true_mod(wz - true_mod(uGIGridBaseZ, uProbeGridZ), uProbeGridZ);
+        // Ищем заразу
+        bool nanDetected = is_nan(p.pos.x) || is_nan(p.color.r) || is_nan(p.color.g) || is_nan(p.color.b);
 
-            vec3 expectedPos = vec3(gx, gy, gz) * uProbeSpacing + vec3(uProbeSpacing * 0.5);
+        if (nanDetected) {
+            vColor = vec3(1.0, 0.5, 0.0); // ОРАНЖЕВЫЙ: Тут был NaN!
+        } 
+        else if (p.pos.y < -9000.0) {
+            vColor = vec3(1.0, 1.0, 0.0); // ЖЕЛТЫЙ: Не инициализирован
+        } 
+        else if (p.pos.w > 1.5) {
+            vColor = vec3(0.0, 0.8, 1.0); // ГОЛУБОЙ: Релокация
+        } 
+        else if (p.pos.w < 0.5) {
+            vColor = vec3(1.0, 0.0, 0.0); // КРАСНЫЙ: В стене
+        } 
+        else {
+            vColor = p.color.rgb; // НОРМАЛЬНЫЙ
+        }
 
-            bool isLagging = distance(p.pos.xyz, expectedPos) > (uProbeSpacing * 0.75);
-
-            vec3 localPos = aPos * uCubeSize;
-            vec3 worldPos = p.pos.xyz + localPos;
-            gl_Position = uViewProj * vec4(worldPos, 1.0);
-                
-            vColor = isLagging ? vec3(0.1, 0.1, 0.1) : p.color.rgb; 
-        }";
+        vec3 localPos = aPos * uCubeSize;
+        gl_Position = uViewProj * vec4(expectedPos + localPos, 1.0);
+    }";
 
         string frag = @"
-        #version 450 core
-        in vec3 vColor;
-        out vec4 FragColor;
-        void main() {
-            vec3 c = vColor / (1.0 + vColor);
-            FragColor = vec4(pow(max(c, vec3(0.0)), vec3(1.0/2.2)), 1.0); 
-        }";
+    #version 450 core
+    in vec3 vColor;
+    out vec4 FragColor;
+
+    bool is_nan(float val) {
+        return !(val <= 0.0 || val >= 0.0);
+    }
+
+    void main() {
+        vec3 col = vColor;
+        // Последний рубеж: если NaN просочился, принудительно красим в оранжевый, 
+        // чтобы OpenGL не выкинул этот пиксель!
+        if (is_nan(col.r) || is_nan(col.g) || is_nan(col.b)) {
+            col = vec3(1.0, 0.5, 0.0);
+        }
+
+        vec3 c = col / (1.0 + col);
+        FragColor = vec4(pow(max(c, vec3(0.0)), vec3(1.0/2.2)), 1.0); 
+    }";
 
         _debugShader = new Shader(vert, frag, true);
 
         float[] cubeVerts = new float[] {
-            -1,-1,-1,  1,-1,-1,  1, 1,-1,  1, 1,-1, -1, 1,-1, -1,-1,-1,
+        -1,-1,-1,  1,-1,-1,  1, 1,-1,  1, 1,-1, -1, 1,-1, -1,-1,-1,
         -1,-1, 1,  1,-1, 1,  1, 1, 1,  1, 1, 1, -1, 1, 1, -1,-1, 1,
         -1, 1, 1, -1, 1,-1, -1,-1,-1, -1,-1,-1, -1,-1, 1, -1, 1, 1,
          1, 1, 1,  1, 1,-1,  1,-1,-1,  1,-1,-1,  1,-1, 1,  1, 1, 1,
@@ -232,7 +282,7 @@ public class GIProbeSystem : IDisposable
         GL.BindVertexArray(0);
     }
 
-    private static int TrueMod(int a, int b) { int m = a % b; return m < 0 ? m + b : m; }
+    private static int TrueMod(int a, int b) { return ((a % b) + b) % b; }
 
     public void MarkProbesDirty(Vector3 worldPos)
     {
@@ -277,6 +327,14 @@ public class GIProbeSystem : IDisposable
         Bind();
     }
 
+    private static int SafeWrap(int index, int baseCoord, int size)
+    {
+        int diff = index - baseCoord;
+        int m = diff % size;
+        if (m < 0) m += size;
+        return baseCoord + m;
+    }
+
     private void UpdateLevel(LevelData level, int posSSBO, int irrTex, int depthTex, Vector3 camPos, float spacing, int raysPerProbe, int probesThisFrame, Vector3 sunDir, float time, int bMinX, int bMinY, int bMinZ, int bMaxX, int bMaxY, int bMaxZ, int maxRaySteps, Vector3 gridOrigin, float gridStep, int gridSize, int objectCount, int pointLightCount, int pageTableTex, int gridHeadTex, int updateListSsbo)
     {
         int bx = (int)Math.Floor(camPos.X / spacing - PROBE_X * 0.5f);
@@ -292,8 +350,9 @@ public class GIProbeSystem : IDisposable
             for (int i = 0; i < PROBE_COUNT; i++)
             {
                 int wx = i % PROBE_X; int wy = (i / PROBE_X) % PROBE_Y; int wz = i / (PROBE_X * PROBE_Y);
-                int modBaseX = TrueMod(bx, PROBE_X); int modBaseY = TrueMod(by, PROBE_Y); int modBaseZ = TrueMod(bz, PROBE_Z);
-                int gx = bx + TrueMod(wx - modBaseX, PROBE_X); int gy = by + TrueMod(wy - modBaseY, PROBE_Y); int gz = bz + TrueMod(wz - modBaseZ, PROBE_Z);
+                int gx = SafeWrap(wx, bx, PROBE_X);
+                int gy = SafeWrap(wy, by, PROBE_Y);
+                int gz = SafeWrap(wz, bz, PROBE_Z);
                 var expectedCoord = new Vector3i(gx, gy, gz);
 
                 if (level.CachedGridCoords[i] != expectedCoord)

@@ -32,8 +32,24 @@ shared bool s_justWokeUp;
 uniform int uFrameIndex;
 uniform float uRelocationRadius;
 
-int true_mod(int a, int b) { int m = a % b; return m < 0 ? m + b : m; }
+int true_mod(int a, int b) { 
+    int m = a % b; 
+    return m < 0 ? m + b : m; 
+}
+
+int safe_wrap(int index, int baseCoord, int size) {
+    int diff = index - baseCoord;
+    int m = diff % size;
+    if (m < 0) m += size;
+    return baseCoord + m;
+}
+
 float Hash(float a, float b) { vec2 v = vec2(a, b); return fract(sin(dot(v, vec2(127.1, 311.7))) * 43758.5453); }
+
+bool is_nan(float v) {
+    uint u = floatBitsToUint(v);
+    return (u & 0x7fffffffu) > 0x7f800000u;
+}
 
 vec3 SphericalFibonacci(int i, int n) {
     float phi2 = 2.39996323;
@@ -56,7 +72,12 @@ mat3 GetRandomRotation(float seed1, float seed2) {
 }
 
 vec2 OctEncode(vec3 n) {
-    n /= (abs(n.x) + abs(n.y) + abs(n.z));
+    float l = abs(n.x) + abs(n.y) + abs(n.z);
+    
+    // НОВОЕ: Спасаем память от краша, если DDA вернул нулевую нормаль
+    if (l < 0.0001) return vec2(0.5); 
+    
+    n /= l;
     if (n.z < 0.0) {
         float x = n.x, y = n.y;
         n.x = (1.0 - abs(y)) * (x >= 0.0 ? 1.0 : -1.0);
@@ -171,24 +192,36 @@ void main() {
     int wy = (probeIdx / uProbeGridX) % uProbeGridY;
     int wz = probeIdx / (uProbeGridX * uProbeGridY);
 
-    int gx = uGIGridBaseX + true_mod(wx - true_mod(uGIGridBaseX, uProbeGridX), uProbeGridX);
-    int gy = uGIGridBaseY + true_mod(wy - true_mod(uGIGridBaseY, uProbeGridY), uProbeGridY);
-    int gz = uGIGridBaseZ + true_mod(wz - true_mod(uGIGridBaseZ, uProbeGridZ), uProbeGridZ);
+    int gx = safe_wrap(wx, uGIGridBaseX, uProbeGridX);
+    int gy = safe_wrap(wy, uGIGridBaseY, uProbeGridY);
+    int gz = safe_wrap(wz, uGIGridBaseZ, uProbeGridZ);
 
     // БАЗА: Строгая позиция сетки, никакой релокации.
     vec3 idealPos = vec3(gx, gy, gz) * uProbeSpacing + vec3(uProbeSpacing * 0.5);
     vec3 targetPos = floor(idealPos * VOXELS_PER_METER) / VOXELS_PER_METER + vec3(0.5 / VOXELS_PER_METER);
 
     vec3 storedPos = probes[probeIdx].pos.xyz;
-    float storedState = probes[probeIdx].pos.w;
-    bool wasRelocated = (storedState > 0.5) && 
-                        (distance(storedPos, targetPos) > uProbeSpacing * 0.6);
+    // GPU-ХАК: Если целевая позиция зонда отличается от его старой позиции
+    // больше чем на полшага сетки, значит сетка сдвинулась и зонд "телепортировался".
+    // Также проверяем первичную инициализацию (<-9000).
+    bool wasRelocated = distance(storedPos, targetPos) > (uProbeSpacing * 0.55) || storedPos.y < -9000.0;
+
+    // ↓ currentPos → targetPos
+    if (tid == 0) {
+        probes[probeIdx].pos = vec4(targetPos, 1.0);
+    }
+    barrier();
 
     ivec2 irrOrigin   = IrrTileOrigin(probeIdx);
     ivec2 depthOrigin = DepthTileOrigin(probeIdx);
 
     // 1. Если зонд в стене - выключаем его (пишем 0 во все пиксели атласа)
-    if (IsSolidAt(targetPos)) {
+        if (IsSolidAt(targetPos)) {
+        if (tid == 0) {
+            // ИСПРАВЛЕНИЕ: Пишем targetPos напрямую, избегая кэш-ошибок GPU!
+            probes[probeIdx].pos = vec4(targetPos, 0.0); // ← state = ВЫКЛ
+        }
+        barrier();
         if (tid < 64) {
             int px = int(tid % 8); int py = int(tid / 8);
             imageStore(uIrrAtlas, irrOrigin + ivec2(px, py), vec4(0.0));
@@ -198,18 +231,8 @@ void main() {
             int px = pidx % 16; int py = pidx / 16;
             imageStore(uDepthAtlas, depthOrigin + ivec2(px, py), vec4(0.0));
         }
-        if (tid == 0) {
-            // Не трогаем pos — оставляем то, что CPU записал
-            // probes[probeIdx].pos = vec4(targetPos, 1.0);
-        }
         return; 
     }
-        if (tid == 0) {
-            // Только выключаем state, позицию не трогаем
-            vec3 currentPos = probes[probeIdx].pos.xyz;
-            probes[probeIdx].pos = vec4(currentPos, 0.0);
-        }
-
     float maxRayDist = max(float(uProbeGridX) * uProbeSpacing * 0.75, 48.0);
     float rotSeed = float(uFrameIndex / 8 + probeIdx * 1000);
     mat3 probeRot = GetRandomRotation(
@@ -227,6 +250,9 @@ void main() {
 
         if (TraceGIRay(targetPos, rd, maxRayDist, tHit, matID, hitNorm)) {
             dist = tHit;
+            // Спасаем нормаль, если DDA вернул нули
+            if (dot(hitNorm, hitNorm) < 0.01) hitNorm = -rd; 
+            
             if (dot(rd, hitNorm) > 0.0) {
                 dist = tHit * 0.2; // Сильно штрафуем дистанцию при попадании в заднюю грань
             } else if (IsEmissive(matID)) {
@@ -299,17 +325,18 @@ void main() {
             float w = max(0.0, dot(pixelDir, s_rayDirs[ray]));
             if (w > 0.001) { irrSum += s_rayRad[ray] * w; wSum += w; }
         }
-        vec3 newIrr = (wSum > 0.0) ? irrSum / wSum : vec3(0.0);
+        vec3 newIrr = (wSum > 0.0001) ? irrSum / wSum : vec3(0.0);
 
         vec3 prevIrr = imageLoad(uIrrAtlas, irrOrigin + ivec2(px, py)).rgb;
+        if (is_nan(prevIrr.x) || is_nan(prevIrr.y) || is_nan(prevIrr.z)) prevIrr = vec3(0.0);
         
-        // БАЗА: Простой бленд. Если раньше был черный зонд (0.0), моментально применяем новый свет
         float blend = (wasRelocated || dot(prevIrr, vec3(1.0)) < 0.001) ? 1.0 : 0.05;
-        
         vec3 finalIrr = mix(prevIrr, newIrr, blend);
         imageStore(uIrrAtlas, irrOrigin + ivec2(px, py), vec4(finalIrr, 1.0));
 
-        if (tid == 27) { probes[probeIdx].colorAndState = vec4(newIrr, 1.0); }
+        if (tid == 27) { 
+            probes[probeIdx].colorAndState = vec4(newIrr, 1.0); 
+        }
     }
 
     // 4. Обновление глубины зонда (Depth) 16x16 пикселей
@@ -332,7 +359,7 @@ void main() {
                 meanDist += d * w; meanDist2 += d * d * w; wSum += w;
             }
         }
-        vec2 newDepth = (wSum > 0.0) ? vec2(meanDist/wSum, meanDist2/wSum) : vec2(maxRayDist, maxRayDist*maxRayDist);
+        vec2 newDepth = (wSum > 0.0001) ? vec2(meanDist/wSum, meanDist2/wSum) : vec2(maxRayDist, maxRayDist*maxRayDist);
         
         vec2 prevDepth = imageLoad(uDepthAtlas, depthOrigin + ivec2(px, py)).rg;
         
