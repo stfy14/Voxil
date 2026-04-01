@@ -52,4 +52,5 @@ public static class GameSettings
     public static bool ShowExplosionRays = false;
     public static bool ShowExplosionRadius = false;
     public static int GIDebugLOD = 0;
+    public static bool EnableGIProbeTraceDebug = false;
 }

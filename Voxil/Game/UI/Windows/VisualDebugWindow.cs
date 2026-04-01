@@ -77,6 +77,22 @@ public class VisualDebugWindow : IUIWindow
                 }
                 // ----------------------------------
 
+                // --- НОВЫЙ БЛОК: ДИАГНОСТИКА ТРАССИРОВКИ ---
+                ImGui.Spacing(); ImGui.Separator();
+                ImGui.TextColored(new System.Numerics.Vector4(1.0f, 0.5f, 0.0f, 1.0f), "Anomaly Detection:");
+                bool traceDebug = GameSettings.EnableGIProbeTraceDebug;
+                if (ImGui.Checkbox("Probe Ray-Trace Diagnostic", ref traceDebug))
+                    GameSettings.EnableGIProbeTraceDebug = traceDebug;
+
+                if (traceDebug)
+                {
+                    ImGui.TextColored(new System.Numerics.Vector4(1.0f, 0.0f, 1.0f, 1.0f), "■ Magenta:");
+                    ImGui.SameLine(); ImGui.TextDisabled("Probe is BLIND (rays miss everything)");
+                    ImGui.TextColored(new System.Numerics.Vector4(0.5f, 0.0f, 0.0f, 1.0f), "■ Dark Red:");
+                    ImGui.SameLine(); ImGui.TextDisabled("Probe is DARK (rays hit, but no light)");
+                }
+                // ---------------------------------------------
+
                 ImGui.Spacing();
                 ImGui.TextColored(new System.Numerics.Vector4(0.9f, 0.8f, 0.2f, 1f), "■");
                 ImGui.SameLine(); ImGui.TextDisabled($"L0: {GIProbeSystem.RAYS_PER_PROBE_L0} rays, {GIProbeSystem.PROBES_PER_FRAME_L0}/frame");

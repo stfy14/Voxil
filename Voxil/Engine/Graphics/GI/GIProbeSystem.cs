@@ -167,7 +167,7 @@ public class GIProbeSystem : IDisposable
     private void InitDebugRenderer()
     {
         string vert = @"
-    #version 450 core
+#version 450 core
 layout(location = 0) in vec3 aPos;
 
 struct ProbeData { vec4 pos; vec4 color; };
@@ -175,85 +175,65 @@ layout(std430, binding = 16) buffer ProbeBuffer { ProbeData probes[]; };
 
 uniform mat4 uViewProj;
 uniform float uCubeSize;
-
-uniform int uGIGridBaseX, uGIGridBaseY, uGIGridBaseZ;
-uniform float uProbeSpacing;
-uniform int uProbeGridX, uProbeGridY, uProbeGridZ;
+uniform int uEnableProbeTraceDebug;
 
 out vec3 vColor;
 
-int safe_wrap(int index, int baseCoord, int size) {
-    int diff = index - baseCoord;
-    int m = diff % size;
-    if (m < 0) m += size;
-    return baseCoord + m;
-}
+bool is_nan(float val) { return !(val <= 0.0 || val >= 0.0); }
 
 void main() {
     ProbeData p = probes[gl_InstanceID];
-    
-    int wx = gl_InstanceID % uProbeGridX;
-    int wy = (gl_InstanceID / uProbeGridX) % uProbeGridY;
-    int wz = gl_InstanceID / (uProbeGridX * uProbeGridY);
-
-    int gx = safe_wrap(wx, uGIGridBaseX, uProbeGridX);
-    int gy = safe_wrap(wy, uGIGridBaseY, uProbeGridY);
-    int gz = safe_wrap(wz, uGIGridBaseZ, uProbeGridZ);
-
-    // Где зонд ДОЛЖЕН быть:
-    vec3 expectedPos = vec3(gx, gy, gz) * uProbeSpacing + vec3(uProbeSpacing * 0.5);
-    // Где зонд РЕАЛЬНО находится в памяти:
     vec3 actualPos = p.pos.xyz;
     float state = p.pos.w;
 
-    // Анализируем состояние
-    if (actualPos.y < -1000.0) {
-        // Еще ни разу не обновился (рисуем на ожидаемом месте, чтобы увидеть)
-        actualPos = expectedPos;
-        vColor = vec3(1.0, 0.0, 0.0); // КРАСНЫЙ
-    } 
-    else {
-        float dist = distance(actualPos, expectedPos);
-        
-        if (dist > uProbeSpacing * 0.6) {
-            // ЗОНД ПОТЕРЯН! Сетка уехала, а он остался на старом месте
-            vColor = vec3(1.0, 0.0, 1.0); // ФИОЛЕТОВЫЙ (Lag / Lost)
-        } 
-        else if (state < 0.5) {
-            // Зонд внутри стены (выключен)
-            vColor = vec3(0.1, 0.1, 0.1); // ТЕМНО-СЕРЫЙ
-        } 
-        else {
-            // Всё отлично, рисуем его реальный цвет
+    if (uEnableProbeTraceDebug == 1) {
+        // --- РАСШИФРОВКА ""ОТЧЕТА О ЗДОРОВЬЕ"" ---
+        float normDist = p.color.r;
+        float hitRate  = p.color.g;
+        float avgLum   = p.color.b;
+
+        if (hitRate < 0.1) {
+            // Лучи НИКУДА не попадают. Ошибка в координатах рейкастера или выход за uBound.
+            vColor = vec3(1.0, 0.0, 1.0); // МАГЕНТА (СЛЕПОЙ ЗОНД)
+        } else if (avgLum < 0.02 && state > 0.5) {
+            // Лучи попадают, но результат - почти черный цвет.
+            vColor = vec3(0.5, 0.0, 0.0); // ТЕМНО-КРАСНЫЙ (ТЕМНЫЙ ЗОНД)
+        } else {
+            // Зонд работает нормально, показываем его реальный цвет
             vColor = p.color.rgb;
         }
+    } else {
+        // --- СТАНДАРТНЫЙ ДЕБАГ ---
+        if (is_nan(actualPos.x)) { vColor = vec3(1.0, 0.5, 0.0); } // Оранжевый: NaN
+        else if (actualPos.y < -9000.0) { vColor = vec3(1.0, 1.0, 0.0); } // Желтый: Не инициализирован
+        else if (state < 0.5) { vColor = vec3(1.0, 0.0, 0.0); } // Красный: В стене
+        else { vColor = p.color.rgb; } // Реальный цвет
     }
 
-    // Рисуем на РЕАЛЬНОЙ позиции из памяти!
-    vec3 localPos = aPos * uCubeSize;
-    gl_Position = uViewProj * vec4(actualPos + localPos, 1.0);
+    vec3 finalPos = is_nan(actualPos.x) ? (aPos * 9999.0) : actualPos; // Прячем NaN-зонды
+    gl_Position = uViewProj * vec4(finalPos + aPos * uCubeSize, 1.0);
 }";
 
         string frag = @"
     #version 450 core
-    in vec3 vColor;
-    out vec4 FragColor;
+in vec3 vColor;
+out vec4 FragColor;
 
-    bool is_nan(float val) {
-        return !(val <= 0.0 || val >= 0.0);
+bool is_nan(float val) {
+    return !(val <= 0.0 || val >= 0.0);
+}
+
+void main() {
+    vec3 col = vColor;
+    // Последний рубеж: если NaN просочился, принудительно красим в оранжевый, 
+    // чтобы OpenGL не выкинул этот пиксель!
+    if (is_nan(col.r) || is_nan(col.g) || is_nan(col.b)) {
+        col = vec3(1.0, 0.5, 0.0);
     }
-
-    void main() {
-        vec3 col = vColor;
-        // Последний рубеж: если NaN просочился, принудительно красим в оранжевый, 
-        // чтобы OpenGL не выкинул этот пиксель!
-        if (is_nan(col.r) || is_nan(col.g) || is_nan(col.b)) {
-            col = vec3(1.0, 0.5, 0.0);
-        }
-
-        vec3 c = col / (1.0 + col);
-        FragColor = vec4(pow(max(c, vec3(0.0)), vec3(1.0/2.2)), 1.0); 
-    }";
+    
+    vec3 c = col / (1.0 + col);
+    FragColor = vec4(pow(max(c, vec3(0.0)), vec3(1.0/2.2)), 1.0); 
+}";
 
         _debugShader = new Shader(vert, frag, true);
 
@@ -455,6 +435,7 @@ void main() {
         _updateShader.SetInt("uFrameIndex", _frameIndex);
         _updateShader.SetVector3("uSunDir", sunDir);
         _updateShader.SetFloat("uProbeSpacing", spacing);
+        _updateShader.SetInt("uEnableProbeTraceDebug", GameSettings.EnableGIProbeTraceDebug ? 1 : 0);
         float relocRadius = spacing switch
         {
             <= 1.0f => 2.0f,   // L0: 2 вокселя
@@ -527,6 +508,7 @@ void main() {
         _debugShader.Use();
         _debugShader.SetMatrix4("uViewProj", cam.View * cam.Projection);
         _debugShader.SetFloat("uVoxelsPerMeter", Constants.VoxelsPerMeter);
+        _debugShader.SetInt("uEnableProbeTraceDebug", GameSettings.EnableGIProbeTraceDebug ? 1 : 0);
         GL.BindVertexArray(_debugVao);
 
         int lod = GameSettings.GIDebugLOD;
@@ -545,7 +527,12 @@ void main() {
             GL.DrawArraysInstanced(PrimitiveType.Triangles, 0, 36, PROBE_COUNT);
         }
 
-        if (lod == 0 || lod == -1) DrawLevel(ProbePositionSsbo, 0.075f, _l0, PROBE_SPACING_L0);
+        if (lod == 0 || lod == -1)
+        {
+            GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 22, _updateListSsboL0);
+            _debugShader.SetInt("uProbesThisFrame", PROBES_PER_FRAME_L0);
+            DrawLevel(ProbePositionSsbo, 0.075f, _l0, PROBE_SPACING_L0);
+        }
         if (lod == 1 || lod == -1) DrawLevel(ProbePositionSsboL1, 0.3f, _l1, PROBE_SPACING_L1);
         if (lod == 2 || lod == -1) DrawLevel(ProbePositionSsboL2, 1.2f, _l2, PROBE_SPACING_L2);
 

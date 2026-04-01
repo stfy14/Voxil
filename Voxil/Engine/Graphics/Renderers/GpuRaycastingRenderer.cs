@@ -556,7 +556,7 @@ public class GpuRaycastingRenderer : IDisposable
 
         UpdatePointLights();
 
-        if (_giSystem != null && GameSettings.EnableGI)
+        if (_giSystem != null && GameSettings.EnableGI && _frameIndex > 15 && cam.Position.Y > -1000.0f)
         {
             GL.BindImageTexture(0, _pageTableTexture, 0, true, 0, TextureAccess.ReadOnly, SizedInternalFormat.R32ui);
             BindAllBuffers();
@@ -568,14 +568,18 @@ public class GpuRaycastingRenderer : IDisposable
 
             GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, POINT_LIGHT_BINDING, _pointLightSsbo);
 
-            int r = GameSettings.RenderDistance + 2;
+            // --- ФИКС: РАСШИРЯЕМ ГРАНИЦЫ ДЛЯ GI ---
+            // Вычисляем реальный радиус самой большой сетки (L2) и добавляем запас на дальность луча
+            float giWorldRadius = (GIProbeSystem.PROBE_X * GIProbeSystem.PROBE_SPACING_L2 * 0.5f) + 64.0f; // ~160м + 64м
+            int giChunkRadius = (int)Math.Ceiling(giWorldRadius / Constants.ChunkSizeWorld) + 2;
+
             int cx = (int)Math.Floor(cam.Position.X / Constants.ChunkSizeWorld);
             int cz = (int)Math.Floor(cam.Position.Z / Constants.ChunkSizeWorld);
             int maxSteps = (int)(viewRange * 8) + 512;
 
             _giSystem.Update(cam.Position, sunDir, _totalTime,
-                            cx - r, 0, cz - r,
-                            cx + r, WorldManager.WorldHeightChunks, cz + r,
+                            cx - giChunkRadius, 0, cz - giChunkRadius, // Используем новый, гигантский радиус
+                            cx + giChunkRadius, WorldManager.WorldHeightChunks, cz + giChunkRadius,
                             maxSteps,
                             _lastGridOrigin, _gridCellSize, OBJ_GRID_SIZE, objCount, _lastPointLightCount,
                             _pageTableTexture, _gridHeadTexture);
@@ -583,7 +587,6 @@ public class GpuRaycastingRenderer : IDisposable
             _shaderSystem.Use();
             shader = _shaderSystem.RaycastShader;
             GL.BindVertexArray(_quadVao);
-            // ← ДОБАВИТЬ:
             if (_giSystem != null && GameSettings.EnableGI)
             {
                 _giSystem.SetSamplingUniforms(shader);
