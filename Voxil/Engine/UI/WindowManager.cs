@@ -25,10 +25,10 @@ public class WindowManager : IDisposable
     public void AddWindow(IUIWindow window) => _windows.Add(window);
     public void PressChar(char c) => _controller.PressChar(c);
 
-    public void Update(GameWindow window, float deltaTime)
+    public void Update(GameWindow window, float deltaTime, bool inputEnabled)
     {
-        _controller.Update(window, deltaTime);
-        
+        _controller.Update(window, deltaTime, inputEnabled);
+
         IsAnyWindowOpen = false;
         foreach (var w in _windows)
         {

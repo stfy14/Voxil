@@ -217,14 +217,16 @@ public class Game : GameWindow
         if (!_isInitialized) return;
 
         float deltaTime = (float)e.Time;
-        bool inEditor   = _sceneManager.Current is EditorScene;
+        bool inEditor = _sceneManager.Current is EditorScene;
 
         _input.Update(KeyboardState, MouseState);
-        _uiManager.Update(this, deltaTime);
+
+        // 1. Сообщаем UI, должен ли он перехватывать мышь
+        bool uiTakesInput = inEditor || _isUIMode;
+        _uiManager.Update(this, deltaTime, uiTakesInput);
 
         if (inEditor)
         {
-            // В редакторе курсор всегда свободен, UI работает независимо
             _sceneManager.Update(deltaTime, _input);
             UpdateDebugStats(deltaTime);
             return;
@@ -236,7 +238,18 @@ public class Game : GameWindow
         UpdateCursorMode();
 
         if (!_isUIMode)
+        {
             _sceneManager.Update(deltaTime, _input);
+        }
+        else
+        {
+            // 2. ИСПРАВЛЕНИЕ ГЕНЕРАЦИИ: 
+            // Даже если игра на "паузе" в меню, мы разрешаем менеджеру мира 
+            // забирать сгенерированные чанки, а рендеру - отправлять их в видеокарту!
+            // Физика при этом стоит на паузе, так как она внутри _sceneManager.Update.
+            _worldManager.Update(deltaTime);
+            _renderer.UpdateChunkData(deltaTime);
+        }
 
         UpdateDebugStats(deltaTime);
     }

@@ -235,7 +235,19 @@ public class GpuRaycastingRenderer : IDisposable
     public void SetViewModel(VoxelObject viewModel) => _currentViewModel = viewModel;
     public void RequestReallocation() { CleanupBuffers(); GC.Collect(); GC.WaitForPendingFinalizers(); GC.Collect(); _reallocationPending = true; }
     public bool IsReallocationPending() => _reallocationPending;
-    public void PerformReallocation() { if (!_reallocationPending) return; InitializeBuffers(); _reallocationPending = false; }
+    public void PerformReallocation()
+    {
+        if (!_reallocationPending) return;
+
+        // 1. Сначала полностью пересоздаем БАНКИ ДАННЫХ (SSBO, PageTable)
+        InitializeBuffers();
+
+        // 2. А теперь ПРИНУДИТЕЛЬНО пересоздаем все РЕНДЕР-ТАРГЕТЫ (FBO),
+        //    как будто мы только что изменили размер окна.
+        OnResize(_windowWidth, _windowHeight);
+
+        _reallocationPending = false;
+    }
     public long CalculateMemoryBytesForDistance(int distance)
     {
         int chunks = (distance * 2 + 1) * (distance * 2 + 1) * WorldManager.WorldHeightChunks;
