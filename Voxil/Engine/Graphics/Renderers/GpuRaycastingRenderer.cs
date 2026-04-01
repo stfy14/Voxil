@@ -564,6 +564,9 @@ public class GpuRaycastingRenderer : IDisposable
             BindAllBuffers();
             GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 5, _maskSsbo);
 
+            // ---> ДОБАВЛЕНО: Привязываем буфер точечных источников света! <---
+            GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, POINT_LIGHT_BINDING, _pointLightSsbo);
+
             // Радиус VCT: L2 покрывает 1024м, берем с запасом 18 чанков (~1152м)
             int vctChunkRadius = 18;
             int cx = (int)Math.Floor(cam.Position.X / Constants.ChunkSizeWorld);
@@ -574,7 +577,8 @@ public class GpuRaycastingRenderer : IDisposable
                             cx - vctChunkRadius, 0, cz - vctChunkRadius,
                             cx + vctChunkRadius, WorldManager.WorldHeightChunks, cz + vctChunkRadius,
                             maxSteps,
-                            _lastGridOrigin, _gridCellSize, OBJ_GRID_SIZE, objCount);
+                            _lastGridOrigin, _gridCellSize, OBJ_GRID_SIZE, objCount,
+                            _lastPointLightCount); // <--- ПЕРЕДАЕМ СЧЕТЧИК СВЕТА
 
             // Возвращаем основной шейдер перед рендером
             _shaderSystem.Use();

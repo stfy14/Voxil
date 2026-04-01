@@ -129,13 +129,14 @@ public class VCTSystem : IDisposable
     /// Updates the clipmap to track the camera and refreshes 4 Z-slices.
     /// </summary>
     public void Update(
-        Vector3 camPos,
-        Vector3 sunDir,
-        int bMinX, int bMinY, int bMinZ,
-        int bMaxX, int bMaxY, int bMaxZ,
-        int maxRaySteps,
-        Vector3 gridOrigin, float gridStep, int gridSize,
-        int objectCount)
+            Vector3 camPos,
+            Vector3 sunDir,
+            int bMinX, int bMinY, int bMinZ,
+            int bMaxX, int bMaxY, int bMaxZ,
+            int maxRaySteps,
+            Vector3 gridOrigin, float gridStep, int gridSize,
+            int objectCount,
+            int pointLightCount) // <--- ДОБАВИТЬ ЭТО
     {
         // Snap origins to grid — camera drives the scrolling window
         _originL0 = SnapOrigin(camPos, CELL_L0);
@@ -161,6 +162,7 @@ public class VCTSystem : IDisposable
         _buildShader.SetFloat("uGridStep", gridStep);
         _buildShader.SetInt("uGridSize", gridSize);
         _buildShader.SetInt("uObjectCount", objectCount);
+        _buildShader.SetInt("uPointLightCount", pointLightCount);
 
         // === VCT-specific uniforms ===
         _buildShader.SetInt("uVCTClipmapSize", CLIPMAP_SIZE);

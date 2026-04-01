@@ -47,7 +47,7 @@ public static class MaterialRegistry
     {
         return type switch
         {
-            MaterialType.Glow => 12.0f,
+            MaterialType.Glow => 3.0f,
             _                 => 0f,
         };
     }
@@ -59,7 +59,7 @@ public static class MaterialRegistry
     {
         return type switch
         {
-            MaterialType.Glow => 16.0f,
+            MaterialType.Glow => 12.0f,
             _                 => 0f,
         };
     }

@@ -82,7 +82,7 @@ void main() {
 
     #ifdef ENABLE_GI
     vec3 giIrradiance = SampleGIVCT(hitPos, normal);
-    pointLightColor += giIrradiance * max(ao, 0.15);
+    pointLightColor += giIrradiance * ao;
     #endif
 
     outPointLights = vec4(pointLightColor, 1.0);

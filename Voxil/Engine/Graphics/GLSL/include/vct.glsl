@@ -143,10 +143,13 @@ vec3 VCT_SkyColor(vec3 dir) {
     float sunH    = uSunDir.y;
     float dayF    = clamp(sunH * 4.0 + 0.2,       0.0, 1.0);
     float sunsetF = clamp(1.0 - abs(sunH) * 5.0,  0.0, 1.0);
-    float ambient = mix(0.05, 0.35, dayF) * (1.0 + sunsetF * 0.3);
+    
+    // Поднимаем ночной ambient (было 0.05, стало 0.20), чтобы VCT конусы видели свет звезд
+    float ambient = mix(0.20, 0.50, dayF) * (1.0 + sunsetF * 0.3);
 
+    // Даем ночному небу красивый синий оттенок
     vec3 skyColor = mix(
-        mix(vec3(0.04, 0.04, 0.12), vec3(0.60, 0.75, 0.95), dayF),
+        mix(vec3(0.08, 0.12, 0.25), vec3(0.60, 0.75, 0.95), dayF),
         vec3(0.90, 0.45, 0.15), sunsetF
     );
 
