@@ -15,10 +15,10 @@ public static class GameSettings
     public static float TimeScale = 120.0f;
 
     // === ГРАФИКА ===
-    public static int RenderDistance = 32;
+    public static int RenderDistance = 64;
     public static float RenderScale = 1.0f;
     public static bool EnableAO = true;
-    public static bool EnableTAA = true;
+    public static bool EnableTAA = false;
     public static ShadowMode CurrentShadowMode = ShadowMode.Hard;
     public static int SoftShadowSamples = 8;
     public static bool UseProceduralWater = false;
@@ -36,7 +36,7 @@ public static class GameSettings
     public static bool EnableLOD = true;
     public static float LodPercentage = 0.85f;
     public static bool DisableEffectsOnLOD = true;
-    public static int ShadowDownscale = 2;
+    public static int ShadowDownscale = 1;
 
     // === ПОТОКИ И ПРОИЗВОДИТЕЛЬНОСТЬ ===
     public static int GpuUploadSpeed = 10000;
