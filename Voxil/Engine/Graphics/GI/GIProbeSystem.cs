@@ -298,9 +298,18 @@ void main() {
                     int cx = gx + dx; int cy = gy + dy; int cz = gz + dz;
                     int wx = TrueMod(cx, PROBE_X); int wy = TrueMod(cy, PROBE_Y); int wz = TrueMod(cz, PROBE_Z);
                     int idx = wx + wy * PROBE_X + wz * PROBE_X * PROBE_Y;
+
                     if (level.CachedGridCoords[idx] == new Vector3i(cx, cy, cz))
                     {
-                        if (!level.IsInPriority[idx]) { level.IsInPriority[idx] = true; level.PriorityQueue.Enqueue(idx); }
+                        // БЛОКИРУЕМ ПОТОК ДЛЯ БЕЗОПАСНОГО ДОБАВЛЕНИЯ
+                        lock (level.PriorityQueue)
+                        {
+                            if (!level.IsInPriority[idx])
+                            {
+                                level.IsInPriority[idx] = true;
+                                level.PriorityQueue.Enqueue(idx);
+                            }
+                        }
                     }
                 }
     }
@@ -349,43 +358,63 @@ void main() {
                 if (level.CachedGridCoords[i] != expectedCoord)
                 {
                     level.CachedGridCoords[i] = expectedCoord;
-                    // Кладем в приоритетную очередь только если его там еще нет
-                    if (!level.IsInPriority[i])
+
+                    // БЛОКИРУЕМ ПРИ СДВИГЕ СЕТКИ
+                    lock (level.PriorityQueue)
                     {
-                        level.IsInPriority[i] = true;
-                        level.PriorityQueue.Enqueue(i);
+                        if (!level.IsInPriority[i])
+                        {
+                            level.IsInPriority[i] = true;
+                            level.PriorityQueue.Enqueue(i);
+                        }
                     }
                 }
             }
         }
 
-        // --- ФИКС: ЗАЩИТА ОТ ДУБЛИКАТОВ ---
         bool[] scheduledThisFrame = new bool[PROBE_COUNT];
         int updateCount = 0;
 
-        // 1. Сначала обрабатываем Приоритетную очередь (те, что только что переехали)
-        while (updateCount < probesThisFrame && level.PriorityQueue.Count > 0)
+        // 1. Потокобезопасная выгрузка из PriorityQueue
+        while (updateCount < probesThisFrame)
         {
-            int idx = level.PriorityQueue.Dequeue();
-            level.IsInPriority[idx] = false; // Зонд больше не в очереди
-
-            if (!scheduledThisFrame[idx])
+            int idx = -1;
+            lock (level.PriorityQueue)
             {
-                _updateBufferCPU[updateCount++] = idx;
-                scheduledThisFrame[idx] = true;
+                if (level.PriorityQueue.Count > 0)
+                {
+                    idx = level.PriorityQueue.Dequeue();
+                    level.IsInPriority[idx] = false;
+                }
+            }
+
+            if (idx != -1)
+            {
+                if (!scheduledThisFrame[idx])
+                {
+                    _updateBufferCPU[updateCount++] = idx;
+                    scheduledThisFrame[idx] = true;
+                }
+            }
+            else
+            {
+                break; // Очередь пуста
             }
         }
 
-        // 2. Добиваем остаток с помощью Round-Robin (фоновое обновление старых зондов)
+        // 2. Потокобезопасный Round-Robin
         while (updateCount < probesThisFrame)
         {
             int idx = level.RoundRobinCursor;
             level.RoundRobinCursor = (level.RoundRobinCursor + 1) % PROBE_COUNT;
 
-            // Берем зонд ТОЛЬКО если:
-            // - Он уже не запланирован на этот кадр (защита от двойного обновления)
-            // - Он не ждет своей очереди в PriorityQueue (иначе собьем приоритет)
-            if (!scheduledThisFrame[idx] && !level.IsInPriority[idx])
+            bool isPriority = false;
+            lock (level.PriorityQueue)
+            {
+                isPriority = level.IsInPriority[idx];
+            }
+
+            if (!scheduledThisFrame[idx] && !isPriority)
             {
                 _updateBufferCPU[updateCount++] = idx;
                 scheduledThisFrame[idx] = true;
