@@ -126,7 +126,7 @@ public class GpuRaycastingRenderer : IDisposable
     private ConcurrentQueue<GpuVoxelEdit> _editQueue = new ConcurrentQueue<GpuVoxelEdit>();
     private GpuVoxelEdit[] _editUploadArray = new GpuVoxelEdit[1024];
 
-    private GIProbeSystem _giSystem;
+    private VCTSystem _vctSystem;
     private int _pointLightSsbo;
     private const int POINT_LIGHT_BINDING = 18;
     private int _lastPointLightCount = 0; [StructLayout(LayoutKind.Sequential)]
@@ -137,7 +137,7 @@ public class GpuRaycastingRenderer : IDisposable
     }
     private readonly GpuPointLight[] _pointLightCache = new GpuPointLight[32];
 
-    public GIProbeSystem GISystem => _giSystem;
+    public VCTSystem VCTSystem => _vctSystem;
 
     public event Action OnShaderReloaded
     {
@@ -235,7 +235,19 @@ public class GpuRaycastingRenderer : IDisposable
     public void SetViewModel(VoxelObject viewModel) => _currentViewModel = viewModel;
     public void RequestReallocation() { CleanupBuffers(); GC.Collect(); GC.WaitForPendingFinalizers(); GC.Collect(); _reallocationPending = true; }
     public bool IsReallocationPending() => _reallocationPending;
-    public void PerformReallocation() { if (!_reallocationPending) return; InitializeBuffers(); _reallocationPending = false; }
+    public void PerformReallocation()
+    {
+        if (!_reallocationPending) return;
+
+        // 1. Сначала полностью пересоздаем БАНКИ ДАННЫХ (SSBO, PageTable)
+        InitializeBuffers();
+
+        // 2. А теперь ПРИНУДИТЕЛЬНО пересоздаем все РЕНДЕР-ТАРГЕТЫ (FBO),
+        //    как будто мы только что изменили размер окна.
+        OnResize(_windowWidth, _windowHeight);
+
+        _reallocationPending = false;
+    }
     public long CalculateMemoryBytesForDistance(int distance)
     {
         int chunks = (distance * 2 + 1) * (distance * 2 + 1) * WorldManager.WorldHeightChunks;
@@ -289,18 +301,18 @@ public class GpuRaycastingRenderer : IDisposable
         _shaderSystem.Compile(MAX_TOTAL_BANKS, _chunksPerBank);
         ResetAllocationLogic();
 
-        _shaderSystem.OnShaderReloaded -= ReinitGI;
-        _shaderSystem.OnShaderReloaded += ReinitGI;
-        ReinitGI();
+        _shaderSystem.OnShaderReloaded -= ReinitVCT;
+        _shaderSystem.OnShaderReloaded += ReinitVCT;
+        ReinitVCT();
     }
 
-    private void ReinitGI()
+    private void ReinitVCT()
     {
-        _giSystem?.Dispose();
-        _giSystem = null;
-        if (GameSettings.EnableGI && _shaderSystem.GIProbeUpdateShader != null)
+        _vctSystem?.Dispose();
+        _vctSystem = null;
+        if (GameSettings.EnableGI && _shaderSystem.VctClipmapBuildShader != null)
         {
-            _giSystem = new GIProbeSystem(_shaderSystem.GIProbeUpdateShader);
+            _vctSystem = new VCTSystem(_shaderSystem.VctClipmapBuildShader);
         }
     }
 
@@ -556,41 +568,33 @@ public class GpuRaycastingRenderer : IDisposable
 
         UpdatePointLights();
 
-        if (_giSystem != null && GameSettings.EnableGI && _frameIndex > 15 && cam.Position.Y > -1000.0f)
+        if (_vctSystem != null && GameSettings.EnableGI && _frameIndex > 15 && cam.Position.Y > -1000.0f)
         {
-            GL.BindImageTexture(0, _pageTableTexture, 0, true, 0, TextureAccess.ReadOnly, SizedInternalFormat.R32ui);
+            // Убедимся, что текстура мира и банки привязаны для compute-шейдера VCT
+            GL.ActiveTexture(TextureUnit.Texture6);
+            GL.BindTexture(TextureTarget.Texture3D, _pageTableTexture);
             BindAllBuffers();
             GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 5, _maskSsbo);
-            GL.BindImageTexture(1, _gridHeadTexture, 0, true, 0, TextureAccess.ReadOnly, SizedInternalFormat.R32i);
-            GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 2, _dynamicObjectsBuffer);
-            GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 3, _linkedListSsbo);
-            _svoManager.Bind();
 
+            // ---> ДОБАВЛЕНО: Привязываем буфер точечных источников света! <---
             GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, POINT_LIGHT_BINDING, _pointLightSsbo);
 
-            // --- ФИКС: РАСШИРЯЕМ ГРАНИЦЫ ДЛЯ GI ---
-            // Вычисляем реальный радиус самой большой сетки (L2) и добавляем запас на дальность луча
-            float giWorldRadius = (GIProbeSystem.PROBE_X * GIProbeSystem.PROBE_SPACING_L2 * 0.5f) + 64.0f; // ~160м + 64м
-            int giChunkRadius = (int)Math.Ceiling(giWorldRadius / Constants.ChunkSizeWorld) + 2;
-
+            // Радиус VCT: L2 покрывает 1024м, берем с запасом 18 чанков (~1152м)
+            int vctChunkRadius = 18;
             int cx = (int)Math.Floor(cam.Position.X / Constants.ChunkSizeWorld);
             int cz = (int)Math.Floor(cam.Position.Z / Constants.ChunkSizeWorld);
             int maxSteps = (int)(viewRange * 8) + 512;
 
-            _giSystem.Update(cam.Position, sunDir, _totalTime,
-                            cx - giChunkRadius, 0, cz - giChunkRadius, // Используем новый, гигантский радиус
-                            cx + giChunkRadius, WorldManager.WorldHeightChunks, cz + giChunkRadius,
+            _vctSystem.Update(cam.Position, sunDir,
+                            cx - vctChunkRadius, 0, cz - vctChunkRadius,
+                            cx + vctChunkRadius, WorldManager.WorldHeightChunks, cz + vctChunkRadius,
                             maxSteps,
-                            _lastGridOrigin, _gridCellSize, OBJ_GRID_SIZE, objCount, _lastPointLightCount,
-                            _pageTableTexture, _gridHeadTexture);
+                            _lastGridOrigin, _gridCellSize, OBJ_GRID_SIZE, objCount,
+                            _lastPointLightCount); // <--- ПЕРЕДАЕМ СЧЕТЧИК СВЕТА
 
+            // Возвращаем основной шейдер перед рендером
             _shaderSystem.Use();
-            shader = _shaderSystem.RaycastShader;
             GL.BindVertexArray(_quadVao);
-            if (_giSystem != null && GameSettings.EnableGI)
-            {
-                _giSystem.SetSamplingUniforms(shader);
-            }
         }
 
         if (GameSettings.BeamOptimization && !_isEditorMode)
@@ -679,9 +683,9 @@ public class GpuRaycastingRenderer : IDisposable
                 GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, POINT_LIGHT_BINDING, _pointLightSsbo);
                 shadowShader.SetInt("uPointLightCount", _lastPointLightCount);
 
-                if (_giSystem != null && GameSettings.EnableGI)
+                if (_vctSystem != null && GameSettings.EnableGI)
                 {
-                    _giSystem.SetSamplingUniforms(shadowShader);
+                    _vctSystem.SetSamplingUniforms(shadowShader);
                 }
 
                 GL.DrawArrays(PrimitiveType.TriangleStrip, 0, 4);
@@ -727,12 +731,6 @@ public class GpuRaycastingRenderer : IDisposable
         compositeShader.SetTexture("uPointLightFull", _shadowPointLightFullTexture, TextureUnit.Texture3);
 
         GL.DrawArrays(PrimitiveType.TriangleStrip, 0, 4);
-
-        if (_giSystem != null && GameSettings.EnableGI && GameSettings.ShowGIProbes)
-        {
-            _giSystem.DrawSolidProbes(cam);
-            GL.BindVertexArray(_quadVao);
-        }
 
         if (useTaa && !_resetTaaHistory)
         {
@@ -925,16 +923,6 @@ public class GpuRaycastingRenderer : IDisposable
                     NewMaterial = (uint)newMat,
                     Padding = 0
                 });
-            }
-
-            if (_giSystem != null && GameSettings.EnableGI)
-            {
-                Vector3 worldPos = new Vector3(
-                    chunk.Position.X * Constants.ChunkSizeWorld + localPos.X * Constants.VoxelSize + Constants.VoxelSize * 0.5f,
-                    chunk.Position.Y * Constants.ChunkSizeWorld + localPos.Y * Constants.VoxelSize + Constants.VoxelSize * 0.5f,
-                    chunk.Position.Z * Constants.ChunkSizeWorld + localPos.Z * Constants.VoxelSize + Constants.VoxelSize * 0.5f
-                );
-                _giSystem.MarkProbesDirty(worldPos);
             }
         }
     }
@@ -1236,8 +1224,8 @@ public class GpuRaycastingRenderer : IDisposable
         if (_debugFbo != 0) { GL.DeleteFramebuffer(_debugFbo); _debugFbo = 0; }
         if (_debugColorTexture != 0) { GL.DeleteTexture(_debugColorTexture); _debugColorTexture = 0; }
 
-        _giSystem?.Dispose();
-        _giSystem = null;
+        _vctSystem?.Dispose();
+        _vctSystem = null;
         if (_pointLightSsbo != 0) { GL.DeleteBuffer(_pointLightSsbo); _pointLightSsbo = 0; }
         CurrentAllocatedBytes = 0;
         System.Threading.Thread.Sleep(50);

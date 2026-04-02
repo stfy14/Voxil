@@ -141,8 +141,9 @@ public class Game : GameWindow
             _worldManager, _physicsWorld, _renderer,
             _player, _entityManager, _camera, _input,
             _lineRenderer, _physicsDebugger, _crosshair, _testManager);
-        
-        _editorScene = new EditorScene(_renderer, (float)ClientSize.X / ClientSize.Y, ClientSize.X, ClientSize.Y);
+
+        // ИСПРАВЛЕНИЕ: Передаем `this` (ссылку на GameWindow) в конструктор EditorScene
+        _editorScene = new EditorScene(this, _renderer);
         _editorScene.OnExitRequested += SwitchToGame;
 
         _sceneManager.Register(_gameScene);
@@ -217,26 +218,35 @@ public class Game : GameWindow
         if (!_isInitialized) return;
 
         float deltaTime = (float)e.Time;
-        bool inEditor   = _sceneManager.Current is EditorScene;
+        bool inEditor = _sceneManager.Current is EditorScene;
 
         _input.Update(KeyboardState, MouseState);
-        _uiManager.Update(this, deltaTime);
+
+        bool uiTakesInput = inEditor || _isUIMode;
+        _uiManager.Update(this, deltaTime, uiTakesInput);
 
         if (inEditor)
         {
-            // В редакторе курсор всегда свободен, UI работает независимо
             _sceneManager.Update(deltaTime, _input);
             UpdateDebugStats(deltaTime);
             return;
         }
 
         // --- Игровая сцена ---
-        UpdateTime(deltaTime);
         if (HandleReallocation()) return;
         UpdateCursorMode();
 
         if (!_isUIMode)
+        {
+            // ИСПРАВЛЕНИЕ ВРЕМЕНИ: Перемещаем UpdateTime сюда
+            UpdateTime(deltaTime);
             _sceneManager.Update(deltaTime, _input);
+        }
+        else
+        {
+            _worldManager.Update(deltaTime);
+            _renderer.UpdateChunkData(deltaTime);
+        }
 
         UpdateDebugStats(deltaTime);
     }

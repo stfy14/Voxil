@@ -64,11 +64,11 @@ public class ImGuiController : IDisposable
     public void PressChar(char c) => ImGui.GetIO().AddInputCharacter(c);
     public void DestroyDeviceObjects() { Dispose(); }
 
-    public void Update(GameWindow wnd, float dt)
+    public void Update(GameWindow wnd, float dt, bool inputEnabled)
     {
         if (_frameBegun) ImGui.Render();
         SetPerFrameImGuiData(dt);
-        UpdateImGuiInput(wnd);
+        UpdateImGuiInput(wnd, inputEnabled); // Передаем флаг
         _frameBegun = true;
         ImGui.NewFrame();
     }
@@ -86,9 +86,23 @@ public class ImGuiController : IDisposable
         io.DeltaTime = dt; 
     }
 
-    private void UpdateImGuiInput(GameWindow wnd)
+    private void UpdateImGuiInput(GameWindow wnd, bool inputEnabled)
     {
         ImGuiIOPtr io = ImGui.GetIO();
+
+        // ИСПРАВЛЕНИЕ "ЗАЛИПАНИЯ" UI:
+        // Если мы не в режиме UI, мы полностью лишаем ImGui данных о мыши.
+        if (!inputEnabled)
+        {
+            io.AddMouseButtonEvent(0, false);
+            io.AddMouseButtonEvent(1, false);
+            io.AddMouseButtonEvent(2, false);
+            // Уводим мышь далеко за экран, чтобы никакие окна не подсвечивались
+            io.MousePos = new System.Numerics.Vector2(-9999, -9999);
+            return;
+        }
+
+        // Стандартная обработка, если UI активен
         MouseState mouse = wnd.MouseState;
         KeyboardState keyboard = wnd.KeyboardState;
 
@@ -96,6 +110,7 @@ public class ImGuiController : IDisposable
         io.AddMouseButtonEvent(1, mouse[MouseButton.Right]);
         io.AddMouseButtonEvent(2, mouse[MouseButton.Middle]);
         io.MousePos = new System.Numerics.Vector2(mouse.X, mouse.Y);
+
         OpenTK.Mathematics.Vector2 currentScroll = mouse.Scroll;
         OpenTK.Mathematics.Vector2 scrollDelta = currentScroll - _lastScroll;
 
@@ -112,10 +127,6 @@ public class ImGuiController : IDisposable
                 io.AddKeyEvent(imKey, keyboard.IsKeyDown(key));
             }
         }
-        
-        // Ввод символов (для текстовых полей)
-        // Чтобы это работало идеально, нужно подписаться на событие TextInput в Game.cs
-        // Но для меню пока хватит и этого
     }
 
     private static ImGuiKey TranslateKey(Keys key)

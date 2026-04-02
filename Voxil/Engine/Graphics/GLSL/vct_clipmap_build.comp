@@ -1,0 +1,215 @@
+// --- vct_clipmap_build.comp ---
+// Builds the VCT radiance+opacity clipmap from the voxel page table.
+// Dispatched 3 times per frame (once per cascade), updating 4 Z-slices each time.
+// Full clipmap refresh cycle: 64/4 = 16 frames.
+//
+// Clipmap layout:
+//   L0: 64^3 texels, 2m/texel  -> 128m radius
+//   L1: 64^3 texels, 8m/texel  -> 512m radius
+//   L2: 64^3 texels, 32m/texel -> 2048m radius
+//
+// Each texel stores: rgb = outgoing radiance, a = opacity [0..1]
+// Toroidal (scrolling) addressing: storageTexel = worldTexel & 63
+
+#version 450 core
+layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
+
+layout(binding = 0, rgba16f) uniform image3D uClipmapL0;
+layout(binding = 1, rgba16f) uniform image3D uClipmapL1;
+layout(binding = 2, rgba16f) uniform image3D uClipmapL2;
+
+// Voxel world access — standard engine includes
+#include "include/common.glsl"
+#include "include/tracing.glsl"
+
+// Буфер точечных источников света
+struct PointLightData { vec4 posRadius; vec4 colorIntensity; };
+layout(std430, binding = 18) readonly buffer PointLightBuffer { PointLightData pointLights[]; };
+uniform int uPointLightCount;
+
+// === UNIFORMS ===
+
+// World texel coordinate of the minimum corner of each clipmap
+// Computed as: floor(camPos / cellSize) - CLIPMAP_SIZE/2
+uniform int uVCTOriginL0X, uVCTOriginL0Y, uVCTOriginL0Z;
+uniform int uVCTOriginL1X, uVCTOriginL1Y, uVCTOriginL1Z;
+uniform int uVCTOriginL2X, uVCTOriginL2Y, uVCTOriginL2Z;
+
+#define uVCTOriginL0 ivec3(uVCTOriginL0X, uVCTOriginL0Y, uVCTOriginL0Z)
+#define uVCTOriginL1 ivec3(uVCTOriginL1X, uVCTOriginL1Y, uVCTOriginL1Z)
+#define uVCTOriginL2 ivec3(uVCTOriginL2X, uVCTOriginL2Y, uVCTOriginL2Z)
+
+uniform int uVCTClipmapSize;   // 64
+uniform int uVCTStartSlice;    // First Z texel to update this frame [0, 4, 8 ... 60]
+uniform int uVCTLevel;         // Which cascade to build: 0, 1, or 2
+
+// Cell sizes (world units per texel)
+const float VCT_CELL_L0 = 2.0;
+const float VCT_CELL_L1 = 8.0;
+const float VCT_CELL_L2 = 32.0;
+
+// === WORLD SAMPLING ===
+
+// Reads voxel material at a world position.
+// Returns opacity=0 for air/water, opacity=1 for solid voxels.
+void SampleWorld(vec3 pos, out vec3 albedo, out float opacity, out bool isEmissive) {
+    albedo      = vec3(0.0);
+    opacity     = 0.0;
+    isEmissive  = false;
+
+    ivec3 cc = ivec3(floor(pos / float(CHUNK_SIZE)));
+    ivec3 bMin = ivec3(uBoundMinX, uBoundMinY, uBoundMinZ);
+    ivec3 bMax = ivec3(uBoundMaxX, uBoundMaxY, uBoundMaxZ);
+    if (any(lessThan(cc, bMin)) || any(greaterThanEqual(cc, bMax))) return;
+
+    uint slot = texelFetch(uPageTable, cc & (PAGE_TABLE_SIZE - 1), 0).r;
+    if (slot == 0xFFFFFFFFu) return;
+
+    uint mat;
+    if ((slot & 0x80000000u) != 0u) {
+        // Uniform solid chunk — entire chunk is one material
+        mat = slot & 0x7FFFFFFFu;
+    } else {
+        // Per-voxel data
+        vec3 lp = clamp(pos - vec3(cc) * float(CHUNK_SIZE), vec3(0.0), vec3(float(CHUNK_SIZE) - 1e-4));
+        ivec3 vp = clamp(ivec3(floor(lp * VOXELS_PER_METER)), ivec3(0), ivec3(VOXEL_RESOLUTION - 1));
+        mat = GetVoxelData(slot, vp.x + VOXEL_RESOLUTION * (vp.y + VOXEL_RESOLUTION * vp.z));
+    }
+
+    // Air (0) and water (4) are transparent
+    if (mat == 0u || mat == 4u) return;
+
+    opacity    = 1.0;
+    albedo     = GetColor(mat);
+    isEmissive = (mat == 7u); // Glow block
+}
+
+// Quick directional visibility check toward the sun.
+// Traces cellSize*1.5 steps — coarse but free of ray budget concerns.
+bool IsSunlit(vec3 pos, float cellSize) {
+    if (uSunDir.y < 0.01) return false;
+    float step = cellSize * 1.5;
+    for (int i = 1; i <= 4; i++) {
+        float op; vec3 alb; bool em;
+        SampleWorld(pos + uSunDir * (step * float(i)), alb, op, em);
+        if (op > 0.5) return false;
+    }
+    return true;
+}
+
+// === MAIN ===
+
+void main() {
+    // Each invocation updates one texel.
+    // uVCTStartSlice offsets the Z so we only update 4 slices this frame.
+    ivec3 gid   = ivec3(gl_GlobalInvocationID);
+    ivec3 texel = ivec3(gid.x, gid.y, uVCTStartSlice + gid.z);
+
+    if (any(greaterThanEqual(texel, ivec3(uVCTClipmapSize)))) return;
+
+    // --- Choose cascade parameters ---
+    float cellSize;
+    ivec3 origin;
+    if      (uVCTLevel == 0) { cellSize = VCT_CELL_L0; origin = uVCTOriginL0; }
+    else if (uVCTLevel == 1) { cellSize = VCT_CELL_L1; origin = uVCTOriginL1; }
+    else                     { cellSize = VCT_CELL_L2; origin = uVCTOriginL2; }
+
+    // World position of this texel's cell center
+    ivec3 worldTexel = origin + texel;
+    vec3  cellCenter = (vec3(worldTexel) + 0.5) * cellSize;
+
+    // --- Sample voxel occupancy ---
+    // L0 uses 2x2x2 stratified sub-samples for smoother transitions.
+    // L1/L2 use a single center sample (cell is large enough).
+    int   N     = (uVCTLevel == 0) ? 2 : 1;
+    float subStep = cellSize / float(N);
+    vec3  corner  = cellCenter - vec3(cellSize * 0.5);
+
+    float totalOp  = 0.0;
+    vec3  totalAlb = vec3(0.0);
+    float emCount  = 0.0;
+
+    for (int sx = 0; sx < N; sx++)
+    for (int sy = 0; sy < N; sy++)
+    for (int sz = 0; sz < N; sz++) {
+        vec3 sp = corner + (vec3(sx, sy, sz) + 0.5) * subStep;
+        float op; vec3 alb; bool em;
+        SampleWorld(sp, alb, op, em);
+        totalOp  += op;
+        totalAlb += alb * op;
+        if (em) emCount += 1.0;
+    }
+
+    float n3     = float(N * N * N);
+    float opacity = totalOp / n3;
+    vec3  albedo  = (totalOp > 1e-3) ? totalAlb / totalOp : vec3(0.0);
+
+    // --- Compute outgoing radiance ---
+    vec3 radiance = vec3(0.0);
+
+    if (opacity > 0.05) {
+        if (emCount >= 0.5) {
+            // Самосветящиеся блоки
+            radiance = albedo * 5.0;
+        } else {
+            // Прямой свет от солнца
+            float sunInt = clamp(uSunDir.y * 5.0, 0.0, 1.0);
+            if (sunInt > 0.01 && IsSunlit(cellCenter, cellSize)) {
+                radiance = albedo * vec3(1.0, 0.95, 0.85) * sunInt * 1.5;
+            }
+        }
+
+        // ВНИМАНИЕ: Мы УДАЛИЛИ фейковый skyAmb! Теперь под землей нет магии.
+
+        // ==========================================
+        // 1. ФИЗИЧЕСКИ КОРРЕКТНЫЕ POINT LIGHTS
+        // ==========================================
+        vec3 pointLightContrib = vec3(0.0);
+        for(int i = 0; i < uPointLightCount; i++) {
+            vec3 lPos = pointLights[i].posRadius.xyz;
+            float lRad = pointLights[i].posRadius.w;
+            float dist = distance(cellCenter, lPos);
+            
+            if(dist < lRad) {
+                vec3 lCol = pointLights[i].colorIntensity.rgb;
+                float lInt = pointLights[i].colorIntensity.a;
+                
+                // Физически-корректное затухание (Inverse Square Falloff с плавным краем)
+                float num = clamp(1.0 - pow(dist / lRad, 4.0), 0.0, 1.0);
+                float falloff = (num * num) / (dist * dist + 1.0);
+                
+                pointLightContrib += lCol * lInt * falloff;
+            }
+        }
+        radiance += albedo * pointLightContrib;
+
+        // ==========================================
+        // 2. МНОГОКРАТНОЕ ОТРАЖЕНИЕ (Energy Conserving LPV)
+        // ==========================================
+        vec3 bounce = vec3(0.0);
+        ivec3 offsets[6] = ivec3[](
+            ivec3(1,0,0), ivec3(-1,0,0), ivec3(0,1,0), 
+            ivec3(0,-1,0), ivec3(0,0,1), ivec3(0,0,-1)
+        );
+        
+        for(int i = 0; i < 6; i++) {
+            ivec3 nTexel = (worldTexel + offsets[i]) & (uVCTClipmapSize - 1);
+            if (uVCTLevel == 0) bounce += imageLoad(uClipmapL0, nTexel).rgb;
+            else if (uVCTLevel == 1) bounce += imageLoad(uClipmapL1, nTexel).rgb;
+            else bounce += imageLoad(uClipmapL2, nTexel).rgb;
+        }
+        
+        // Усредняем 6 соседей (делим на 6) и применяем коэффициент отражения (0.6).
+        // Так как коэффициент < 1.0, свет будет плавно затухать, не нарушая физику.
+        radiance += albedo * (bounce / 6.0) * 0.6;
+    }
+
+    // --- Write to clipmap (toroidal) ---
+    // Because CLIPMAP_SIZE is a power of 2 (64), bitwise AND gives correct positive modulo.
+    ivec3 storeTexel = worldTexel & (uVCTClipmapSize - 1);
+    vec4  data       = vec4(radiance, opacity);
+
+    if      (uVCTLevel == 0) imageStore(uClipmapL0, storeTexel, data);
+    else if (uVCTLevel == 1) imageStore(uClipmapL1, storeTexel, data);
+    else                     imageStore(uClipmapL2, storeTexel, data);
+}

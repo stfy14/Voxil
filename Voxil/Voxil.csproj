@@ -71,10 +71,10 @@
     <None Update="Engine\Graphics\GLSL\clear_grid.comp">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </None>
-    <None Update="Engine\Graphics\GLSL\gi_probe_update.comp">
+    <None Update="Engine\Graphics\GLSL\include\vct.glsl">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </None>
-    <None Update="Engine\Graphics\GLSL\include\gi.glsl">
+    <None Update="Engine\Graphics\GLSL\vct_clipmap_build.comp">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </None>
   </ItemGroup>

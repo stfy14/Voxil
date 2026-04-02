@@ -134,13 +134,6 @@ public class SettingsWindow : IUIWindow
             }
             if (ImGui.IsItemHovered())
                 ImGui.SetTooltip("Enables probe-based indirect lighting.\nRequires shader reload (automatic).");
-
-            if (GameSettings.EnableGI)
-            {
-                ImGui.TextDisabled($"256 probes  ·  {GIProbeSystem.RAYS_PER_PROBE} rays/probe  ·  {GIProbeSystem.PROBES_PER_FRAME}/frame");
-                ImGui.TextDisabled("GlowBall item (slot 3) emits dynamic point light.");
-            }
-
             // ================================================================
             ImGui.Spacing(); ImGui.Separator(); ImGui.Text("Level of Detail (LOD)");
             ImGui.Separator();

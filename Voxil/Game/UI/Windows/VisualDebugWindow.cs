@@ -39,77 +39,19 @@ public class VisualDebugWindow : IUIWindow
             ImGui.Spacing(); ImGui.Separator();
 
             ImGui.TextColored(new System.Numerics.Vector4(0.97f, 0.82f, 0.2f, 1), "GI Probe Debug:");
+
             if (GameSettings.EnableGI)
             {
-                bool showProbes = GameSettings.ShowGIProbes;
-                if (ImGui.Checkbox("Visualize Probe Entities", ref showProbes))
-                    GameSettings.ShowGIProbes = showProbes;
-
-                if (showProbes)
-                {
-                    ImGui.SameLine(); ImGui.TextDisabled("(кубики)");
-                    bool xray = GameSettings.ShowGIProbesXRay;
-                    if (ImGui.Checkbox("X-Ray Mode (сквозь стены)", ref xray))
-                        GameSettings.ShowGIProbesXRay = xray;
-                    ImGui.Spacing();
-
-                    string[] lodNames = { "L0 — Near (1м)", "L1 — Mid (4м)", "L2 — Far (16м)", "Все уровни" };
-                    int lodIdx = GameSettings.GIDebugLOD == -1 ? 3 : GameSettings.GIDebugLOD;
-                    ImGui.SetNextItemWidth(200);
-                    if (ImGui.Combo("Зонды - LOD", ref lodIdx, lodNames, lodNames.Length))
-                        GameSettings.GIDebugLOD = lodIdx == 3 ? -1 : lodIdx;
-                    ImGui.Spacing();
-                }
-
-                // --- НОВЫЙ БЛОК: Сетка каскадов ---
+                ImGui.TextDisabled("Voxel Cone Tracing (VCT) is Active");
                 ImGui.Spacing();
-                bool showBounds = GameSettings.ShowGIProbeGridBounds;
-                if (ImGui.Checkbox("Visualize GPU Memory Grid", ref showBounds))
-                    GameSettings.ShowGIProbeGridBounds = showBounds;
+                ImGui.TextColored(new System.Numerics.Vector4(0.9f, 0.8f, 0.2f, 1f), "■ L0 Cascade:");
+                ImGui.SameLine(); ImGui.TextDisabled("128x128x128m (High Detail)");
 
-                if (showBounds)
-                {
-                    string[] gridLodNames = { "L0 Grid (1m cells)", "L1 Grid (4m cells)", "L2 Grid (16m cells)", "Все сетки" };
-                    int gridLodIdx = GameSettings.GIGridBoundsLOD;
-                    ImGui.SetNextItemWidth(200);
-                    if (ImGui.Combo("Сетка - LOD", ref gridLodIdx, gridLodNames, gridLodNames.Length))
-                        GameSettings.GIGridBoundsLOD = gridLodIdx;
-                }
-                // ----------------------------------
+                ImGui.TextColored(new System.Numerics.Vector4(0.2f, 0.8f, 0.9f, 1f), "■ L1 Cascade:");
+                ImGui.SameLine(); ImGui.TextDisabled("512x512x512m (Mid Detail)");
 
-                // --- НОВЫЙ БЛОК: ДИАГНОСТИКА ТРАССИРОВКИ ---
-                ImGui.Spacing(); ImGui.Separator();
-                ImGui.TextColored(new System.Numerics.Vector4(1.0f, 0.5f, 0.0f, 1.0f), "Anomaly Detection:");
-                bool traceDebug = GameSettings.EnableGIProbeTraceDebug;
-                if (ImGui.Checkbox("Probe Ray-Trace Diagnostic", ref traceDebug))
-                    GameSettings.EnableGIProbeTraceDebug = traceDebug;
-
-                if (traceDebug)
-                {
-                    ImGui.TextColored(new System.Numerics.Vector4(1.0f, 0.0f, 1.0f, 1.0f), "■ Magenta:");
-                    ImGui.SameLine(); ImGui.TextDisabled("Probe is BLIND (rays miss everything)");
-                    ImGui.TextColored(new System.Numerics.Vector4(0.5f, 0.0f, 0.0f, 1.0f), "■ Dark Red:");
-                    ImGui.SameLine(); ImGui.TextDisabled("Probe is DARK (rays hit, but no light)");
-                }
-                // ---------------------------------------------
-
-                ImGui.Spacing();
-                ImGui.TextColored(new System.Numerics.Vector4(0.9f, 0.8f, 0.2f, 1f), "■");
-                ImGui.SameLine(); ImGui.TextDisabled($"L0: {GIProbeSystem.RAYS_PER_PROBE_L0} rays, {GIProbeSystem.PROBES_PER_FRAME_L0}/frame");
-
-                ImGui.TextColored(new System.Numerics.Vector4(0.2f, 0.8f, 0.9f, 1f), "■");
-                ImGui.SameLine(); ImGui.TextDisabled($"L1: {GIProbeSystem.RAYS_PER_PROBE_L1} rays, {GIProbeSystem.PROBES_PER_FRAME_L1}/frame");
-
-                ImGui.TextColored(new System.Numerics.Vector4(0.8f, 0.2f, 0.9f, 1f), "■");
-                ImGui.SameLine(); ImGui.TextDisabled($"L2: {GIProbeSystem.RAYS_PER_PROBE_L2} rays, {GIProbeSystem.PROBES_PER_FRAME_L2}/frame");
-
-                ImGui.Spacing();
-                int probeCount = GIProbeSystem.PROBE_COUNT;
-                ImGui.TextDisabled($"Всего зондов: {probeCount * 3:N0}  ({probeCount:N0} на уровень)");
-                ImGui.TextDisabled($"Сетка: {GIProbeSystem.PROBE_X}×{GIProbeSystem.PROBE_Y}×{GIProbeSystem.PROBE_Z}");
-                ImGui.Spacing();
-                ImGui.TextDisabled("Слот [3] = GlowBall  →  бросить LMB");
-                ImGui.TextDisabled("F6 = GI diagnostic   F7 = Spawn GlowBall");
+                ImGui.TextColored(new System.Numerics.Vector4(0.8f, 0.2f, 0.9f, 1f), "■ L2 Cascade:");
+                ImGui.SameLine(); ImGui.TextDisabled("2048x2048x2048m (Far Detail)");
             }
             else
             {
