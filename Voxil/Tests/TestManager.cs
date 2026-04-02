@@ -87,7 +87,7 @@ public class TestManager
         foreach (var go in glowObjects)
             Console.WriteLine($"  → GlowBall at {go.Position:F1}");
 
-        Console.WriteLine("PASS: GI system is active (probes update every frame automatically).");
+        Console.WriteLine("PASS: GI system is active (clipmaps update every frame automatically).");
         Console.WriteLine("=== [GI TEST DONE] ===\n");
     }
 
