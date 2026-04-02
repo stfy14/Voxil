@@ -186,7 +186,7 @@ vec3 SampleGIVCT(vec3 worldPos, vec3 normal) {
 
         // Any remaining transparency sees the sky
         float skyFraction = 1.0 - result.a;
-        if (skyFraction > 0.001) {
+        if (skyFraction > 0.9 && coneDir.y > 0.0) {
             result.rgb += VCT_SkyColor(coneDir) * skyFraction;
         }
 

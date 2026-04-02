@@ -88,10 +88,10 @@ void SampleWorld(vec3 pos, out vec3 albedo, out float opacity, out bool isEmissi
 // Traces cellSize*1.5 steps — coarse but free of ray budget concerns.
 bool IsSunlit(vec3 pos, float cellSize) {
     if (uSunDir.y < 0.01) return false;
-    float step = cellSize * 1.5;
-    for (int i = 1; i <= 4; i++) {
+    float stepSize = cellSize; // без * 1.5 — плотнее сетка
+    for (int i = 1; i <= 16; i++) {
         float op; vec3 alb; bool em;
-        SampleWorld(pos + uSunDir * (step * float(i)), alb, op, em);
+        SampleWorld(pos + uSunDir * (stepSize * float(i)), alb, op, em);
         if (op > 0.5) return false;
     }
     return true;
