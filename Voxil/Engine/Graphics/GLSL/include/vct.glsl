@@ -193,7 +193,7 @@ vec3 SampleGIVCT(vec3 worldPos, vec3 normal) {
             if (accumulated > 0.99) break;
         }
 
-        skyAccess = 1.0 - smoothstep(0.1, 0.7, accumulated);
+        skyAccess = 1.0 - smoothstep(0.05, 0.85, accumulated);
     }
 
     vec3 irradiance = vec3(0.0);
@@ -202,11 +202,20 @@ vec3 SampleGIVCT(vec3 worldPos, vec3 normal) {
         vec3 coneDir = normalize(tbn * VCT_CONE_DIRS[i]);
         vec4 result  = VCT_TraceCone(origin, coneDir, startT, maxDist);
 
-        // Небо только если снаружи И конус смотрит вверх
-        if (coneDir.y > 0.0) {
-            float skyFraction = (1.0 - result.a) * skyAccess;
-            result.rgb += VCT_SkyColor(coneDir) * skyFraction;
-        }
+        // Небо: вклад масштабируется по проекции конуса на up-вектор,
+        // а не обрезается жёстко на dir.y > 0.
+        // Горизонтальные конусы получают ~0.5 неба вместо нуля.
+        float upDot      = max(0.0, dot(coneDir, vec3(0.0, 1.0, 0.0)));
+        float skyWeight  = smoothstep(0.0, 0.4, upDot); // плавно, не степ
+        float skyFrac    = (1.0 - result.a) * skyAccess * skyWeight;
+        result.rgb      += VCT_SkyColor(coneDir) * skyFrac;
+
+        // Минимальный ambient floor — предотвращает абсолютную черноту в пещерах.
+        // Не зависит от skyAccess: даже под землёй есть хоть что-то.
+        float floorLight = (1.0 - result.a) * 0.015;
+        float dayF2      = clamp(uSunDir.y * 4.0 + 0.2, 0.0, 1.0);
+        result.rgb      += mix(vec3(0.06, 0.08, 0.14), vec3(0.10, 0.12, 0.18), dayF2)
+                           * floorLight;
 
         irradiance += result.rgb * VCT_CONE_WEIGHTS[i];
     }
