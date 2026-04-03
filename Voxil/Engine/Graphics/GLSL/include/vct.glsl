@@ -180,45 +180,36 @@ vec3 SampleGIVCT(vec3 worldPos, vec3 normal) {
     vec3  origin  = worldPos + normal * (VCT_CELL_L0 * 0.6);
     float startT  = VCT_CELL_L0;
 
-    // Проверка — есть ли небо над нами?
-    float skyAccess = 0.0;
-    {
-        float skyCheckDist = VCT_CELL_L0 * 24.0;
-        vec3  upDir        = vec3(0.0, 1.0, 0.0);
-        float accumulated  = 0.0;
-
-        for (float t = startT; t < skyCheckDist; t += VCT_CELL_L0) {
-            vec4 s = VCT_Sample(origin + upDir * t, VCT_CELL_L0);
-            accumulated += s.a * (1.0 - accumulated);
-            if (accumulated > 0.99) break;
-        }
-
-        skyAccess = 1.0 - smoothstep(0.05, 0.85, accumulated);
-    }
+    // ВЫРЕЗАЕМ ВЕСЬ БЛОК skyAccess!
+    // Никаких вертикальных лучей-костылей. Конусы сами найдут небо.
 
     vec3 irradiance = vec3(0.0);
+    float totalOcclusion = 0.0;
 
     for (int i = 0; i < 6; i++) {
         vec3 coneDir = normalize(tbn * VCT_CONE_DIRS[i]);
         vec4 result  = VCT_TraceCone(origin, coneDir, startT, maxDist);
 
-        // Небо: вклад масштабируется по проекции конуса на up-вектор,
-        // а не обрезается жёстко на dir.y > 0.
-        // Горизонтальные конусы получают ~0.5 неба вместо нуля.
-        float upDot      = max(0.0, dot(coneDir, vec3(0.0, 1.0, 0.0)));
-        float skyWeight  = smoothstep(0.0, 0.4, upDot); // плавно, не степ
-        float skyFrac    = (1.0 - result.a) * skyAccess * skyWeight;
-        result.rgb      += VCT_SkyColor(coneDir) * skyFrac;
+        // Если конус ни во что не врезался (result.a < 1.0), значит он улетел в небо.
+        // Горизонтальные конусы теперь спокойно могут заносить свет в открытую дверь!
+        float skyFrac = 1.0 - result.a;
+        
+        // Плавное затухание неба для конусов, смотрящих сильно вниз 
+        // (чтобы пол не светился синим снизу от виртуального горизонта)
+        float upDot = dot(coneDir, vec3(0.0, 1.0, 0.0));
+        float skyWeight = smoothstep(-0.2, 0.2, upDot);
 
-        // Минимальный ambient floor — предотвращает абсолютную черноту в пещерах.
-        // Не зависит от skyAccess: даже под землёй есть хоть что-то.
-        float floorLight = (1.0 - result.a) * 0.015;
-        float dayF2      = clamp(uSunDir.y * 4.0 + 0.2, 0.0, 1.0);
-        result.rgb      += mix(vec3(0.06, 0.08, 0.14), vec3(0.10, 0.12, 0.18), dayF2)
-                           * floorLight;
+        result.rgb += VCT_SkyColor(coneDir) * skyFrac * skyWeight;
 
-        irradiance += result.rgb * VCT_CONE_WEIGHTS[i];
+        totalOcclusion += result.a * VCT_CONE_WEIGHTS[i];
+        irradiance += result.rgb * VCT_CONE_WEIGHTS[i] * 1.5;
     }
+
+    // Абсолютный минимум, чтобы избежать кромешной математической тьмы (0.0) в пещерах.
+    // Если totalOcclusion близко к 1.0, значит все конусы уперлись в стены (мы глубоко в пещере).
+    float floorLight = (1.0 - totalOcclusion) * 0.01 + 0.002;
+    float dayF2      = clamp(uSunDir.y * 4.0 + 0.2, 0.0, 1.0);
+    irradiance      += mix(vec3(0.06, 0.08, 0.14), vec3(0.10, 0.12, 0.18), dayF2) * floorLight;
 
     return irradiance;
 }
