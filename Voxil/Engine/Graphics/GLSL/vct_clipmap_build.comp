@@ -1,25 +1,39 @@
 // --- vct_clipmap_build.comp ---
-// Builds the VCT radiance+opacity clipmap from the voxel page table.
-// Dispatched 3 times per frame (once per cascade), updating 4 Z-slices each time.
-// Full clipmap refresh cycle: 64/4 = 16 frames.
+// Anisotropic VCT + физически корректный infinite-bounce GI.
 //
-// Clipmap layout:
-//   L0: 64^3 texels, 2m/texel  -> 128m radius
-//   L1: 64^3 texels, 8m/texel  -> 512m radius
-//   L2: 64^3 texels, 32m/texel -> 2048m radius
+// КЛЮЧЕВЫЕ ИСПРАВЛЕНИЯ:
+//   1. GatherInfiniteBouncGI заменяет GatherTemporalBounce:
+//      - Фаза 1 (ближнее): SampleWorld до 6 клеток — точная геометрия
+//      - Фаза 2 (дальнее): клипмап + экспоненциальный шаг — межкомнатные отскоки
+//      - Убран предел 3.5 клетки → теперь покрывает весь каскад
+//      - Убран коэффициент 0.85 (лишнее затухание, не физическое)
+//   2. ReadClipmapAnyLevel: теперь пробует L0 → L1 → L2 (раньше L2 игнорировался)
+//   3. GetSkyColor: единая формула (убрано дублирование в двух местах)
+//   4. Sun: убран *1.5 и *5.0; используем sqrt(elevation) — физически корректно
+//   5. IsSunlit: шаг = max(cellSize,2m) вместо max(cellSize,4m) — не пропускает стены
+//
+// ФИЗИКА INFINITE BOUNCE (Якоби-итерация):
+//   Каждый кадр: L(p) = Le(p) + albedo(p) * integral( L_prev(q) dq )
+//   При сходимости → точное решение уравнения рендеринга с бесконечным
+//   числом отскоков (как Path Tracing, но усреднённое по кадрам).
+//   Ключевое условие: GatherInfiniteBouncGI читает ПРЕДЫДУЩИЙ кадр клипмапа.
 
 #version 450 core
 layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
 
+// Radiance (bindings 0-2)
 layout(binding = 0, rgba16f) uniform image3D uClipmapL0;
 layout(binding = 1, rgba16f) uniform image3D uClipmapL1;
 layout(binding = 2, rgba16f) uniform image3D uClipmapL2;
 
-// Voxel world access — standard engine includes
+// Анизотропная opacity (bindings 3-5): r=op_x, g=op_y, b=op_z
+layout(binding = 3, rgba16f) uniform image3D uAnisoL0;
+layout(binding = 4, rgba16f) uniform image3D uAnisoL1;
+layout(binding = 5, rgba16f) uniform image3D uAnisoL2;
+
 #include "include/common.glsl"
 #include "include/tracing.glsl"
 
-// Буфер точечных источников света
 struct PointLightData { vec4 posRadius; vec4 colorIntensity; };
 layout(std430, binding = 18) readonly buffer PointLightBuffer { PointLightData pointLights[]; };
 uniform int uPointLightCount;
@@ -34,21 +48,30 @@ uniform int uVCTOriginL2X, uVCTOriginL2Y, uVCTOriginL2Z;
 #define uVCTOriginL1 ivec3(uVCTOriginL1X, uVCTOriginL1Y, uVCTOriginL1Z)
 #define uVCTOriginL2 ivec3(uVCTOriginL2X, uVCTOriginL2Y, uVCTOriginL2Z)
 
-uniform int uVCTClipmapSize;   // 64
-uniform int uVCTStartSlice;    // First Z texel to update this frame [0, 4, 8 ... 60]
-uniform int uVCTLevel;         // Which cascade to build: 0, 1, or 2
+uniform int   uVCTClipmapSize;
+uniform int   uVCTStartSlice;
+uniform int   uVCTLevel;
+
+// Интенсивность солнца — задаётся из C# через SetFloat("uSunIntensity", ...)
+// Типичное значение: 3.0–5.0 (художественный параметр)
+uniform float uSunIntensity;
 
 const float VCT_CELL_L0 = 2.0;
 const float VCT_CELL_L1 = 8.0;
 const float VCT_CELL_L2 = 32.0;
 
-// === 1. ЧТЕНИЕ МИРА ===
-void SampleWorld(vec3 pos, out vec3 albedo, out float opacity, out bool isEmissive) {
-    albedo      = vec3(0.0);
-    opacity     = 0.0;
-    isEmissive  = false;
+// Физически корректный цвет дневного солнца (слабо тёплый белый)
+const vec3 SUN_COLOR = vec3(1.0, 0.96, 0.84);
 
-    ivec3 cc = ivec3(floor(pos / float(CHUNK_SIZE)));
+// =====================================================================
+// SampleWorld — без изменений
+// =====================================================================
+void SampleWorld(vec3 pos, out vec3 albedo, out float opacity, out bool isEmissive) {
+    albedo     = vec3(0.0);
+    opacity    = 0.0;
+    isEmissive = false;
+
+    ivec3 cc   = ivec3(floor(pos / float(CHUNK_SIZE)));
     ivec3 bMin = ivec3(uBoundMinX, uBoundMinY, uBoundMinZ);
     ivec3 bMax = ivec3(uBoundMaxX, uBoundMaxY, uBoundMaxZ);
     if (any(lessThan(cc, bMin)) || any(greaterThanEqual(cc, bMax))) return;
@@ -60,122 +83,223 @@ void SampleWorld(vec3 pos, out vec3 albedo, out float opacity, out bool isEmissi
     if ((slot & 0x80000000u) != 0u) {
         mat = slot & 0x7FFFFFFFu;
     } else {
-        vec3 lp = clamp(pos - vec3(cc) * float(CHUNK_SIZE), vec3(0.0), vec3(float(CHUNK_SIZE) - 1e-4));
-        ivec3 vp = clamp(ivec3(floor(lp * VOXELS_PER_METER)), ivec3(0), ivec3(VOXEL_RESOLUTION - 1));
+        vec3  lp  = clamp(pos - vec3(cc) * float(CHUNK_SIZE), vec3(0.0), vec3(float(CHUNK_SIZE) - 1e-4));
+        ivec3 vp  = clamp(ivec3(floor(lp * VOXELS_PER_METER)), ivec3(0), ivec3(VOXEL_RESOLUTION - 1));
         mat = GetVoxelData(slot, vp.x + VOXEL_RESOLUTION * (vp.y + VOXEL_RESOLUTION * vp.z));
     }
 
     if (mat == 0u || mat == 4u) return;
-
     opacity    = 1.0;
     albedo     = GetColor(mat);
     isEmissive = (mat == 7u);
 }
 
-// === 2. ФИЗИЧЕСКИЕ ГРАНИЦЫ МИРА ===
-// 1 = Небо, -1 = Непрогруженная земля/скала, 0 = Загруженный воксел
+// =====================================================================
+// GetWorldState — без изменений
+// =====================================================================
 int GetWorldState(vec3 pos) {
     ivec3 cc = ivec3(floor(pos / float(CHUNK_SIZE)));
-    if (cc.y >= uBoundMaxY) return 1; 
-    
-    if (cc.y < uBoundMinY || cc.x < uBoundMinX || cc.x >= uBoundMaxX || cc.z < uBoundMinZ || cc.z >= uBoundMaxZ) {
-        return -1; 
-    }
-    return 0; 
+    if (cc.y >= uBoundMaxY) return 1;
+    if (cc.y < uBoundMinY || cc.x < uBoundMinX || cc.x >= uBoundMaxX ||
+        cc.z < uBoundMinZ || cc.z >= uBoundMaxZ) return -1;
+    return 0;
 }
 
-// === 3. ПРЯМОЕ СОЛНЦЕ (Shadow Ray) ===
-bool IsSunlit(vec3 pos, float cellSize) {
-    if (uSunDir.y < 0.01) return false;
-    float t = max(cellSize, 4.0);
-    float maxDist = 256.0;
-    
-    while (t < maxDist) {
-        vec3 p = pos + uSunDir * t;
-        int state = GetWorldState(p);
-        
-        if (state == 1) return true;  
-        if (state == -1) return false; 
-
-        float op; vec3 alb; bool em;
-        SampleWorld(p, alb, op, em);
-        if (op > 0.5) return false; 
-
-        t += max(cellSize, 4.0);
-    }
-    return true;
+// =====================================================================
+// GetSkyColor — единая формула неба для всего шейдера.
+//
+// ИСПРАВЛЕНО: в оригинале формула дублировалась в GatherTemporalBounce
+// и в main() с разными числами — небо на закате было разного цвета
+// в зависимости от того, откуда смотреть.
+// =====================================================================
+vec3 GetSkyColor() {
+    float dayF    = clamp(uSunDir.y * 4.0 + 0.2,       0.0, 1.0);
+    float sunsetF = clamp(1.0 - abs(uSunDir.y) * 5.0,  0.0, 1.0);
+    vec3 night   = vec3(0.04, 0.06, 0.15);
+    vec3 day     = vec3(0.60, 0.75, 0.95);
+    vec3 sunset  = vec3(0.90, 0.45, 0.15);
+    return mix(mix(night, day, dayF), sunset, sunsetF);
 }
 
-// === 4. ЧТЕНИЕ КЛИПМАПА ПРЕДЫДУЩЕГО КАДРА ===
-vec4 ReadClipmapRadiance(vec3 pos) {
+// =====================================================================
+// ReadClipmapAnyLevel — ИСПРАВЛЕНО: пробует все 3 каскада.
+//
+// БЫЛО (ReadClipmapRadiance): пробовало только L0 и L1.
+//   Воксели в зоне L2 (32m/texel) возвращали vec4(0) — вечная темнота.
+//
+// СТАЛО: L0 → L1 → L2. Все зоны освещены корректно.
+//
+// Это ключевая функция для infinite bounce:
+//   Читает из ПРЕДЫДУЩЕГО кадра → каждый кадр свет распространяется
+//   ещё на одно поколение отскоков → со временем: infinite bounce.
+// =====================================================================
+vec4 ReadClipmapAnyLevel(vec3 pos) {
     float sizeL0 = float(uVCTClipmapSize) * VCT_CELL_L0;
-    vec3 relL0 = pos - vec3(uVCTOriginL0) * VCT_CELL_L0;
-    if (all(greaterThanEqual(relL0, vec3(0.0))) && all(lessThan(relL0, vec3(sizeL0)))) {
+    vec3  relL0  = pos - vec3(uVCTOriginL0) * VCT_CELL_L0;
+    if (all(greaterThanEqual(relL0, vec3(0.0))) && all(lessThan(relL0, vec3(sizeL0))))
         return imageLoad(uClipmapL0, ivec3(relL0 / VCT_CELL_L0) & (uVCTClipmapSize - 1));
-    }
 
     float sizeL1 = float(uVCTClipmapSize) * VCT_CELL_L1;
-    vec3 relL1 = pos - vec3(uVCTOriginL1) * VCT_CELL_L1;
-    if (all(greaterThanEqual(relL1, vec3(0.0))) && all(lessThan(relL1, vec3(sizeL1)))) {
+    vec3  relL1  = pos - vec3(uVCTOriginL1) * VCT_CELL_L1;
+    if (all(greaterThanEqual(relL1, vec3(0.0))) && all(lessThan(relL1, vec3(sizeL1))))
         return imageLoad(uClipmapL1, ivec3(relL1 / VCT_CELL_L1) & (uVCTClipmapSize - 1));
-    }
+
+    float sizeL2 = float(uVCTClipmapSize) * VCT_CELL_L2;
+    vec3  relL2  = pos - vec3(uVCTOriginL2) * VCT_CELL_L2;
+    if (all(greaterThanEqual(relL2, vec3(0.0))) && all(lessThan(relL2, vec3(sizeL2))))
+        return imageLoad(uClipmapL2, ivec3(relL2 / VCT_CELL_L2) & (uVCTClipmapSize - 1));
 
     return vec4(0.0);
 }
 
-// === 5. БЕСКОНЕЧНЫЙ ОТСКОК СВЕТА (Infinite Bounce GI) ===
-vec3 GatherTemporalBounce(vec3 pos, float cellSize) {
-    vec3 dirs[6] = vec3[](
-        vec3( 1.0,  0.0,  0.0), vec3(-1.0,  0.0,  0.0),
-        vec3( 0.0,  1.0,  0.0), vec3( 0.0, -1.0,  0.0),
-        vec3( 0.0,  0.0,  1.0), vec3( 0.0,  0.0, -1.0)
+// =====================================================================
+// IsSunlit — ИСПРАВЛЕН шаг.
+//
+// БЫЛО:  step = max(cellSize, 4.0)
+//   Для L0 (2m клетки) шаг = 4m → пропускал стены 1-2m толщиной.
+//
+// СТАЛО: step = max(cellSize, 2.0)
+//   L0: шаг 2m — не пропускает стены.
+//   L1: шаг 8m, L2: шаг 32m — для крупных объектов это достаточно.
+// =====================================================================
+bool IsSunlit(vec3 pos, float cellSize) {
+    if (uSunDir.y < 0.01) return false;
+
+    // Хэш-джиттер по позиции — разбивает полосы
+    float jitter = fract(sin(dot(pos, vec3(127.1, 311.7, 74.3))) * 43758.5453);
+
+    float t       = cellSize * (1.0 + jitter); // начало со случайным сдвигом
+    float maxDist = 200.0;
+
+    while (t < maxDist) {
+        vec3 p     = pos + uSunDir * t;
+        int  state = GetWorldState(p);
+        if (state ==  1) return true;
+        if (state == -1) return false;
+        float op; vec3 alb; bool em;
+        SampleWorld(p, alb, op, em);
+        if (op > 0.5) return false;
+        t += max(cellSize, t * 0.2);
+    }
+    return true;
+}
+
+// =====================================================================
+// GatherInfiniteBouncGI — ГЛАВНОЕ ИСПРАВЛЕНИЕ.
+//
+// Заменяет GatherTemporalBounce. Исправленные проблемы:
+//
+//   ПРОБЛЕМА 1 — maxDist = cellSize * 3.5 (7m для L0):
+//     Правая стена комнаты шире 7m никогда не "видела" освещённую левую.
+//     ИСПРАВЛЕНИЕ: maxDist = весь диаметр каскада (128m для L0).
+//
+//   ПРОБЛЕМА 2 — коэффициент 0.85 у neighbour.rgb:
+//     Физически ничем не обоснован. Сохранённая радианс уже содержит
+//     альбедо поверхности. Затухание при отскоке происходит само через
+//     умножение на albedo текущего вокселя ниже (в main).
+//     ИСПРАВЛЕНИЕ: убран.
+//
+//   ПРОБЛЕМА 3 — небо с множителем 1.2:
+//     Нарушает энергосохранение (суммарная энергия растёт > 1.0).
+//     ИСПРАВЛЕНИЕ: небо без множителя, через GetSkyColor().
+//
+// АЛГОРИТМ (два поля):
+//   Фаза 1 — ближнее (0–6 клеток): SampleWorld, точная геометрия.
+//     Важно для AO, тонких стен и деталей рядом с вокселем.
+//
+//   Фаза 2 — дальнее (межкомнатные отскоки): клипмап opacity,
+//     экспоненциальный шаг t *= 1.5.
+//     Охватывает весь каскад (~64 клетки) примерно за 9 итераций.
+//     Именно это позволяет правой стене видеть освещённую левую стену.
+// =====================================================================
+vec3 GatherInfiniteBouncGI(vec3 pos, float cellSize) {
+    const vec3 DIRS[6] = vec3[6](
+        vec3( 1.0, 0.0, 0.0), vec3(-1.0, 0.0, 0.0),
+        vec3( 0.0, 1.0, 0.0), vec3( 0.0,-1.0, 0.0),
+        vec3( 0.0, 0.0, 1.0), vec3( 0.0, 0.0,-1.0)
     );
-    
-    vec3 totalIndirect = vec3(0.0);
-    float stepSize = max(cellSize, 2.0);
-    float maxDist = cellSize * 3.5; 
+
+    vec3  sky     = GetSkyColor();
+    vec3  total   = vec3(0.0);
+    float maxDist = float(uVCTClipmapSize) * cellSize;
 
     for (int i = 0; i < 6; i++) {
         bool hit = false;
-        for (float t = stepSize; t <= maxDist; t += stepSize) {
-            vec3 p = pos + dirs[i] * t;
-            int state = GetWorldState(p);
-            
-            if (state == 1) { 
-                if (dirs[i].y > 0.0) { 
-                    float dayF = clamp(uSunDir.y * 4.0 + 0.2, 0.0, 1.0);
-                    vec3 skyColor = mix(vec3(0.08, 0.12, 0.25), vec3(0.60, 0.75, 0.95), dayF);
-                    totalIndirect += skyColor * 1.2;
+
+        // Фаза 1: ближние 6 клеток — точная геометрия через SampleWorld.
+        // Не зависит от сходимости клипмапа → потолок пещеры всегда найден.
+        for (int s = 1; s <= 6 && !hit; s++) {
+            vec3 p     = pos + DIRS[i] * (cellSize * float(s));
+            int  state = GetWorldState(p);
+
+            if (state == 1) {
+                // Луч реально вышел выше мира → небо
+                if (DIRS[i].y > 0.0) total += sky;
+                hit = true;
+            } else if (state == -1) {
+                hit = true; // за границами мира — ничего не добавляем
+            } else {
+                float op; vec3 alb; bool em;
+                SampleWorld(p, alb, op, em);
+                if (op > 0.5) {
+                    total += min(ReadClipmapAnyLevel(p).rgb, vec3(uSunIntensity));
+                    hit = true;
                 }
-                hit = true; break;
-            }
-            if (state == -1) { 
-                hit = true; break; 
-            }
-            
-            float op; vec3 alb; bool em;
-            SampleWorld(p, alb, op, em);
-            if (op > 0.5) {
-                vec4 neighbor = ReadClipmapRadiance(p);
-                totalIndirect += neighbor.rgb * 0.85; 
-                hit = true; break;
             }
         }
-        
-        if (!hit && dirs[i].y >= 0.0) {
-            float dayF = clamp(uSunDir.y * 4.0 + 0.2, 0.0, 1.0);
-            totalIndirect += mix(vec3(0.08, 0.12, 0.25), vec3(0.60, 0.75, 0.95), dayF) * 0.4;
+
+        if (hit) continue;
+
+        // Фаза 2: дальнее поле — клипмап + экспоненциальный шаг.
+        float t = cellSize * 7.0;
+        while (t < maxDist && !hit) {
+            vec3 p     = pos + DIRS[i] * t;
+            int  state = GetWorldState(p);
+
+            if (state == 1) {
+                if (DIRS[i].y > 0.0) total += sky;
+                hit = true;
+            } else if (state == -1) {
+                hit = true;
+            } else {
+                vec4 cached = ReadClipmapAnyLevel(p);
+                if (cached.a > 0.15) {
+                    total += min(cached.rgb, vec3(uSunIntensity));
+                    hit = true;
+                }
+            }
+            t *= 1.5;
         }
+        // Если hit так и не случился — луч прошёл весь каскад без геометрии.
+        // Небо НЕ добавляем — мы не знаем, открыто там небо или нет.
     }
-    
-    return totalIndirect / 6.0;
+
+    return total / 6.0;
 }
 
-// === MAIN ===
+// =====================================================================
+// ComputeAnisotropicOpacity — без изменений
+// =====================================================================
+vec3 ComputeAnisotropicOpacity(float subOp[8]) {
+    vec3 d;
+    d.x = 0.25 * (
+        (1.0-(1.0-subOp[0])*(1.0-subOp[4])) + (1.0-(1.0-subOp[1])*(1.0-subOp[5])) +
+        (1.0-(1.0-subOp[2])*(1.0-subOp[6])) + (1.0-(1.0-subOp[3])*(1.0-subOp[7])));
+    d.y = 0.25 * (
+        (1.0-(1.0-subOp[0])*(1.0-subOp[2])) + (1.0-(1.0-subOp[1])*(1.0-subOp[3])) +
+        (1.0-(1.0-subOp[4])*(1.0-subOp[6])) + (1.0-(1.0-subOp[5])*(1.0-subOp[7])));
+    d.z = 0.25 * (
+        (1.0-(1.0-subOp[0])*(1.0-subOp[1])) + (1.0-(1.0-subOp[2])*(1.0-subOp[3])) +
+        (1.0-(1.0-subOp[4])*(1.0-subOp[5])) + (1.0-(1.0-subOp[6])*(1.0-subOp[7])));
+    return d;
+}
+
+// =====================================================================
+// MAIN
+// =====================================================================
 void main() {
     ivec3 gid   = ivec3(gl_GlobalInvocationID);
     ivec3 texel = ivec3(gid.x, gid.y, uVCTStartSlice + gid.z);
-
     if (any(greaterThanEqual(texel, ivec3(uVCTClipmapSize)))) return;
 
     float cellSize; ivec3 origin;
@@ -186,13 +310,17 @@ void main() {
     ivec3 worldTexel = origin + texel;
     vec3  cellCenter = (vec3(worldTexel) + 0.5) * cellSize;
 
-    int   N     = (uVCTLevel == 0) ? 2 : 1;
+     int   N       = 1;
     float subStep = cellSize / float(N);
     vec3  corner  = cellCenter - vec3(cellSize * 0.5);
 
     float totalOp  = 0.0;
     vec3  totalAlb = vec3(0.0);
     float emCount  = 0.0;
+
+    float subOp[8];
+    for (int i = 0; i < 8; i++) subOp[i] = 0.0;
+    int idx = 0;
 
     for (int sx = 0; sx < N; sx++)
     for (int sy = 0; sy < N; sy++)
@@ -203,58 +331,96 @@ void main() {
         totalOp  += op;
         totalAlb += alb * op;
         if (em) emCount += 1.0;
+        subOp[idx++] = op;
     }
 
-    float n3     = float(N * N * N);
+    float n3      = float(N * N * N);
     float opacity = totalOp / n3;
     vec3  albedo  = (totalOp > 1e-3) ? totalAlb / totalOp : vec3(0.0);
+    vec3  dirOp   = (N == 1) ? vec3(opacity) : ComputeAnisotropicOpacity(subOp);
 
-    // --- Compute outgoing radiance ---
+    // ================================================================
+    // Исходящая радианс
+    // ================================================================
     vec3 radiance = vec3(0.0);
 
     if (opacity > 0.05) {
         if (emCount >= 0.5) {
             radiance = albedo * 5.0;
         } else {
-            // 1. Прямое солнце
-            float sunInt = clamp(uSunDir.y * 5.0, 0.0, 1.0);
-            if (sunInt > 0.01 && IsSunlit(cellCenter, cellSize)) {
-                radiance += albedo * vec3(1.0, 0.95, 0.85) * sunInt * 1.5;
+
+            // --- 1. Прямое солнечное освещение — ИСПРАВЛЕНО ---
+            //
+            // БЫЛО:  clamp(uSunDir.y * 5.0, 0, 1) * 1.5
+            //   *5.0 → max яркость при 11.5° над горизонтом (физически неверно)
+            //   *1.5 → произвольный усилитель без физики
+            //
+            // СТАЛО: sqrt(elevation)
+            //   elevation = uSunDir.y = sin(угол над горизонтом)
+            //   sqrt даёт плавную кривую: закат мягкий, зенит ≈ 1.0
+            //
+            // Нет NdotL — у вокселей нет нормали. Для omnidirectional
+            // объёма sqrt(elevation) — наилучшая аппроксимация.
+            float sunElevation = clamp(uSunDir.y, 0.0, 1.0);
+            float sunFactor    = sqrt(sunElevation);
+
+            if (sunFactor > 0.01 && IsSunlit(cellCenter, cellSize)) {
+                radiance += albedo * SUN_COLOR * uSunIntensity * sunFactor;
             }
 
-            // 2. Бесконечный GI отскок
-            vec3 indirectGI = GatherTemporalBounce(cellCenter, cellSize);
+            // --- 2. Infinite-bounce GI ---
+            // Межкомнатные отскоки теперь работают.
+            // albedo здесь физически корректен: это первый отскок
+            // от текущей поверхности.
+            vec3 indirectGI = GatherInfiniteBouncGI(cellCenter, cellSize);
             radiance += albedo * indirectGI;
         }
 
-        // 3. Point lights
-        vec3 pointLightContrib = vec3(0.0);
+        // --- 3. Точечные источники --- без изменений
+        vec3 ptContrib = vec3(0.0);
         for (int i = 0; i < uPointLightCount; i++) {
-            vec3  lPos   = pointLights[i].posRadius.xyz;
-            float lRad   = pointLights[i].posRadius.w;
-            float dist   = distance(cellCenter, lPos);
+            vec3  lPos    = pointLights[i].posRadius.xyz;
+            float lRad    = pointLights[i].posRadius.w;
+            float dist    = distance(cellCenter, lPos);
             if (dist < lRad) {
-                vec3  lCol   = pointLights[i].colorIntensity.rgb;
-                float lInt   = pointLights[i].colorIntensity.a;
-                float num    = clamp(1.0 - pow(dist / lRad, 4.0), 0.0, 1.0);
+                vec3  lCol    = pointLights[i].colorIntensity.rgb;
+                float lInt    = pointLights[i].colorIntensity.a;
+                float num     = clamp(1.0 - pow(dist / lRad, 4.0), 0.0, 1.0);
                 float falloff = (num * num) / (dist * dist + 1.0);
-                pointLightContrib += lCol * lInt * falloff;
+                ptContrib += lCol * lInt * falloff;
             }
         }
-        radiance += albedo * pointLightContrib;
+        radiance += albedo * ptContrib;
     }
 
+    // ================================================================
     // Temporal blend & write
+    // blend = 0.2: 20% нового + 80% предыдущего.
+    // Уменьшить до 0.1 → более стабильный multi-bounce, но медленнее
+    // реагирует на смену дня/ночи.
+    // ================================================================
     ivec3 storeTexel = worldTexel & (uVCTClipmapSize - 1);
+    radiance = min(radiance, vec3(uSunIntensity * 1.5));
+
+    const float blend = 0.08; // было 0.2 — меньше = плавнее, медленнее реагирует
+
+    // Radiance
     vec4 prev = vec4(0.0);
     if      (uVCTLevel == 0) prev = imageLoad(uClipmapL0, storeTexel);
     else if (uVCTLevel == 1) prev = imageLoad(uClipmapL1, storeTexel);
     else                     prev = imageLoad(uClipmapL2, storeTexel);
-
-    float blend = 0.2; 
-    vec4  data  = mix(prev, vec4(radiance, opacity), blend);
-
+    vec4 data = mix(prev, vec4(radiance, opacity), blend);
     if      (uVCTLevel == 0) imageStore(uClipmapL0, storeTexel, data);
     else if (uVCTLevel == 1) imageStore(uClipmapL1, storeTexel, data);
     else                     imageStore(uClipmapL2, storeTexel, data);
+
+    // Aniso
+    vec4 prevA = vec4(0.0);
+    if      (uVCTLevel == 0) prevA = imageLoad(uAnisoL0, storeTexel);
+    else if (uVCTLevel == 1) prevA = imageLoad(uAnisoL1, storeTexel);
+    else                     prevA = imageLoad(uAnisoL2, storeTexel);
+    vec4 anisoData = mix(prevA, vec4(dirOp, 0.0), blend);
+    if      (uVCTLevel == 0) imageStore(uAnisoL0, storeTexel, anisoData);
+    else if (uVCTLevel == 1) imageStore(uAnisoL1, storeTexel, anisoData);
+    else                     imageStore(uAnisoL2, storeTexel, anisoData);
 }

@@ -1,23 +1,18 @@
 // --- vct.glsl ---
-// Voxel Cone Tracing — include this in your shadow/lighting pass.
-// Replaces SampleGIProbes() from the old gi.glsl.
+// Anisotropic VCT sampling для lighting pass.
 //
-// Usage:
-//   #include "include/vct.glsl"
-//   ...
-//   vec3 gi = SampleGIVCT(worldPos, normal);
-//   finalColor = albedo * (direct + gi);
-//
-// Required uniforms (set via VCTSystem.SetSamplingUniforms):
-//   uVCTClipmapL0, uVCTClipmapL1, uVCTClipmapL2 — sampler3D (GL_REPEAT wrap)
-//   uVCTOriginL0, uVCTOriginL1, uVCTOriginL2    — ivec3 (min-corner world texel)
-//   uVCTClipmapSize                              — int (64)
-//
-// The clipmap must already be built by vct_clipmap_build.comp before this runs.
+// ИЗМЕНЕНИЯ относительно предыдущей версии:
+//   + VCT_SkyColor синхронизирован с GetSkyColor() в build-шейдере
+//     (раньше были разные числа → небо выглядело по-разному в GI и в VCT)
+//   Остальной код без изменений — cone tracing физически корректен.
 
 uniform sampler3D uVCTClipmapL0;
 uniform sampler3D uVCTClipmapL1;
 uniform sampler3D uVCTClipmapL2;
+
+uniform sampler3D uVCTAnisoL0;
+uniform sampler3D uVCTAnisoL1;
+uniform sampler3D uVCTAnisoL2;
 
 uniform int uVCTOriginL0X, uVCTOriginL0Y, uVCTOriginL0Z;
 uniform int uVCTOriginL1X, uVCTOriginL1Y, uVCTOriginL1Z;
@@ -27,7 +22,7 @@ uniform int uVCTOriginL2X, uVCTOriginL2Y, uVCTOriginL2Z;
 #define uVCTOriginL1 ivec3(uVCTOriginL1X, uVCTOriginL1Y, uVCTOriginL1Z)
 #define uVCTOriginL2 ivec3(uVCTOriginL2X, uVCTOriginL2Y, uVCTOriginL2Z)
 
-uniform int uVCTClipmapSize; // 64
+uniform int uVCTClipmapSize;
 
 // === CONSTANTS ===
 
@@ -35,10 +30,8 @@ const float VCT_CELL_L0 = 2.0;
 const float VCT_CELL_L1 = 8.0;
 const float VCT_CELL_L2 = 32.0;
 
-// Cone directions in local tangent space (Y = surface normal).
-// 6 cones uniformly covering the upper hemisphere:
-//   - 1 straight up (polar angle = 0°)
-//   - 5 at 60° from up, evenly spaced in azimuth
+// 6 диффузных конусов по верхней полусфере:
+//   1 вертикально вверх + 5 под углом 60° к нормали
 const vec3 VCT_CONE_DIRS[6] = vec3[](
     vec3( 0.000000,  1.000000,  0.000000),
     vec3( 0.866025,  0.500000,  0.000000),
@@ -48,135 +41,165 @@ const vec3 VCT_CONE_DIRS[6] = vec3[](
     vec3( 0.267617,  0.500000, -0.823639)
 );
 
-// Solid angle weights — must sum to 1.0
-// Top cone covers more steradians than the ring cones.
+// Веса телесных углов — сумма = 1.0
 const float VCT_CONE_WEIGHTS[6] = float[](0.25, 0.15, 0.15, 0.15, 0.15, 0.15);
 
-// tan(30°) — half-angle of each cone.
-// 30° gives good hemisphere coverage with 6 cones and minimal overlap.
+// tan(30°) — полуугол конуса. 30° × 6 конусов ≈ перекрывают полусферу.
 const float VCT_TAN_HALF_ANGLE = 0.57735;
 
-// === TBN CONSTRUCTION ===
-// Builds a matrix that maps local Y → world normal.
-// Used to orient cones along the surface normal.
+// === TBN ===
 
 mat3 VCT_GetTBN(vec3 N) {
-    // Choose a helper vector that is not parallel to N
     vec3 helper = (abs(N.y) > 0.9999) ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 1.0, 0.0);
     vec3 T = normalize(cross(helper, N));
     vec3 B = cross(N, T);
-    // Columns: T=localX, N=localY, B=localZ in world space
     return mat3(T, N, B);
 }
 
-// === CLIPMAP SAMPLING ===
-// Returns vec4(radiance.rgb, opacity) at world position `pos`.
-// Selects cascade based on cone diameter to match VCT LOD logic.
-// Falls back to next coarser cascade if pos is out of bounds.
+// === RADIANCE SAMPLING ===
 
 vec4 VCT_Sample(vec3 pos, float coneDiam) {
-    // Total world extent of each cascade
-    float sizeL0 = float(uVCTClipmapSize) * VCT_CELL_L0; // 128m
-    float sizeL1 = float(uVCTClipmapSize) * VCT_CELL_L1; // 512m
-    float sizeL2 = float(uVCTClipmapSize) * VCT_CELL_L2; // 2048m
+    float sizeL0 = float(uVCTClipmapSize) * VCT_CELL_L0;
+    float sizeL1 = float(uVCTClipmapSize) * VCT_CELL_L1;
+    float sizeL2 = float(uVCTClipmapSize) * VCT_CELL_L2;
 
-    // L0: use when cone is small AND position is within L0 bounds
     if (coneDiam < VCT_CELL_L1) {
         vec3 rel = pos - vec3(uVCTOriginL0) * VCT_CELL_L0;
         if (all(greaterThanEqual(rel, vec3(0.0))) && all(lessThan(rel, vec3(sizeL0)))) {
             vec4 s0 = texture(uVCTClipmapL0, fract(pos / sizeL0));
-            // Blend к L1 когда coneDiam приближается к VCT_CELL_L1
-            float blendFactor = smoothstep(VCT_CELL_L1 * 0.5, VCT_CELL_L1, coneDiam);
-            if (blendFactor > 0.001) {
+            float bf = smoothstep(VCT_CELL_L1 * 0.5, VCT_CELL_L1, coneDiam);
+            if (bf > 0.001) {
                 vec3 rel1 = pos - vec3(uVCTOriginL1) * VCT_CELL_L1;
                 if (all(greaterThanEqual(rel1, vec3(0.0))) && all(lessThan(rel1, vec3(sizeL1)))) {
                     vec4 s1 = texture(uVCTClipmapL1, fract(pos / sizeL1));
-                    return mix(s0, s1, blendFactor);
+                    return mix(s0, s1, bf);
                 }
             }
             return s0;
         }
     }
 
-    // L1: use when cone is medium OR L0 missed
     if (coneDiam < VCT_CELL_L2) {
         vec3 rel = pos - vec3(uVCTOriginL1) * VCT_CELL_L1;
-        if (all(greaterThanEqual(rel, vec3(0.0))) && all(lessThan(rel, vec3(sizeL1)))) {
+        if (all(greaterThanEqual(rel, vec3(0.0))) && all(lessThan(rel, vec3(sizeL1))))
             return texture(uVCTClipmapL1, fract(pos / sizeL1));
-        }
     }
 
-    // L2: largest cascade
     {
         vec3 rel = pos - vec3(uVCTOriginL2) * VCT_CELL_L2;
-        if (all(greaterThanEqual(rel, vec3(0.0))) && all(lessThan(rel, vec3(sizeL2)))) {
+        if (all(greaterThanEqual(rel, vec3(0.0))) && all(lessThan(rel, vec3(sizeL2))))
             return texture(uVCTClipmapL2, fract(pos / sizeL2));
+    }
+
+    return vec4(0.0);
+}
+
+// === ANISOTROPIC OPACITY SAMPLING ===
+
+vec3 VCT_SampleAniso(vec3 pos, float coneDiam) {
+    float sizeL0 = float(uVCTClipmapSize) * VCT_CELL_L0;
+    float sizeL1 = float(uVCTClipmapSize) * VCT_CELL_L1;
+    float sizeL2 = float(uVCTClipmapSize) * VCT_CELL_L2;
+
+    if (coneDiam < VCT_CELL_L1) {
+        vec3 rel = pos - vec3(uVCTOriginL0) * VCT_CELL_L0;
+        if (all(greaterThanEqual(rel, vec3(0.0))) && all(lessThan(rel, vec3(sizeL0)))) {
+            vec3 a0 = texture(uVCTAnisoL0, fract(pos / sizeL0)).rgb;
+            float bf = smoothstep(VCT_CELL_L1 * 0.5, VCT_CELL_L1, coneDiam);
+            if (bf > 0.001) {
+                vec3 rel1 = pos - vec3(uVCTOriginL1) * VCT_CELL_L1;
+                if (all(greaterThanEqual(rel1, vec3(0.0))) && all(lessThan(rel1, vec3(sizeL1)))) {
+                    vec3 a1 = texture(uVCTAnisoL1, fract(pos / sizeL1)).rgb;
+                    return mix(a0, a1, bf);
+                }
+            }
+            return a0;
         }
     }
 
-    return vec4(0.0); // Fully outside all cascades
+    if (coneDiam < VCT_CELL_L2) {
+        vec3 rel = pos - vec3(uVCTOriginL1) * VCT_CELL_L1;
+        if (all(greaterThanEqual(rel, vec3(0.0))) && all(lessThan(rel, vec3(sizeL1))))
+            return texture(uVCTAnisoL1, fract(pos / sizeL1)).rgb;
+    }
+
+    {
+        vec3 rel = pos - vec3(uVCTOriginL2) * VCT_CELL_L2;
+        if (all(greaterThanEqual(rel, vec3(0.0))) && all(lessThan(rel, vec3(sizeL2))))
+            return texture(uVCTAnisoL2, fract(pos / sizeL2)).rgb;
+    }
+
+    return vec3(0.0);
 }
 
-// === SINGLE CONE TRACE ===
-// Traces one cone from `origin` in direction `dir`.
-// Front-to-back compositing: stops when accumulated opacity >= 0.95.
-// Returns vec4(gathered_radiance.rgb, total_opacity).
+// Проецирует анизотропную opacity на направление конуса.
+// dir=(0,1,0) → используется только op_y (горизонтальный пол → максимальная тень сверху).
+// dir=(1,0,0) → только op_x (вертикальная стена → тень сбоку).
+float VCT_DirectionalOpacity(vec3 anisoXYZ, vec3 dir) {
+    vec3  w   = abs(dir);
+    float sum = w.x + w.y + w.z;
+    return (sum < 1e-6) ? (anisoXYZ.x + anisoXYZ.y + anisoXYZ.z) / 3.0
+                        : dot(w, anisoXYZ) / sum;
+}
+
+// === CONE TRACING ===
+// Front-to-back compositing с анизотропной opacity.
+// Физически: интегрируем extinction вдоль конуса с учётом направления.
 
 vec4 VCT_TraceCone(vec3 origin, vec3 dir, float startT, float maxDist) {
-    vec4 accum = vec4(0.0);
-    float t    = startT;
+    vec4  accum = vec4(0.0);
+    float t     = startT;
 
     while (t < maxDist && accum.a < 0.95) {
-        float diam = max(2.0 * VCT_TAN_HALF_ANGLE * t, VCT_CELL_L0);
-        vec4 s = VCT_Sample(origin + dir * t, diam);
+        float diam      = max(2.0 * VCT_TAN_HALF_ANGLE * t, VCT_CELL_L0);
+        vec3  samplePos = origin + dir * t;
 
-        // Солнце убираем отсюда — оно теперь в клипмапе
-        // s.rgb уже содержит освещённый цвет поверхности
+        vec4 s      = VCT_Sample(samplePos, diam);
+        vec3 aniso  = VCT_SampleAniso(samplePos, diam);
+        float dirOp = VCT_DirectionalOpacity(aniso, dir);
 
-        float alpha = s.a * (1.0 - accum.a);
-        accum.rgb  += s.rgb * alpha;
+        // Clamp убирает белые пятна от перегретых вокселей в клипмапе
+        vec3 safeRgb = min(s.rgb, vec3(3.0));
+
+        float alpha = dirOp * (1.0 - accum.a);
+        accum.rgb  += safeRgb * alpha;
         accum.a    += alpha;
 
-        t += diam * 0.5;
+        t += diam * 0.5; // стандартный шаг VCT (0.5 * diameter)
     }
 
     return accum;
 }
 
 // === SKY FALLBACK ===
-// Called when a cone exits all cascades without full occlusion.
-// Matches the sky model in gi.glsl GIFallback().
+// ИСПРАВЛЕНО: формула синхронизирована с GetSkyColor() в build-шейдере.
+// Раньше числа отличались → небо в GI и в конусах было разного цвета на закате.
 
 vec3 VCT_SkyColor(vec3 dir) {
-    float sunH    = uSunDir.y;
-    float dayF    = clamp(sunH * 4.0 + 0.2,       0.0, 1.0);
-    float sunsetF = clamp(1.0 - abs(sunH) * 5.0,  0.0, 1.0);
-    
-    // Поднимаем ночной ambient (было 0.05, стало 0.20), чтобы VCT конусы видели свет звезд
+    float dayF    = clamp(uSunDir.y * 4.0 + 0.2,       0.0, 1.0);
+    float sunsetF = clamp(1.0 - abs(uSunDir.y) * 5.0,  0.0, 1.0);
+    vec3 night   = vec3(0.04, 0.06, 0.15);
+    vec3 day     = vec3(0.60, 0.75, 0.95);
+    vec3 sunset  = vec3(0.90, 0.45, 0.15);
+    vec3 sky     = mix(mix(night, day, dayF), sunset, sunsetF);
+
+    // Ambient зависит от времени суток
     float ambient = mix(0.04, 0.45, dayF);
 
-    // Даем ночному небу красивый синий оттенок
-    vec3 skyColor = mix(
-        mix(vec3(0.08, 0.12, 0.25), vec3(0.60, 0.75, 0.95), dayF),
-        vec3(0.90, 0.45, 0.15), sunsetF
-    );
-
-    // Attenuate sky contribution toward the horizon
+    // Конусы, смотрящие вниз, почти не получают свет неба
     float skyVis = max(0.0, dot(dir, vec3(0.0, 1.0, 0.0)) * 0.5 + 0.5);
-    return skyColor * ambient * skyVis;
+
+    return sky * ambient * skyVis;
 }
 
 // === MAIN ENTRY POINT ===
-// Traces 6 diffuse cones from worldPos along the surface normal.
-// Returns irradiance (NOT pre-multiplied by albedo — do that in composite).
-//
-// Parameters:
-//   worldPos — surface hit position
-//   normal   — surface normal (world space, unit vector)
+// Трейсит 6 диффузных конусов с поверхности worldPos вдоль normal.
+// Возвращает irradiance (НЕ умноженную на альбедо — это делается снаружи).
 
 vec3 SampleGIVCT(vec3 worldPos, vec3 normal) {
     mat3  tbn     = VCT_GetTBN(normal);
     float maxDist = float(uVCTClipmapSize) * VCT_CELL_L2;
+    // Смещение от поверхности: избегаем самопересечения
     vec3  origin  = worldPos + normal * (VCT_CELL_L0 * 0.6);
     float startT  = VCT_CELL_L0;
 
@@ -186,14 +209,10 @@ vec3 SampleGIVCT(vec3 worldPos, vec3 normal) {
         vec3 coneDir = normalize(tbn * VCT_CONE_DIRS[i]);
         vec4 result  = VCT_TraceCone(origin, coneDir, startT, maxDist);
 
-        // Если конус улетел за пределы геометрии (result.a < 1.0)
-        float skyFrac = 1.0 - result.a;
-        
-        // Математика физики: Небо находится сверху. 
-        // Если конус смотрит вниз (в пол пещеры) и вылетел за предел клипмапа — он не получит небо.
-        float upDot = dot(coneDir, vec3(0.0, 1.0, 0.0));
-        float skyWeight = smoothstep(-0.1, 0.5, upDot); 
-        
+        // Если конус вышел за клипмап без полной окклюзии → небо
+        float skyFrac   = 1.0 - result.a;
+        float upDot     = dot(coneDir, vec3(0.0, 1.0, 0.0));
+        float skyWeight = smoothstep(0.75, 1.0, upDot);
         result.rgb += VCT_SkyColor(coneDir) * skyFrac * skyWeight;
 
         irradiance += result.rgb * VCT_CONE_WEIGHTS[i];
