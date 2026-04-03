@@ -7,9 +7,6 @@
 //   L0: 64^3 texels, 2m/texel  -> 128m radius
 //   L1: 64^3 texels, 8m/texel  -> 512m radius
 //   L2: 64^3 texels, 32m/texel -> 2048m radius
-//
-// Each texel stores: rgb = outgoing radiance, a = opacity [0..1]
-// Toroidal (scrolling) addressing: storageTexel = worldTexel & 63
 
 #version 450 core
 layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
@@ -29,8 +26,6 @@ uniform int uPointLightCount;
 
 // === UNIFORMS ===
 
-// World texel coordinate of the minimum corner of each clipmap
-// Computed as: floor(camPos / cellSize) - CLIPMAP_SIZE/2
 uniform int uVCTOriginL0X, uVCTOriginL0Y, uVCTOriginL0Z;
 uniform int uVCTOriginL1X, uVCTOriginL1Y, uVCTOriginL1Z;
 uniform int uVCTOriginL2X, uVCTOriginL2Y, uVCTOriginL2Z;
@@ -43,15 +38,11 @@ uniform int uVCTClipmapSize;   // 64
 uniform int uVCTStartSlice;    // First Z texel to update this frame [0, 4, 8 ... 60]
 uniform int uVCTLevel;         // Which cascade to build: 0, 1, or 2
 
-// Cell sizes (world units per texel)
 const float VCT_CELL_L0 = 2.0;
 const float VCT_CELL_L1 = 8.0;
 const float VCT_CELL_L2 = 32.0;
 
-// === WORLD SAMPLING ===
-
-// Reads voxel material at a world position.
-// Returns opacity=0 for air/water, opacity=1 for solid voxels.
+// === 1. ЧТЕНИЕ МИРА ===
 void SampleWorld(vec3 pos, out vec3 albedo, out float opacity, out bool isEmissive) {
     albedo      = vec3(0.0);
     opacity     = 0.0;
@@ -67,93 +58,134 @@ void SampleWorld(vec3 pos, out vec3 albedo, out float opacity, out bool isEmissi
 
     uint mat;
     if ((slot & 0x80000000u) != 0u) {
-        // Uniform solid chunk — entire chunk is one material
         mat = slot & 0x7FFFFFFFu;
     } else {
-        // Per-voxel data
         vec3 lp = clamp(pos - vec3(cc) * float(CHUNK_SIZE), vec3(0.0), vec3(float(CHUNK_SIZE) - 1e-4));
         ivec3 vp = clamp(ivec3(floor(lp * VOXELS_PER_METER)), ivec3(0), ivec3(VOXEL_RESOLUTION - 1));
         mat = GetVoxelData(slot, vp.x + VOXEL_RESOLUTION * (vp.y + VOXEL_RESOLUTION * vp.z));
     }
 
-    // Air (0) and water (4) are transparent
     if (mat == 0u || mat == 4u) return;
 
     opacity    = 1.0;
     albedo     = GetColor(mat);
-    isEmissive = (mat == 7u); // Glow block
+    isEmissive = (mat == 7u);
 }
 
-// Quick directional visibility check toward the sun.
-// Traces cellSize*1.5 steps — coarse but free of ray budget concerns.
+// === 2. ФИЗИЧЕСКИЕ ГРАНИЦЫ МИРА ===
+// 1 = Небо, -1 = Непрогруженная земля/скала, 0 = Загруженный воксел
+int GetWorldState(vec3 pos) {
+    ivec3 cc = ivec3(floor(pos / float(CHUNK_SIZE)));
+    if (cc.y >= uBoundMaxY) return 1; 
+    
+    if (cc.y < uBoundMinY || cc.x < uBoundMinX || cc.x >= uBoundMaxX || cc.z < uBoundMinZ || cc.z >= uBoundMaxZ) {
+        return -1; 
+    }
+    return 0; 
+}
+
+// === 3. ПРЯМОЕ СОЛНЦЕ (Shadow Ray) ===
 bool IsSunlit(vec3 pos, float cellSize) {
     if (uSunDir.y < 0.01) return false;
-    float stepSize = cellSize; // без * 1.5 — плотнее сетка
-    for (int i = 1; i <= 16; i++) {
+    float t = max(cellSize, 4.0);
+    float maxDist = 256.0;
+    
+    while (t < maxDist) {
+        vec3 p = pos + uSunDir * t;
+        int state = GetWorldState(p);
+        
+        if (state == 1) return true;  
+        if (state == -1) return false; 
+
         float op; vec3 alb; bool em;
-        SampleWorld(pos + uSunDir * (stepSize * float(i)), alb, op, em);
-        if (op > 0.5) return false;
+        SampleWorld(p, alb, op, em);
+        if (op > 0.5) return false; 
+
+        t += max(cellSize, 4.0);
     }
     return true;
 }
 
-// Физически корректный расчет видимости неба (Hemisphere Sampling).
-// Мы бросаем 5 лучей в верхнюю полусферу (зенит и 4 по диагонали).
-// Это заменяет "костыли" и работает как настоящий Path Tracing.
-float GetPhysicalSkyExposure(vec3 pos) {
-    vec3 dirs[5] = vec3[](
-        vec3(0.0, 1.0, 0.0),                  // Прямо вверх
-        normalize(vec3( 1.0, 0.5,  0.0)),     // Под углом в стороны (ищет окна/двери)
-        normalize(vec3(-1.0, 0.5,  0.0)),
-        normalize(vec3( 0.0, 0.5,  1.0)),
-        normalize(vec3( 0.0, 0.5, -1.0))
+// === 4. ЧТЕНИЕ КЛИПМАПА ПРЕДЫДУЩЕГО КАДРА ===
+vec4 ReadClipmapRadiance(vec3 pos) {
+    float sizeL0 = float(uVCTClipmapSize) * VCT_CELL_L0;
+    vec3 relL0 = pos - vec3(uVCTOriginL0) * VCT_CELL_L0;
+    if (all(greaterThanEqual(relL0, vec3(0.0))) && all(lessThan(relL0, vec3(sizeL0)))) {
+        return imageLoad(uClipmapL0, ivec3(relL0 / VCT_CELL_L0) & (uVCTClipmapSize - 1));
+    }
+
+    float sizeL1 = float(uVCTClipmapSize) * VCT_CELL_L1;
+    vec3 relL1 = pos - vec3(uVCTOriginL1) * VCT_CELL_L1;
+    if (all(greaterThanEqual(relL1, vec3(0.0))) && all(lessThan(relL1, vec3(sizeL1)))) {
+        return imageLoad(uClipmapL1, ivec3(relL1 / VCT_CELL_L1) & (uVCTClipmapSize - 1));
+    }
+
+    return vec4(0.0);
+}
+
+// === 5. БЕСКОНЕЧНЫЙ ОТСКОК СВЕТА (Infinite Bounce GI) ===
+vec3 GatherTemporalBounce(vec3 pos, float cellSize) {
+    vec3 dirs[6] = vec3[](
+        vec3( 1.0,  0.0,  0.0), vec3(-1.0,  0.0,  0.0),
+        vec3( 0.0,  1.0,  0.0), vec3( 0.0, -1.0,  0.0),
+        vec3( 0.0,  0.0,  1.0), vec3( 0.0,  0.0, -1.0)
     );
+    
+    vec3 totalIndirect = vec3(0.0);
+    float stepSize = max(cellSize, 2.0);
+    float maxDist = cellSize * 3.5; 
 
-    float exposure = 0.0;
-    float stepSize = 4.0;
-    int maxSteps = 12; // 4m * 12 = 48 метров дистанции проверки
-
-    for (int d = 0; d < 5; d++) {
+    for (int i = 0; i < 6; i++) {
         bool hit = false;
-        for (int i = 1; i <= maxSteps; i++) {
+        for (float t = stepSize; t <= maxDist; t += stepSize) {
+            vec3 p = pos + dirs[i] * t;
+            int state = GetWorldState(p);
+            
+            if (state == 1) { 
+                if (dirs[i].y > 0.0) { 
+                    float dayF = clamp(uSunDir.y * 4.0 + 0.2, 0.0, 1.0);
+                    vec3 skyColor = mix(vec3(0.08, 0.12, 0.25), vec3(0.60, 0.75, 0.95), dayF);
+                    totalIndirect += skyColor * 1.2;
+                }
+                hit = true; break;
+            }
+            if (state == -1) { 
+                hit = true; break; 
+            }
+            
             float op; vec3 alb; bool em;
-            // Проверяем мир через уже существующий PageTable
-            SampleWorld(pos + dirs[d] * (stepSize * float(i)), alb, op, em);
+            SampleWorld(p, alb, op, em);
             if (op > 0.5) {
-                hit = true; // Луч врезался в скалу/потолок
-                break;
+                vec4 neighbor = ReadClipmapRadiance(p);
+                totalIndirect += neighbor.rgb * 0.85; 
+                hit = true; break;
             }
         }
-        // Если луч вылетел на улицу, этот воксель получает часть света неба
-        if (!hit) exposure += 0.2; // 1.0 / 5 лучей = 0.2
+        
+        if (!hit && dirs[i].y >= 0.0) {
+            float dayF = clamp(uSunDir.y * 4.0 + 0.2, 0.0, 1.0);
+            totalIndirect += mix(vec3(0.08, 0.12, 0.25), vec3(0.60, 0.75, 0.95), dayF) * 0.4;
+        }
     }
-    return exposure;
+    
+    return totalIndirect / 6.0;
 }
 
 // === MAIN ===
-
 void main() {
-    // Each invocation updates one texel.
-    // uVCTStartSlice offsets the Z so we only update 4 slices this frame.
     ivec3 gid   = ivec3(gl_GlobalInvocationID);
     ivec3 texel = ivec3(gid.x, gid.y, uVCTStartSlice + gid.z);
 
     if (any(greaterThanEqual(texel, ivec3(uVCTClipmapSize)))) return;
 
-    // --- Choose cascade parameters ---
-    float cellSize;
-    ivec3 origin;
+    float cellSize; ivec3 origin;
     if      (uVCTLevel == 0) { cellSize = VCT_CELL_L0; origin = uVCTOriginL0; }
     else if (uVCTLevel == 1) { cellSize = VCT_CELL_L1; origin = uVCTOriginL1; }
     else                     { cellSize = VCT_CELL_L2; origin = uVCTOriginL2; }
 
-    // World position of this texel's cell center
     ivec3 worldTexel = origin + texel;
     vec3  cellCenter = (vec3(worldTexel) + 0.5) * cellSize;
 
-    // --- Sample voxel occupancy ---
-    // L0 uses 2x2x2 stratified sub-samples for smoother transitions.
-    // L1/L2 use a single center sample (cell is large enough).
     int   N     = (uVCTLevel == 0) ? 2 : 1;
     float subStep = cellSize / float(N);
     vec3  corner  = cellCenter - vec3(cellSize * 0.5);
@@ -177,67 +209,49 @@ void main() {
     float opacity = totalOp / n3;
     vec3  albedo  = (totalOp > 1e-3) ? totalAlb / totalOp : vec3(0.0);
 
-// --- Compute outgoing radiance ---
+    // --- Compute outgoing radiance ---
     vec3 radiance = vec3(0.0);
 
     if (opacity > 0.05) {
         if (emCount >= 0.5) {
-            radiance = albedo * 5.0; // Светящиеся блоки
+            radiance = albedo * 5.0;
         } else {
-            float sunH = uSunDir.y;
-
-            // === 1. Прямое солнце ===
-            float sunInt = clamp(sunH * 5.0, 0.0, 1.0);
+            // 1. Прямое солнце
+            float sunInt = clamp(uSunDir.y * 5.0, 0.0, 1.0);
             if (sunInt > 0.01 && IsSunlit(cellCenter, cellSize)) {
                 radiance += albedo * vec3(1.0, 0.95, 0.85) * sunInt * 1.5;
             }
 
-            // === 2. Честный свет неба (Ambient Bounce) ===
-            // Воксель сам осматривается. В пещере это даст 0.0. У окна даст 0.2 - 0.4. На улице 1.0.
-            float skyExposure = GetPhysicalSkyExposure(cellCenter);
-            
-            if (skyExposure > 0.01) {
-                float dayF   = clamp(sunH * 4.0 + 0.2, 0.0, 1.0);
-                float sunsetF = clamp(1.0 - abs(sunH) * 5.0, 0.0, 1.0);
-                vec3 skyDay    = vec3(0.60, 0.75, 0.95);
-                vec3 skySunset = vec3(0.90, 0.45, 0.15);
-                vec3 skyNight  = vec3(0.08, 0.12, 0.25);
-                vec3 skyColor  = mix(mix(skyNight, skyDay, dayF), skySunset, sunsetF);
+            // 2. Бесконечный GI отскок
+            vec3 indirectGI = GatherTemporalBounce(cellCenter, cellSize);
+            radiance += albedo * indirectGI;
+        }
 
-                float ambientIntensity = mix(0.04, 0.45, dayF);
-                radiance += albedo * skyColor * ambientIntensity * skyExposure;
+        // 3. Point lights
+        vec3 pointLightContrib = vec3(0.0);
+        for (int i = 0; i < uPointLightCount; i++) {
+            vec3  lPos   = pointLights[i].posRadius.xyz;
+            float lRad   = pointLights[i].posRadius.w;
+            float dist   = distance(cellCenter, lPos);
+            if (dist < lRad) {
+                vec3  lCol   = pointLights[i].colorIntensity.rgb;
+                float lInt   = pointLights[i].colorIntensity.a;
+                float num    = clamp(1.0 - pow(dist / lRad, 4.0), 0.0, 1.0);
+                float falloff = (num * num) / (dist * dist + 1.0);
+                pointLightContrib += lCol * lInt * falloff;
             }
         }
-
-        // === 3. Point lights ===
-    vec3 pointLightContrib = vec3(0.0);
-    for (int i = 0; i < uPointLightCount; i++) {
-        vec3  lPos   = pointLights[i].posRadius.xyz;
-        float lRad   = pointLights[i].posRadius.w;
-        float dist   = distance(cellCenter, lPos);
-        if (dist < lRad) {
-            vec3  lCol   = pointLights[i].colorIntensity.rgb;
-            float lInt   = pointLights[i].colorIntensity.a;
-            float num    = clamp(1.0 - pow(dist / lRad, 4.0), 0.0, 1.0);
-            float falloff = (num * num) / (dist * dist + 1.0);
-            pointLightContrib += lCol * lInt * falloff;
-        }
+        radiance += albedo * pointLightContrib;
     }
-    radiance += albedo * pointLightContrib;
-}
 
-    // --- Write to clipmap с temporal blending ---
+    // Temporal blend & write
     ivec3 storeTexel = worldTexel & (uVCTClipmapSize - 1);
-
-    // Читаем своё предыдущее значение (не соседей — data hazard нет)
     vec4 prev = vec4(0.0);
     if      (uVCTLevel == 0) prev = imageLoad(uClipmapL0, storeTexel);
     else if (uVCTLevel == 1) prev = imageLoad(uClipmapL1, storeTexel);
     else                     prev = imageLoad(uClipmapL2, storeTexel);
 
-    // Экспоненциальное скользящее среднее: blend=0.1 → ~10 кадров до нового значения
-    // Солнце меняется медленно — рывков не будет
-    float blend = 0.15;
+    float blend = 0.2; 
     vec4  data  = mix(prev, vec4(radiance, opacity), blend);
 
     if      (uVCTLevel == 0) imageStore(uClipmapL0, storeTexel, data);

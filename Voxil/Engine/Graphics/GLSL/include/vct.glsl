@@ -180,36 +180,24 @@ vec3 SampleGIVCT(vec3 worldPos, vec3 normal) {
     vec3  origin  = worldPos + normal * (VCT_CELL_L0 * 0.6);
     float startT  = VCT_CELL_L0;
 
-    // ВЫРЕЗАЕМ ВЕСЬ БЛОК skyAccess!
-    // Никаких вертикальных лучей-костылей. Конусы сами найдут небо.
-
     vec3 irradiance = vec3(0.0);
-    float totalOcclusion = 0.0;
 
     for (int i = 0; i < 6; i++) {
         vec3 coneDir = normalize(tbn * VCT_CONE_DIRS[i]);
         vec4 result  = VCT_TraceCone(origin, coneDir, startT, maxDist);
 
-        // Если конус ни во что не врезался (result.a < 1.0), значит он улетел в небо.
-        // Горизонтальные конусы теперь спокойно могут заносить свет в открытую дверь!
+        // Если конус улетел за пределы геометрии (result.a < 1.0)
         float skyFrac = 1.0 - result.a;
         
-        // Плавное затухание неба для конусов, смотрящих сильно вниз 
-        // (чтобы пол не светился синим снизу от виртуального горизонта)
+        // Математика физики: Небо находится сверху. 
+        // Если конус смотрит вниз (в пол пещеры) и вылетел за предел клипмапа — он не получит небо.
         float upDot = dot(coneDir, vec3(0.0, 1.0, 0.0));
-        float skyWeight = smoothstep(-0.2, 0.2, upDot);
-
+        float skyWeight = smoothstep(-0.1, 0.5, upDot); 
+        
         result.rgb += VCT_SkyColor(coneDir) * skyFrac * skyWeight;
 
-        totalOcclusion += result.a * VCT_CONE_WEIGHTS[i];
-        irradiance += result.rgb * VCT_CONE_WEIGHTS[i] * 1.5;
+        irradiance += result.rgb * VCT_CONE_WEIGHTS[i];
     }
-
-    // Абсолютный минимум, чтобы избежать кромешной математической тьмы (0.0) в пещерах.
-    // Если totalOcclusion близко к 1.0, значит все конусы уперлись в стены (мы глубоко в пещере).
-    float floorLight = (1.0 - totalOcclusion) * 0.01 + 0.002;
-    float dayF2      = clamp(uSunDir.y * 4.0 + 0.2, 0.0, 1.0);
-    irradiance      += mix(vec3(0.06, 0.08, 0.14), vec3(0.10, 0.12, 0.18), dayF2) * floorLight;
 
     return irradiance;
 }
