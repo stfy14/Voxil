@@ -113,11 +113,11 @@ public class VCTSystem : IDisposable
     private void BindImageUnits()
     {
         GL.BindImageTexture(0, ClipmapL0, 0, true, 0,
-            TextureAccess.WriteOnly, SizedInternalFormat.Rgba16f);
+            TextureAccess.ReadWrite, SizedInternalFormat.Rgba16f); // было WriteOnly
         GL.BindImageTexture(1, ClipmapL1, 0, true, 0,
-            TextureAccess.WriteOnly, SizedInternalFormat.Rgba16f);
+            TextureAccess.ReadWrite, SizedInternalFormat.Rgba16f);
         GL.BindImageTexture(2, ClipmapL2, 0, true, 0,
-            TextureAccess.WriteOnly, SizedInternalFormat.Rgba16f);
+            TextureAccess.ReadWrite, SizedInternalFormat.Rgba16f);
     }
 
     // =====================================================================

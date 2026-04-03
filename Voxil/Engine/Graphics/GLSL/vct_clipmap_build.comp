@@ -149,65 +149,44 @@ void main() {
 
     if (opacity > 0.05) {
         if (emCount >= 0.5) {
-            // Самосветящиеся блоки
             radiance = albedo * 5.0;
         } else {
-            // Прямой свет от солнца
+            // Солнце ВОЗВРАЩАЕМ в клипмап — без него нет bounce GI
             float sunInt = clamp(uSunDir.y * 5.0, 0.0, 1.0);
             if (sunInt > 0.01 && IsSunlit(cellCenter, cellSize)) {
                 radiance = albedo * vec3(1.0, 0.95, 0.85) * sunInt * 1.5;
             }
         }
 
-        // ВНИМАНИЕ: Мы УДАЛИЛИ фейковый skyAmb! Теперь под землей нет магии.
-
-        // ==========================================
-        // 1. ФИЗИЧЕСКИ КОРРЕКТНЫЕ POINT LIGHTS
-        // ==========================================
         vec3 pointLightContrib = vec3(0.0);
-        for(int i = 0; i < uPointLightCount; i++) {
-            vec3 lPos = pointLights[i].posRadius.xyz;
-            float lRad = pointLights[i].posRadius.w;
-            float dist = distance(cellCenter, lPos);
-            
-            if(dist < lRad) {
-                vec3 lCol = pointLights[i].colorIntensity.rgb;
-                float lInt = pointLights[i].colorIntensity.a;
-                
-                // Физически-корректное затухание (Inverse Square Falloff с плавным краем)
-                float num = clamp(1.0 - pow(dist / lRad, 4.0), 0.0, 1.0);
+        for (int i = 0; i < uPointLightCount; i++) {
+            vec3  lPos  = pointLights[i].posRadius.xyz;
+            float lRad  = pointLights[i].posRadius.w;
+            float dist  = distance(cellCenter, lPos);
+            if (dist < lRad) {
+                vec3  lCol  = pointLights[i].colorIntensity.rgb;
+                float lInt  = pointLights[i].colorIntensity.a;
+                float num   = clamp(1.0 - pow(dist / lRad, 4.0), 0.0, 1.0);
                 float falloff = (num * num) / (dist * dist + 1.0);
-                
                 pointLightContrib += lCol * lInt * falloff;
             }
         }
         radiance += albedo * pointLightContrib;
-
-        // ==========================================
-        // 2. МНОГОКРАТНОЕ ОТРАЖЕНИЕ (Energy Conserving LPV)
-        // ==========================================
-        vec3 bounce = vec3(0.0);
-        ivec3 offsets[6] = ivec3[](
-            ivec3(1,0,0), ivec3(-1,0,0), ivec3(0,1,0), 
-            ivec3(0,-1,0), ivec3(0,0,1), ivec3(0,0,-1)
-        );
-        
-        for(int i = 0; i < 6; i++) {
-            ivec3 nTexel = (worldTexel + offsets[i]) & (uVCTClipmapSize - 1);
-            if (uVCTLevel == 0) bounce += imageLoad(uClipmapL0, nTexel).rgb;
-            else if (uVCTLevel == 1) bounce += imageLoad(uClipmapL1, nTexel).rgb;
-            else bounce += imageLoad(uClipmapL2, nTexel).rgb;
-        }
-        
-        // Усредняем 6 соседей (делим на 6) и применяем коэффициент отражения (0.6).
-        // Так как коэффициент < 1.0, свет будет плавно затухать, не нарушая физику.
-        radiance += albedo * (bounce / 6.0) * 0.6;
     }
 
-    // --- Write to clipmap (toroidal) ---
-    // Because CLIPMAP_SIZE is a power of 2 (64), bitwise AND gives correct positive modulo.
+    // --- Write to clipmap с temporal blending ---
     ivec3 storeTexel = worldTexel & (uVCTClipmapSize - 1);
-    vec4  data       = vec4(radiance, opacity);
+
+    // Читаем своё предыдущее значение (не соседей — data hazard нет)
+    vec4 prev = vec4(0.0);
+    if      (uVCTLevel == 0) prev = imageLoad(uClipmapL0, storeTexel);
+    else if (uVCTLevel == 1) prev = imageLoad(uClipmapL1, storeTexel);
+    else                     prev = imageLoad(uClipmapL2, storeTexel);
+
+    // Экспоненциальное скользящее среднее: blend=0.1 → ~10 кадров до нового значения
+    // Солнце меняется медленно — рывков не будет
+    float blend = 0.1;
+    vec4  data  = mix(prev, vec4(radiance, opacity), blend);
 
     if      (uVCTLevel == 0) imageStore(uClipmapL0, storeTexel, data);
     else if (uVCTLevel == 1) imageStore(uClipmapL1, storeTexel, data);

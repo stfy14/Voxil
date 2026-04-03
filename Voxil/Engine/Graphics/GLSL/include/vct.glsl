@@ -84,8 +84,17 @@ vec4 VCT_Sample(vec3 pos, float coneDiam) {
     if (coneDiam < VCT_CELL_L1) {
         vec3 rel = pos - vec3(uVCTOriginL0) * VCT_CELL_L0;
         if (all(greaterThanEqual(rel, vec3(0.0))) && all(lessThan(rel, vec3(sizeL0)))) {
-            // fract() maps world position to [0,1] UV, exploiting GL_REPEAT toroidal storage
-            return texture(uVCTClipmapL0, fract(pos / sizeL0));
+            vec4 s0 = texture(uVCTClipmapL0, fract(pos / sizeL0));
+            // Blend к L1 когда coneDiam приближается к VCT_CELL_L1
+            float blendFactor = smoothstep(VCT_CELL_L1 * 0.5, VCT_CELL_L1, coneDiam);
+            if (blendFactor > 0.001) {
+                vec3 rel1 = pos - vec3(uVCTOriginL1) * VCT_CELL_L1;
+                if (all(greaterThanEqual(rel1, vec3(0.0))) && all(lessThan(rel1, vec3(sizeL1)))) {
+                    vec4 s1 = texture(uVCTClipmapL1, fract(pos / sizeL1));
+                    return mix(s0, s1, blendFactor);
+                }
+            }
+            return s0;
         }
     }
 
@@ -118,17 +127,16 @@ vec4 VCT_TraceCone(vec3 origin, vec3 dir, float startT, float maxDist) {
     float t    = startT;
 
     while (t < maxDist && accum.a < 0.95) {
-        // Cone diameter at distance t — grows as cone opens
         float diam = max(2.0 * VCT_TAN_HALF_ANGLE * t, VCT_CELL_L0);
-
         vec4 s = VCT_Sample(origin + dir * t, diam);
 
-        // Front-to-back alpha compositing
+        // Солнце убираем отсюда — оно теперь в клипмапе
+        // s.rgb уже содержит освещённый цвет поверхности
+
         float alpha = s.a * (1.0 - accum.a);
         accum.rgb  += s.rgb * alpha;
         accum.a    += alpha;
 
-        // Step forward by half the cone diameter (Nyquist-ish for this LOD)
         t += diam * 0.5;
     }
 
@@ -145,7 +153,7 @@ vec3 VCT_SkyColor(vec3 dir) {
     float sunsetF = clamp(1.0 - abs(sunH) * 5.0,  0.0, 1.0);
     
     // Поднимаем ночной ambient (было 0.05, стало 0.20), чтобы VCT конусы видели свет звезд
-    float ambient = mix(0.20, 0.50, dayF) * (1.0 + sunsetF * 0.3);
+    float ambient = mix(0.04, 0.45, dayF);
 
     // Даем ночному небу красивый синий оттенок
     vec3 skyColor = mix(
@@ -168,25 +176,35 @@ vec3 VCT_SkyColor(vec3 dir) {
 
 vec3 SampleGIVCT(vec3 worldPos, vec3 normal) {
     mat3  tbn     = VCT_GetTBN(normal);
-    float maxDist = float(uVCTClipmapSize) * VCT_CELL_L2; // ~2048m, limited by L2
-
-    // Push origin just off the surface to avoid self-occlusion.
-    // Use a fixed offset of half an L0 cell — enough to skip the surface voxel.
+    float maxDist = float(uVCTClipmapSize) * VCT_CELL_L2;
     vec3  origin  = worldPos + normal * (VCT_CELL_L0 * 0.6);
-
-    // Cones start 1 cell away to skip the voxel the surface sits in
     float startT  = VCT_CELL_L0;
+
+    // Проверка — есть ли небо над нами?
+    float skyAccess = 0.0;
+    {
+        float skyCheckDist = VCT_CELL_L0 * 24.0;
+        vec3  upDir        = vec3(0.0, 1.0, 0.0);
+        float accumulated  = 0.0;
+
+        for (float t = startT; t < skyCheckDist; t += VCT_CELL_L0) {
+            vec4 s = VCT_Sample(origin + upDir * t, VCT_CELL_L0);
+            accumulated += s.a * (1.0 - accumulated);
+            if (accumulated > 0.99) break;
+        }
+
+        skyAccess = 1.0 - smoothstep(0.1, 0.7, accumulated);
+    }
 
     vec3 irradiance = vec3(0.0);
 
     for (int i = 0; i < 6; i++) {
         vec3 coneDir = normalize(tbn * VCT_CONE_DIRS[i]);
+        vec4 result  = VCT_TraceCone(origin, coneDir, startT, maxDist);
 
-        vec4 result = VCT_TraceCone(origin, coneDir, startT, maxDist);
-
-        // Any remaining transparency sees the sky
-        float skyFraction = 1.0 - result.a;
-        if (skyFraction > 0.9 && coneDir.y > 0.0) {
+        // Небо только если снаружи И конус смотрит вверх
+        if (coneDir.y > 0.0) {
+            float skyFraction = (1.0 - result.a) * skyAccess;
             result.rgb += VCT_SkyColor(coneDir) * skyFraction;
         }
 
